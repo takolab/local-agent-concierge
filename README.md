@@ -53,7 +53,7 @@ Ollama / Google Calendar / GitHub
 
 * [x] Set up the development environment
 * [x] Run Ollama locally
-* [ ] Connect Hermes Agent to Ollama
+* [x] Connect Hermes Agent to Ollama
 * [ ] Create a Slack application
 * [ ] Implement the Slack Gateway
 * [ ] Add Google Calendar read access
@@ -64,9 +64,10 @@ Ollama / Google Calendar / GitHub
 
 ## Documentation
 
-- [Architecture](docs/architecture.md)
-- [Roadmap](docs/roadmap.md)
-- [Ollama setup](docs/setup/ollama.md)
+* [Architecture](docs/architecture.md)
+* [Roadmap](docs/roadmap.md)
+* [Ollama setup](docs/setup/ollama.md)
+* [Hermes Agent setup](docs/setup/hermes-agent.md)
 
 ## Initial Milestone
 
@@ -112,7 +113,10 @@ local-agent-concierge/
 ├── docker-compose.yml
 ├── docs/
 │   ├── architecture.md
-│   └── roadmap.md
+│   ├── roadmap.md
+│   └── setup/
+│       ├── ollama.md
+│       └── hermes-agent.md
 └── apps/
     └── slack-gateway/
 ```

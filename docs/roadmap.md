@@ -12,7 +12,7 @@ The project will be developed incrementally. Each milestone should produce a sma
 * [x] Define the initial system architecture
 * [x] Define the containerized development environment
 * [x] Run Ollama through Docker Compose
-* [ ] Connect Hermes Agent to Ollama
+* [x] Connect Hermes Agent to Ollama
 * [ ] Connect the system to Slack
 * [ ] Add Google Calendar integration
 * [ ] Add multi-agent orchestration
@@ -38,10 +38,10 @@ Each container should have a focused responsibility.
 
 Services should communicate through the internal Docker Compose network using service names as hostnames.
 
-For example, Hermes Agent should connect to Ollama using:
+For example, Hermes Agent connects to Ollama using the OpenAI-compatible base URL:
 
 ```text
-http://ollama:11434
+http://ollama:11434/v1
 ```
 
 It should not use:
@@ -52,16 +52,16 @@ http://localhost:11434
 
 Inside a container, `localhost` refers to that container itself rather than another Compose service.
 
-Services will be introduced incrementally. The first milestone starts with Ollama, and later milestones add Hermes Agent, the Slack Gateway, the Orchestrator, shared memory, and observability to the same Docker Compose application.
+Services are introduced incrementally. Milestone 1 established the containerized Ollama foundation. Milestone 2 added Hermes Agent to the same Docker Compose application and verified model connectivity and tool calling. Later milestones will add the Slack Gateway, the Orchestrator, shared memory, approval workflows, and observability.
 
 Persistent data should be stored in Docker volumes or ignored local directories instead of disposable container filesystems.
 
 The host environment should require as few dependencies as practical. Ideally, a developer should only need:
 
-* Git
-* Docker Engine
-* Docker Compose
-* NVIDIA Container Toolkit when GPU acceleration is used
+- Git
+- Docker Engine
+- Docker Compose
+- NVIDIA Container Toolkit when GPU acceleration is used
 
 ## Planned Container Architecture
 
@@ -89,18 +89,18 @@ This milestone establishes the shared containerization conventions that will lat
 
 ### Tasks
 
-* [ ] Define the Ollama service in `docker-compose.yml`
-* [ ] Define a shared Docker network
-* [ ] Create a persistent Docker volume for Ollama models
-* [ ] Expose the Ollama API to the local host
-* [ ] Add an Ollama health check
-* [ ] Validate the Docker Compose configuration
-* [ ] Start the Ollama container
-* [ ] Confirm that the container is healthy
-* [ ] Download a small test model
-* [ ] Send a test prompt to the model
-* [ ] Confirm whether GPU acceleration is available
-* [ ] Document the local Docker Compose commands
+* [x] Define the Ollama service in `docker-compose.yml`
+* [x] Define a shared Docker network
+* [x] Create a persistent Docker volume for Ollama models
+* [x] Expose the Ollama API to the local host
+* [x] Add an Ollama health check
+* [x] Validate the Docker Compose configuration
+* [x] Start the Ollama container
+* [x] Confirm that the container is healthy
+* [x] Download the initial Gemma 4 12B model
+* [x] Send a test prompt to the model
+* [x] Confirm that GPU acceleration is available
+* [x] Document the local Docker Compose commands
 
 ### Planned Flow
 
@@ -119,23 +119,14 @@ Local LLM response
 
 ### Completion Criteria
 
-This milestone is complete when:
+This milestone is complete because:
 
-1. `docker compose up -d` starts Ollama successfully.
+1. `docker compose up -d ollama` starts Ollama successfully.
 2. `docker compose ps` reports the service as healthy.
-3. Ollama retains downloaded models after the container is recreated.
+3. Ollama retains the downloaded model after the container is recreated.
 4. The Ollama API returns a model-generated response.
-
-Example request:
-
-```bash
-curl http://localhost:11434/api/generate \
-  -d '{
-    "model": "<model-name>",
-    "prompt": "Explain what a local LLM is in one sentence.",
-    "stream": false
-  }'
-```
+5. The model can use NVIDIA GPU acceleration.
+6. The effective context length can be inspected through `/api/ps`.
 
 ## Milestone 2: Containerized Hermes Agent Integration
 
@@ -145,20 +136,25 @@ Run Hermes Agent as a Docker container and connect it to the Ollama container th
 
 ### Tasks
 
-* [ ] Decide which Hermes Agent Docker image or build method to use
-* [ ] Add the Hermes Agent service to `docker-compose.yml`
-* [ ] Create a persistent volume for Hermes configuration and state
-* [ ] Configure the Ollama endpoint as `http://ollama:11434`
-* [ ] Configure the initial Ollama model
-* [ ] Add Hermes environment variables
-* [ ] Add a Hermes health check if supported
-* [ ] Configure Hermes to wait for Ollama readiness
-* [ ] Send a terminal-based request through Hermes Agent
-* [ ] Confirm that Hermes receives a response from Ollama
-* [ ] Confirm that Hermes state survives container recreation
-* [ ] Document the Hermes container setup
+* [x] Select the official Hermes Agent container image
+* [x] Add the Hermes Agent service to `docker-compose.yml`
+* [x] Create an ignored persistent bind mount for Hermes configuration and state
+* [x] Map the container user to the host UID and GID
+* [x] Attach Hermes Agent to the shared Docker network
+* [x] Configure Hermes Agent to wait for Ollama health
+* [x] Configure the Ollama base URL as `http://ollama:11434/v1`
+* [x] Configure Gemma 4 12B as a custom model provider
+* [x] Configure the Chat Completions API compatibility mode
+* [x] Verify the Ollama `/v1/models` endpoint from the Hermes container
+* [x] Send a terminal-based chat request through Hermes Agent
+* [x] Confirm that Hermes requests reach `/v1/chat/completions`
+* [x] Verify Terminal Tool Calling
+* [x] Verify that a tool side effect occurs only once
+* [x] Confirm that Hermes configuration survives container recreation
+* [x] Evaluate Hermes diagnostics and container supervision
+* [x] Document the Hermes container setup
 
-### Planned Flow
+### Verified Flow
 
 ```text
 Host terminal
@@ -166,21 +162,54 @@ Host terminal
   v
 Hermes Agent container
   |
+  | POST /v1/chat/completions
   v
 Ollama container
   |
   v
-Local LLM response
+gemma4:12b
+  |
+  v
+Hermes response
 ```
+
+### Verified Tool Calling
+
+```text
+User instruction
+  |
+  v
+Gemma 4 selects the Terminal Tool
+  |
+  v
+Hermes executes the command
+  |
+  v
+Tool result returns to Gemma 4
+  |
+  v
+Final response
+```
+
+A controlled file-writing test confirmed that the Terminal Tool side effect occurred exactly once.
+
+The final response formatting was inconsistent during one test, so sensitive or destructive tool operations will require validation, logging, and human approval in later milestones.
+
 
 ### Completion Criteria
 
-This milestone is complete when:
+This milestone is complete because:
 
-1. Hermes Agent runs as a Docker container.
-2. Hermes connects to Ollama using the Compose service name.
-3. A request sent through Hermes returns an Ollama-generated response.
-4. No Hermes-specific software needs to be installed directly on the host.
+1. Hermes Agent runs through the official Docker image.
+2. Hermes resolves Ollama using the Compose service hostname.
+3. Hermes lists `gemma4:12b` through the OpenAI-compatible API.
+4. A request sent through Hermes returns an Ollama-generated response.
+5. Ollama logs confirm requests to `/v1/chat/completions`.
+6. Hermes successfully invokes its Terminal Tool.
+7. A controlled file test confirms that the external side effect occurs once.
+8. Hermes configuration persists independently of the disposable container.
+9. No Hermes-specific software needs to be installed directly on the host.
+10. The setup and observed limitations are documented.
 
 ## Milestone 3: Containerized Slack Gateway
 
