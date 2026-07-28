@@ -10,8 +10,8 @@ The project will be developed incrementally. Each milestone should produce a sma
 * [x] Add the initial README
 * [x] Add the MIT License
 * [x] Define the initial system architecture
-* [ ] Define the containerized development environment
-* [ ] Run Ollama through Docker Compose
+* [x] Define the containerized development environment
+* [x] Run Ollama through Docker Compose
 * [ ] Connect Hermes Agent to Ollama
 * [ ] Connect the system to Slack
 * [ ] Add Google Calendar integration
