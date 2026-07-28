@@ -1,0 +1,45 @@
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Secrets and credentials
+credentials.json
+client_secret*.json
+token.json
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+
+# Node.js
+node_modules/
+dist/
+
+# Databases and application data
+data/
+memory/
+postgres-data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Ollama models
+models/
+ollama-data/
+
+# Logs and traces
+logs/
+traces/
+exports/
+
+# Editors and OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
