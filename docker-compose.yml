@@ -1,0 +1,32 @@
+services:
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+
+    gpus: all
+
+    environment:
+      OLLAMA_CONTEXT_LENGTH: "8192"
+
+    ports:
+      - "127.0.0.1:11434:11434"
+
+    volumes:
+      - ollama-data:/root/.ollama
+
+    networks:
+      - concierge-network
+
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+volumes:
+  ollama-data:
+
+networks:
+  concierge-network:
+    driver: bridge
