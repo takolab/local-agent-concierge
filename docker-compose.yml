@@ -49,6 +49,19 @@ services:
     networks:
       - concierge-network
 
+  slack-gateway:
+    build:
+      context: ./apps/slack-gateway
+
+    restart: unless-stopped
+
+    depends_on:
+      hermes-agent:
+        condition: service_started
+
+    networks:
+      - concierge-network
+
 volumes:
   ollama-data:
 

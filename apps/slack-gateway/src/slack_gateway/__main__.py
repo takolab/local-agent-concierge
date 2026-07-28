@@ -1,4 +1,5 @@
 import logging
+from threading import Event
 
 
 def main() -> None:
@@ -9,6 +10,8 @@ def main() -> None:
 
     logger = logging.getLogger("slack_gateway")
     logger.info("Slack Gateway initialized")
+
+    Event().wait()
 
 
 if __name__ == "__main__":
