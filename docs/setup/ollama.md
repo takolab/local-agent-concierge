@@ -15,7 +15,7 @@ gemma4:12b
 The initial context length is:
 
 ```text
-8192 tokens
+65536 tokens
 ```
 
 The local architecture is:
@@ -34,10 +34,16 @@ Ollama container
         +-- gemma4:12b
 ```
 
-Future containers, such as Hermes Agent, will connect to Ollama through the internal Docker Compose network:
+Hermes Agent and future application services connect to Ollama through the internal Docker Compose network:
 
 ```text
 http://ollama:11434
+```
+
+Services using the OpenAI-compatible API use the following base URL:
+
+```text
+http://ollama:11434/v1
 ```
 
 ## Prerequisites
@@ -96,7 +102,7 @@ The configuration includes:
 
 * The official Ollama container image
 * NVIDIA GPU access
-* An 8192-token context length
+* A configurable context length with a default of 65536 tokens
 * A localhost-only API port
 * A persistent Docker volume
 * A dedicated Docker network
@@ -132,10 +138,11 @@ List the defined services:
 docker compose config --services
 ```
 
-Expected output:
+The output should include:
 
 ```text
 ollama
+hermes-agent
 ```
 
 ## Pull the Ollama Container Image
@@ -289,7 +296,7 @@ curl -s http://localhost:11434/api/chat \
     ],
     "stream": false,
     "options": {
-      "num_ctx": 8192
+      "num_ctx": 65536
     }
   }' | python3 -m json.tool
 ```
@@ -322,9 +329,49 @@ curl -s http://localhost:11434/api/chat \
     ],
     "stream": false,
     "options": {
-      "num_ctx": 8192
+      "num_ctx": 65536
     }
   }' | jq -r '.message.content'
+```
+
+## Verify the Effective Context Length
+
+The Compose environment variable defines the default context length used when Ollama loads a model.
+
+After running a model request, inspect the loaded model:
+
+```bash
+curl -s http://localhost:11434/api/ps \
+  | python3 -m json.tool
+```
+
+The response should include:
+
+```json
+{
+  "context_length": 65536
+}
+```
+
+If jq is installed, display the relevant values only:
+
+```bash
+curl -s http://localhost:11434/api/ps \
+  | jq '.models[] | {
+      name,
+      context_length,
+      size_vram
+    }'
+```
+
+The model must be loaded before it appears in /api/ps.
+
+If the context length is not 65536, recreate the Ollama container after checking the resolved Compose configuration:
+
+```bash
+docker compose config | grep -A 2 OLLAMA_CONTEXT_LENGTH
+
+docker compose up -d --force-recreate ollama
 ```
 
 ## Check CPU and GPU Usage
@@ -559,12 +606,13 @@ docker compose exec ollama ollama ps
 
 Gemma 4 12B may not fit completely into GPUs with limited VRAM.
 
-Possible ways to reduce memory usage include:
+Possible ways to manage memory usage include:
 
-* Keep the context length at 8192
+* Keep the context length at 65536 rather than increasing it further
 * Avoid loading multiple models simultaneously
-* Stop unused applications that consume GPU memory
+* Stop unused applications that consume GPU or system memory
 * Allow Ollama to use a mixture of GPU VRAM and system RAM
+* Use a smaller model when lower latency is more important than model capability
 
 ### Remove the Model
 
@@ -600,7 +648,7 @@ The current port binding is:
 
 This permits access from the local host while avoiding an intentional bind to every network interface.
 
-Future Docker Compose services should access Ollama through the internal service hostname:
+Other Docker Compose services, including Hermes Agent, should access Ollama through the internal service hostname:
 
 ```text
 http://ollama:11434
@@ -619,4 +667,7 @@ Secrets, personal prompts, model outputs, and observability traces must not be c
 * [x] The Chat API returns a model response
 * [x] CPU and GPU usage can be inspected
 * [x] The model survives container recreation
-
+* [x] Ollama loads the model with a 65536-token context
+* [x] Hermes Agent can reach Ollama through the internal Docker network
+* [x] The OpenAI-compatible `/v1/models` endpoint lists Gemma 4 12B
+* [x] The OpenAI-compatible `/v1/chat/completions` endpoint accepts Hermes requests
