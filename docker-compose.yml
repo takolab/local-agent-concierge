@@ -6,7 +6,7 @@ services:
     gpus: all
 
     environment:
-      OLLAMA_CONTEXT_LENGTH: "8192"
+      OLLAMA_CONTEXT_LENGTH: "${OLLAMA_CONTEXT_LENGTH:-65536}"
 
     ports:
       - "127.0.0.1:11434:11434"
@@ -23,6 +23,28 @@ services:
       timeout: 5s
       retries: 5
       start_period: 15s
+
+  hermes-agent:
+    image: nousresearch/hermes-agent:latest
+    restart: unless-stopped
+
+    command:
+      - gateway
+      - run
+
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+    environment:
+      HERMES_UID: "${HERMES_UID:-1000}"
+      HERMES_GID: "${HERMES_GID:-1000}"
+
+    volumes:
+      - ./data/hermes:/opt/data
+
+    networks:
+      - concierge-network
 
 volumes:
   ollama-data:
