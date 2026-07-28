@@ -51,8 +51,8 @@ Ollama / Google Calendar / GitHub
 
 ## Project Status
 
-* [ ] Set up the development environment
-* [ ] Run Ollama locally
+* [x] Set up the development environment
+* [x] Run Ollama locally
 * [ ] Connect Hermes Agent to Ollama
 * [ ] Create a Slack application
 * [ ] Implement the Slack Gateway
@@ -61,6 +61,12 @@ Ollama / Google Calendar / GitHub
 * [ ] Implement multi-agent routing
 * [ ] Implement the shared memory service
 * [ ] Add Phoenix observability
+
+## Documentation
+
+- [Architecture](docs/architecture.md)
+- [Roadmap](docs/roadmap.md)
+- [Ollama setup](docs/setup/ollama.md)
 
 ## Initial Milestone
 
