@@ -54,8 +54,8 @@ Ollama / Google Calendar / GitHub
 * [x] Set up the development environment
 * [x] Run Ollama locally
 * [x] Connect Hermes Agent to Ollama
-* [ ] Create a Slack application
-* [ ] Implement the Slack Gateway
+* [x] Create a Slack application
+* [x] Implement the Slack Gateway
 * [ ] Add Google Calendar read access
 * [ ] Add a human approval workflow
 * [ ] Implement multi-agent routing
@@ -68,6 +68,7 @@ Ollama / Google Calendar / GitHub
 * [Roadmap](docs/roadmap.md)
 * [Ollama setup](docs/setup/ollama.md)
 * [Hermes Agent setup](docs/setup/hermes-agent.md)
+* [Slack Gateway setup](docs/setup/slack.md)
 
 ## Initial Milestone
 
@@ -116,7 +117,8 @@ local-agent-concierge/
 │   ├── roadmap.md
 │   └── setup/
 │       ├── ollama.md
-│       └── hermes-agent.md
+│       ├── hermes-agent.md
+│       └── slack.md
 └── apps/
     └── slack-gateway/
 ```

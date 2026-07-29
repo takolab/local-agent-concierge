@@ -13,7 +13,7 @@ The project will be developed incrementally. Each milestone should produce a sma
 * [x] Define the containerized development environment
 * [x] Run Ollama through Docker Compose
 * [x] Connect Hermes Agent to Ollama
-* [ ] Connect the system to Slack
+* [x] Connect the system to Slack
 * [ ] Add Google Calendar integration
 * [ ] Add multi-agent orchestration
 * [ ] Add shared memory
@@ -219,54 +219,61 @@ Run the Slack Gateway as a Docker container and allow Slack messages to reach He
 
 ### Tasks
 
-* [ ] Create a Slack application
-* [ ] Enable Slack Socket Mode
-* [ ] Configure the required Slack bot scopes
-* [ ] Configure the required Slack event subscriptions
-* [ ] Create the `apps/slack-gateway` application
-* [ ] Add a Dockerfile for the Slack Gateway
-* [ ] Add the Slack Gateway service to `docker-compose.yml`
-* [ ] Store Slack credentials in the local `.env` file
-* [ ] Read Slack credentials through environment variables
-* [ ] Establish the Socket Mode connection
-* [ ] Receive a Slack direct message
-* [ ] Normalize the Slack message into an internal request
-* [ ] Forward the request to Hermes Agent
-* [ ] Return the generated response to Slack
-* [ ] Preserve Slack thread information
-* [ ] Prevent duplicate Slack event processing
-* [ ] Add structured application logging
-* [ ] Document the Slack setup process
+* [x] Create a Slack application
+* [x] Enable Slack Socket Mode
+* [x] Configure the required Slack bot scopes
+* [x] Configure the required Slack event subscriptions
+* [x] Create the `apps/slack-gateway` application
+* [x] Add a Dockerfile for the Slack Gateway
+* [x] Add the Slack Gateway service to `docker-compose.yml`
+* [x] Store Slack credentials in the local `.env` file
+* [x] Read Slack credentials through environment variables
+* [x] Establish the Socket Mode connection
+* [x] Receive a Slack direct message
+* [x] Normalize the Slack message into an internal request
+* [x] Forward the request to Hermes Agent
+* [x] Return the generated response to Slack
+* [x] Preserve Slack thread information
+* [x] Prevent duplicate Slack event processing
+* [x] Add structured application logging
+* [x] Document the Slack setup process
 
-### Planned Flow
+### Verified Flow
 
 ```text
-Slack
+Slack direct message
   |
   | Socket Mode
   v
 Slack Gateway container
   |
+  | POST /v1/responses
   v
 Hermes Agent container
   |
+  | POST /v1/chat/completions
   v
 Ollama container
   |
   v
-Slack response
+Slack thread response
 ```
 
 ### Completion Criteria
 
-This milestone is complete when:
+This milestone is complete because:
 
 1. A direct message can be sent to the Slack application.
-2. The Slack Gateway receives the message.
-3. Hermes Agent processes the request.
-4. Ollama generates the response.
-5. The response appears in the correct Slack conversation or thread.
-6. The Slack Gateway does not need to expose a public HTTP endpoint.
+2. The Slack Gateway receives messages through Socket Mode.
+3. Hermes Agent processes each normalized request.
+4. Ollama generates the model response.
+5. The response appears in the correct Slack thread.
+6. Follow-up messages in the same thread reuse the same Hermes conversation.
+7. A temporary processing status is displayed and removed after completion.
+8. Gateway-level failures are reported to the Slack user.
+9. Duplicate Slack event IDs are ignored by the Gateway process.
+10. The Slack Gateway does not expose a public HTTP endpoint.
+11. The Slack setup and known limitations are documented.
 
 ## Milestone 4: Google Calendar Read Access
 

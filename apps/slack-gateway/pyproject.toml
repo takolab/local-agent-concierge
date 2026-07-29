@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-agent-concierge-slack-gateway"
+version = "0.1.0"
+description = "Slack gateway for Local Agent Concierge"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.28.1,<1.0",
+    "slack-bolt>=1.30.0,<2.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
