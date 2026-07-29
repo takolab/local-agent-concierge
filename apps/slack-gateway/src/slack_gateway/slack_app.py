@@ -7,12 +7,14 @@ from slack_sdk.errors import SlackApiError
 from slack_sdk.web import WebClient
 
 from slack_gateway.config import Settings
+from slack_gateway.event_deduplicator import EventDeduplicator
 from slack_gateway.hermes_client import HermesClient
 
 
 def create_slack_app(
     settings: Settings,
     hermes_client: HermesClient,
+    event_deduplicator: EventDeduplicator,
 ) -> App:
     app = App(token=settings.slack_bot_token)
 
@@ -28,6 +30,7 @@ def create_slack_app(
         if event.get("bot_id") or event.get("subtype"):
             return
 
+        event_id = body.get("event_id")
         text = event.get("text")
         workspace_id = body.get("team_id")
         channel_id = event.get("channel")
@@ -35,10 +38,21 @@ def create_slack_app(
         message_ts = event.get("ts")
         thread_ts = event.get("thread_ts")
 
+        if not isinstance(event_id, str) or not event_id:
+            logger.warning(
+                "Ignoring Slack message without a valid event ID "
+                "(channel=%s user=%s ts=%s)",
+                channel_id,
+                user_id,
+                message_ts,
+            )
+            return
+
         if not isinstance(text, str) or not text.strip():
             logger.info(
                 "Ignoring Slack message without text "
-                "(channel=%s user=%s ts=%s)",
+                "(event_id=%s channel=%s user=%s ts=%s)",
+                event_id,
                 channel_id,
                 user_id,
                 message_ts,
@@ -55,7 +69,8 @@ def create_slack_app(
         ):
             logger.warning(
                 "Ignoring Slack message with incomplete routing data "
-                "(workspace=%s channel=%s ts=%s)",
+                "(event_id=%s workspace=%s channel=%s ts=%s)",
+                event_id,
                 workspace_id,
                 channel_id,
                 message_ts,
@@ -67,11 +82,22 @@ def create_slack_app(
         ):
             logger.warning(
                 "Ignoring Slack message with invalid thread timestamp "
-                "(channel=%s user=%s ts=%s thread_ts=%s)",
+                "(event_id=%s channel=%s user=%s ts=%s thread_ts=%s)",
+                event_id,
                 channel_id,
                 user_id,
                 message_ts,
                 thread_ts,
+            )
+            return
+
+        if not event_deduplicator.claim(event_id):
+            logger.info(
+                "Ignoring duplicate Slack event "
+                "(event_id=%s channel=%s ts=%s)",
+                event_id,
+                channel_id,
+                message_ts,
             )
             return
 
@@ -85,7 +111,8 @@ def create_slack_app(
 
         logger.info(
             "Forwarding Slack message to Hermes "
-            "(channel=%s user=%s ts=%s conversation=%s)",
+            "(event_id=%s channel=%s user=%s ts=%s conversation=%s)",
+            event_id,
             channel_id,
             user_id,
             message_ts,
@@ -100,7 +127,8 @@ def create_slack_app(
         except RuntimeError:
             logger.exception(
                 "Failed to process Slack message with Hermes "
-                "(channel=%s user=%s ts=%s)",
+                "(event_id=%s channel=%s user=%s ts=%s)",
+                event_id,
                 channel_id,
                 user_id,
                 message_ts,
@@ -109,7 +137,8 @@ def create_slack_app(
 
         logger.info(
             "Hermes response received "
-            "(channel=%s ts=%s response_chars=%d)",
+            "(event_id=%s channel=%s ts=%s response_chars=%d)",
+            event_id,
             channel_id,
             message_ts,
             len(response_text),
@@ -124,7 +153,8 @@ def create_slack_app(
         except SlackApiError:
             logger.exception(
                 "Failed to post Hermes response to Slack "
-                "(channel=%s ts=%s thread_ts=%s)",
+                "(event_id=%s channel=%s ts=%s thread_ts=%s)",
+                event_id,
                 channel_id,
                 message_ts,
                 root_thread_ts,
@@ -133,7 +163,8 @@ def create_slack_app(
 
         logger.info(
             "Hermes response posted to Slack "
-            "(channel=%s ts=%s thread_ts=%s)",
+            "(event_id=%s channel=%s ts=%s thread_ts=%s)",
+            event_id,
             channel_id,
             message_ts,
             root_thread_ts,
@@ -147,10 +178,12 @@ def run_socket_mode(settings: Settings) -> None:
         base_url=settings.hermes_api_base_url,
         api_key=settings.hermes_api_server_key,
     )
+    event_deduplicator = EventDeduplicator()
 
     app = create_slack_app(
         settings=settings,
         hermes_client=hermes_client,
+        event_deduplicator=event_deduplicator,
     )
 
     handler = SocketModeHandler(
