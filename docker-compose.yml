@@ -59,6 +59,12 @@ services:
       hermes-agent:
         condition: service_started
 
+    environment:
+      SLACK_BOT_TOKEN: "${SLACK_BOT_TOKEN:?SLACK_BOT_TOKEN must be set in .env}"
+      SLACK_APP_TOKEN: "${SLACK_APP_TOKEN:?SLACK_APP_TOKEN must be set in .env}"
+      HERMES_API_BASE_URL: "http://hermes-agent:8642"
+      HERMES_API_SERVER_KEY: "${HERMES_API_SERVER_KEY:?HERMES_API_SERVER_KEY must be set in .env}"
+
     networks:
       - concierge-network
 
