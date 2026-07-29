@@ -3,6 +3,8 @@ from typing import Any
 
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
+from slack_sdk.errors import SlackApiError
+from slack_sdk.web import WebClient
 
 from slack_gateway.config import Settings
 from slack_gateway.hermes_client import HermesClient
@@ -18,6 +20,7 @@ def create_slack_app(
     def handle_message(
         event: dict[str, Any],
         body: dict[str, Any],
+        client: WebClient,
         logger: logging.Logger,
     ) -> None:
         # Ignore messages posted by bots and events with subtypes,
@@ -30,6 +33,7 @@ def create_slack_app(
         channel_id = event.get("channel")
         user_id = event.get("user")
         message_ts = event.get("ts")
+        thread_ts = event.get("thread_ts")
 
         if not isinstance(text, str) or not text.strip():
             logger.info(
@@ -58,9 +62,22 @@ def create_slack_app(
             )
             return
 
+        if thread_ts is not None and (
+            not isinstance(thread_ts, str) or not thread_ts
+        ):
+            logger.warning(
+                "Ignoring Slack message with invalid thread timestamp "
+                "(channel=%s user=%s ts=%s thread_ts=%s)",
+                channel_id,
+                user_id,
+                message_ts,
+                thread_ts,
+            )
+            return
+
         # Use the parent message timestamp for thread replies.
         # For a top-level DM, use the message timestamp as the thread root.
-        root_thread_ts = event.get("thread_ts") or message_ts
+        root_thread_ts = thread_ts or message_ts
 
         conversation = (
             f"slack:{workspace_id}:{channel_id}:{root_thread_ts}"
@@ -96,6 +113,30 @@ def create_slack_app(
             channel_id,
             message_ts,
             len(response_text),
+        )
+
+        try:
+            client.chat_postMessage(
+                channel=channel_id,
+                thread_ts=root_thread_ts,
+                text=response_text,
+            )
+        except SlackApiError:
+            logger.exception(
+                "Failed to post Hermes response to Slack "
+                "(channel=%s ts=%s thread_ts=%s)",
+                channel_id,
+                message_ts,
+                root_thread_ts,
+            )
+            return
+
+        logger.info(
+            "Hermes response posted to Slack "
+            "(channel=%s ts=%s thread_ts=%s)",
+            channel_id,
+            message_ts,
+            root_thread_ts,
         )
 
     return app
