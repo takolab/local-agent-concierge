@@ -1,7 +1,7 @@
 import logging
-from threading import Event
 
 from slack_gateway.config import load_settings
+from slack_gateway.slack_app import run_socket_mode
 
 
 def main() -> None:
@@ -14,11 +14,12 @@ def main() -> None:
     settings = load_settings()
 
     logger.info(
-        "Slack Gateway configuration loaded (Hermes API: %s)",
+        "Starting Slack Gateway "
+        "(Hermes API: %s)",
         settings.hermes_api_base_url,
     )
 
-    Event().wait()
+    run_socket_mode(settings)
 
 
 if __name__ == "__main__":
