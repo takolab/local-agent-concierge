@@ -56,7 +56,7 @@ Ollama / Google Calendar / GitHub
 * [x] Connect Hermes Agent to Ollama
 * [x] Create a Slack application
 * [x] Implement the Slack Gateway
-* [ ] Add Google Calendar read access
+* [x] Add Google Calendar read access
 * [ ] Add a human approval workflow
 * [ ] Implement multi-agent routing
 * [ ] Implement the shared memory service
@@ -69,6 +69,7 @@ Ollama / Google Calendar / GitHub
 * [Ollama setup](docs/setup/ollama.md)
 * [Hermes Agent setup](docs/setup/hermes-agent.md)
 * [Slack Gateway setup](docs/setup/slack.md)
+* [Google Calendar setup](docs/setup/google-calendar.md)
 
 ## Initial Milestone
 
@@ -87,7 +88,7 @@ Ollama
 Slack response
 ```
 
-Google Calendar integration, shared memory, and multi-agent routing will be added after the initial communication flow is working.
+Google Calendar read access is now implemented through a dedicated MCP service. Shared memory and multi-agent routing will be added in later milestones.
 
 ## Security
 
@@ -118,9 +119,12 @@ local-agent-concierge/
 │   └── setup/
 │       ├── ollama.md
 │       ├── hermes-agent.md
-│       └── slack.md
-└── apps/
-    └── slack-gateway/
+│       ├── slack.md
+│       └── google-calendar.md
+├── apps/
+│   └── slack-gateway/
+└── mcp/
+    └── google-calendar/
 ```
 
 The repository structure will expand as additional agents and services are implemented.
