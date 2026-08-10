@@ -16,6 +16,12 @@ __pycache__/
 .venv/
 venv/
 .pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+build/
+*.egg-info/
 
 # Node.js
 node_modules/

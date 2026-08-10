@@ -300,7 +300,7 @@ The Google Calendar integration should run as a containerized tool service or as
 * [x] Implement free-time and availability checks
 * [x] Define Calendar tool permissions
 * [x] Add the Calendar tool to the containerized environment
-* [ ] Add tests using synthetic calendar data
+* [x] Add tests using synthetic calendar data
 * [x] Document the Google Calendar setup
 
 ### Verified Flow
