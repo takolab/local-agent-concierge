@@ -36,6 +36,9 @@ services:
       ollama:
         condition: service_healthy
 
+      google-calendar-mcp:
+        condition: service_healthy
+
     environment:
       HERMES_UID: "${HERMES_UID:-1000}"
       HERMES_GID: "${HERMES_GID:-1000}"
@@ -67,6 +70,34 @@ services:
 
     networks:
       - concierge-network
+
+  google-calendar-mcp:
+    build:
+      context: ./mcp/google-calendar
+
+    restart: unless-stopped
+
+    volumes:
+      - ./data/google-calendar:/data/google-calendar
+
+    networks:
+      - concierge-network
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import socket;
+          socket.create_connection(
+              ("127.0.0.1", 8000),
+              timeout=2,
+          ).close()
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
 
 volumes:
   ollama-data:

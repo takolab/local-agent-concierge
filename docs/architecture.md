@@ -56,7 +56,7 @@ This milestone proves that:
 - Hermes Agent can use an Ollama-hosted model.
 - The final response can be returned to Slack.
 
-Google Calendar access, shared memory, multi-agent routing, and approval workflows will be added after this path is stable.
+Google Calendar read access has now been added through a dedicated MCP service. Shared memory, multi-agent routing, and approval workflows will be added in later milestones.
 
 ## Target Architecture
 
@@ -231,21 +231,29 @@ Conceptually:
 Agent -> Tool interface -> External service
 ```
 
-Tools may initially be exposed through ordinary HTTP APIs. MCP-compatible interfaces can be added when they provide a clear interoperability benefit.
+External tool services may be exposed through MCP when appropriate.
+
+The Google Calendar integration currently runs as a dedicated MCP service and is connected directly to Hermes Agent through the internal Docker Compose network.
 
 ## Google Calendar Flow
 
-Read operations can run automatically when the agent has `calendar.read` permission.
+The current read-only Google Calendar flow is:
 
 ```text
 Slack request
-  -> Concierge Orchestrator
-  -> Calendar Agent
-  -> Calendar read tool
+  -> Slack Gateway
+  -> Hermes Agent
+  -> Google Calendar MCP
   -> Google Calendar API
-  -> Calendar Agent
+  -> Hermes Agent
   -> Slack response
 ```
+
+The Google Calendar MCP service currently supports event queries and availability checks.
+
+Calendar data remains authoritative in Google Calendar and is retrieved when requested rather than copied into long-term memory.
+
+The future multi-agent architecture may place an Orchestrator and Calendar Agent between Slack and the Calendar tool.
 
 Write operations require explicit approval.
 

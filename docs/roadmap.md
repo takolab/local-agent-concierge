@@ -14,7 +14,7 @@ The project will be developed incrementally. Each milestone should produce a sma
 * [x] Run Ollama through Docker Compose
 * [x] Connect Hermes Agent to Ollama
 * [x] Connect the system to Slack
-* [ ] Add Google Calendar integration
+* [x] Add Google Calendar integration
 * [ ] Add multi-agent orchestration
 * [ ] Add shared memory
 * [ ] Add observability and evaluations
@@ -23,11 +23,12 @@ The project will be developed incrementally. Each milestone should produce a sma
 
 All application services should run as separate Docker containers and be managed through Docker Compose.
 
-Planned containerized services include:
+Planned and implemented containerized services include:
 
 * Ollama
 * Hermes Agent
 * Slack Gateway
+* Google Calendar MCP
 * Concierge Orchestrator
 * Memory Service
 * Approval Service
@@ -70,6 +71,7 @@ Docker Compose
 ├── ollama
 ├── hermes-agent
 ├── slack-gateway
+├── google-calendar-mcp
 ├── orchestrator
 ├── approval-service
 ├── memory-service
@@ -285,23 +287,23 @@ The Google Calendar integration should run as a containerized tool service or as
 
 ### Tasks
 
-* [ ] Create a Google Cloud project
-* [ ] Enable the Google Calendar API
-* [ ] Configure the OAuth consent screen
-* [ ] Create OAuth client credentials
-* [ ] Define the initial read-only OAuth scopes
-* [ ] Implement the OAuth authorization flow
-* [ ] Store OAuth credentials outside the Git repository
-* [ ] Store access and refresh tokens in an ignored or encrypted location
-* [ ] Implement event-listing functionality
-* [ ] Implement upcoming-event queries
-* [ ] Implement free-time and availability checks
-* [ ] Define Calendar tool permissions
-* [ ] Add the Calendar tool to the containerized environment
-* [ ] Add tests using synthetic calendar data
-* [ ] Document the Google Calendar setup
+* [x] Create a Google Cloud project
+* [x] Enable the Google Calendar API
+* [x] Configure the OAuth consent screen
+* [x] Create OAuth client credentials
+* [x] Define the initial read-only OAuth scopes
+* [x] Implement the OAuth authorization flow
+* [x] Store OAuth credentials outside the Git repository
+* [x] Store access and refresh tokens in an ignored or encrypted location
+* [x] Implement event-listing functionality
+* [x] Implement upcoming-event queries
+* [x] Implement free-time and availability checks
+* [x] Define Calendar tool permissions
+* [x] Add the Calendar tool to the containerized environment
+* [x] Add tests using synthetic calendar data
+* [x] Document the Google Calendar setup
 
-### Planned Flow
+### Verified Flow
 
 ```text
 Slack
@@ -312,8 +314,9 @@ Slack Gateway
   v
 Hermes Agent
   |
+  | MCP
   v
-Google Calendar tool
+Google Calendar MCP
   |
   v
 Google Calendar API
@@ -321,7 +324,7 @@ Google Calendar API
 
 ### Completion Criteria
 
-This milestone is complete when the concierge can answer questions such as:
+The end-to-end Calendar read path has been verified with questions such as:
 
 ```text
 What is my next meeting?
