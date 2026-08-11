@@ -1,0 +1,39 @@
+name: Python tests
+
+on:
+  pull_request:
+    branches:
+      - master
+
+  push:
+    branches:
+      - master
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    env:
+      HERMES_API_SERVER_KEY: test
+      SLACK_BOT_TOKEN: test
+      SLACK_APP_TOKEN: test
+
+    steps:
+      - name: Show Docker versions
+        run: |
+          docker --version
+          docker compose version
+
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Build containers
+        run: docker compose --profile test build
+
+      - name: Run Google Calendar tests
+        run: docker compose --profile test run --rm google-calendar-mcp-test
