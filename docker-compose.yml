@@ -74,6 +74,7 @@ services:
   google-calendar-mcp:
     build:
       context: ./mcp/google-calendar
+      target: runtime
 
     restart: unless-stopped
 
@@ -98,6 +99,14 @@ services:
       timeout: 3s
       retries: 5
       start_period: 5s
+
+  google-calendar-mcp-test:
+    profiles:
+      - test
+
+    build:
+      context: ./mcp/google-calendar
+      target: test
 
 volumes:
   ollama-data:
