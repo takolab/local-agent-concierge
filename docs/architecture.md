@@ -27,7 +27,11 @@ The system follows these principles:
    Agents share only the memories they are allowed to access. Conversation history, long-term memory, task state, and external service data are treated separately.
 
 7. **Observable agent activity**  
-   Agent routing, model calls, tool calls, latency, and failures should be traceable through OpenTelemetry and Phoenix.
+   Agent routing, model calls, tool calls, latency, and failures should be traceable through OpenTelemetry.
+
+   Application services should export telemetry through a shared OpenTelemetry Collector so that observability backends can be replaced or compared without changing application instrumentation.
+
+   Phoenix and MLflow will initially be evaluated as parallel observability backends.
 
 ## Initial Milestone
 
@@ -115,8 +119,8 @@ Google Calendar read access has now been added through a dedicated MCP service. 
 | Local Infrastructure                   |
 |                                        |
 | Ollama                                 |
-| Phoenix                                |
-| OpenTelemetry                          |
+| OpenTelemetry Collector                |
+| Phoenix / MLflow                       |
 | Docker Compose                         |
 +----------------------------------------+
 ```
@@ -408,7 +412,7 @@ Sensitive data includes:
 - Calendar event data
 - Slack message history
 - Memory databases
-- Phoenix traces containing personal information
+- Phoenix or MLflow traces containing personal information
 - Private keys
 
 Public configuration should use placeholders in `.env.example`. Actual values should be stored in an ignored local `.env` file or a dedicated secret manager.
@@ -419,7 +423,42 @@ Agents should receive the minimum permissions required for each task. For exampl
 
 A single Slack request should be represented as one distributed trace.
 
+The initial observability architecture follows a backend-neutral OpenTelemetry design.
+
+```text
+Application Services
+        |
+        | OTLP
+        v
+OpenTelemetry Collector
+        |
+        +------> Phoenix
+        |
+        +------> MLflow
+```
+
+Application services should not depend directly on Phoenix or MLflow during the initial observability experiment.
+
+OpenTelemetry is the application-facing observability contract.
+
+The OpenTelemetry Collector is responsible for receiving telemetry and routing equivalent trace data to the configured observability backends.
+
+Phoenix and MLflow will initially run in parallel so their debugging, visualization, filtering, evaluation, experiment-management, and operational characteristics can be compared using representative workloads.
+
 Example trace structure:
+
+```text
+Slack event received
+  -> Request normalized
+  -> Hermes request
+  -> Tool call
+  -> Google Calendar MCP
+  -> External API request
+  -> Agent response generated
+  -> Slack response delivered
+```
+
+As additional components are introduced, the trace may expand to include:
 
 ```text
 Slack event received
@@ -428,6 +467,7 @@ Slack event received
   -> Memory retrieved
   -> Ollama model call
   -> Tool call
+  -> Approval requested
   -> External API request
   -> Agent response generated
   -> Slack response delivered
@@ -445,7 +485,9 @@ Useful telemetry includes:
 - Error type
 - Final task status
 
-Personal message content and credentials must be redacted before traces are exported or shared.
+Personal message content, credentials, OAuth tokens, and other sensitive information must be redacted before traces are exported.
+
+The initial Phoenix and MLflow comparison should use backend-neutral OpenTelemetry instrumentation wherever practical. Backend-specific instrumentation may be evaluated separately after the shared tracing baseline has been established.
 
 ## Deployment Model
 
@@ -460,7 +502,9 @@ hermes-agent
 ollama
 memory-service
 postgres
+otel-collector
 phoenix
+mlflow
 ```
 
 Not every service needs to exist in the first milestone. Components should be introduced incrementally.
@@ -497,28 +541,48 @@ Slack -> Hermes Agent -> Ollama -> Slack
 Concierge -> Calendar tool -> Google Calendar
 ```
 
-### Phase 3: Human Approval
+### Phase 3: Observability Foundation
+
+```text
+Application services
+        |
+        v
+OpenTelemetry Collector
+   |             |
+   v             v
+Phoenix        MLflow
+```
+
+This phase establishes backend-neutral tracing and compares Phoenix and MLflow using equivalent representative workloads.
+
+### Phase 4: Human Approval
 
 ```text
 Event proposal -> Slack approval -> Calendar write
 ```
 
-### Phase 4: Multi-Agent Routing
+### Phase 5: Multi-Agent Routing
 
 ```text
 Slack -> Orchestrator -> Specialized agent
 ```
 
-### Phase 5: Shared Memory
+### Phase 6: Shared Memory
 
 ```text
 Agent -> Memory Service -> PostgreSQL and pgvector
 ```
 
-### Phase 6: Observability and Evaluation
+### Phase 7: Extended Observability and Evaluation
 
 ```text
-OpenTelemetry -> Phoenix
+Application services
+        |
+        v
+OpenTelemetry Collector
+        |
+        v
+Selected observability backend or backends
 ```
 
 ## Non-Goals for the Initial Version
@@ -544,4 +608,5 @@ The following decisions will be documented as the implementation progresses:
 - PostgreSQL and pgvector schema
 - Approval token design
 - OpenTelemetry redaction strategy
+- Observability backend selection after the Phoenix and MLflow comparison
 - Authentication between internal services

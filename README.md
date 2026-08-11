@@ -47,7 +47,7 @@ Ollama / Google Calendar / GitHub
 * Share selected memories between agents
 * Integrate with services such as Google Calendar and GitHub
 * Require human approval for sensitive actions
-* Observe agent activity with OpenTelemetry and Phoenix
+* Observe agent activity with OpenTelemetry and compare Phoenix and MLflow as observability backends
 
 ## Project Status
 
@@ -57,10 +57,11 @@ Ollama / Google Calendar / GitHub
 * [x] Create a Slack application
 * [x] Implement the Slack Gateway
 * [x] Add Google Calendar read access
+* [ ] Add OpenTelemetry observability
+* [ ] Compare Phoenix and MLflow using shared traces
 * [ ] Add a human approval workflow
 * [ ] Implement multi-agent routing
 * [ ] Implement the shared memory service
-* [ ] Add Phoenix observability
 
 ## Documentation
 
