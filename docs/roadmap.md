@@ -15,9 +15,12 @@ The project will be developed incrementally. Each milestone should produce a sma
 * [x] Connect Hermes Agent to Ollama
 * [x] Connect the system to Slack
 * [x] Add Google Calendar integration
+* [ ] Add observability foundation
+* [ ] Compare Phoenix and MLflow using shared OpenTelemetry traces
+* [ ] Add human approval for sensitive actions
 * [ ] Add multi-agent orchestration
 * [ ] Add shared memory
-* [ ] Add observability and evaluations
+* [ ] Add extended observability and evaluations
 
 ## Containerization Strategy
 
@@ -29,11 +32,13 @@ Planned and implemented containerized services include:
 * Hermes Agent
 * Slack Gateway
 * Google Calendar MCP
+* OpenTelemetry Collector
+* Phoenix
+* MLflow
 * Concierge Orchestrator
 * Memory Service
 * Approval Service
 * PostgreSQL
-* Phoenix
 
 Each container should have a focused responsibility.
 
@@ -72,11 +77,13 @@ Docker Compose
 ├── hermes-agent
 ├── slack-gateway
 ├── google-calendar-mcp
+├── otel-collector
+├── phoenix
+├── mlflow
 ├── orchestrator
 ├── approval-service
 ├── memory-service
-├── postgres
-└── phoenix
+└── postgres
 ```
 
 The initial implementation will not start all of these containers at once. Each service will be added after its dependencies have been tested.
@@ -336,7 +343,125 @@ Do I have a two-hour free slot this week?
 
 Calendar data must be retrieved from Google Calendar rather than from long-term agent memory.
 
-## Milestone 5: Human Approval for Calendar Writes
+## Milestone 5: Observability Foundation and Backend Comparison
+
+### Goal
+
+Establish a vendor-neutral observability foundation using OpenTelemetry and compare Phoenix and MLflow against the same agent workloads.
+
+Application services should export traces to a shared OpenTelemetry Collector rather than integrating directly with a specific observability backend.
+
+The Collector will fan out the same trace stream to both Phoenix and MLflow so that the two platforms can be evaluated under equivalent workloads.
+
+### Planned Architecture
+
+```text
+Application Services
+        |
+        | OTLP
+        v
+OpenTelemetry Collector
+        |
+        +------> Phoenix
+        |
+        +------> MLflow
+```
+
+The initial experiment follows Pattern A:
+
+```text
+App
+ |
+ | OpenTelemetry
+ v
+OpenTelemetry Collector
+ |                 |
+ v                 v
+Phoenix          MLflow
+```
+
+### Principles
+
+* Application instrumentation should remain backend-neutral.
+* OpenTelemetry is the common tracing interface.
+* Application services should export traces to the OpenTelemetry Collector.
+* Phoenix and MLflow should receive equivalent traces whenever practical.
+* Backend-specific instrumentation should not be introduced during the initial comparison.
+* Sensitive Slack messages, credentials, OAuth tokens, and personal calendar data should not be exported by default.
+
+### Tasks
+
+* [ ] Add an OpenTelemetry Collector service
+* [ ] Add a Phoenix service
+* [ ] Add an MLflow Tracking Server service
+* [ ] Add persistent storage where required
+* [ ] Add health checks for the observability services
+* [ ] Configure the Collector to receive OTLP traces
+* [ ] Configure the Collector to export traces to Phoenix
+* [ ] Configure the Collector to export traces to MLflow
+* [ ] Add OpenTelemetry instrumentation to the Slack Gateway
+* [ ] Add OpenTelemetry instrumentation to the Google Calendar MCP service
+* [ ] Trace requests from the Slack Gateway to Hermes Agent
+* [ ] Propagate trace identifiers between instrumented services
+* [ ] Record latency and error information
+* [ ] Redact secrets and personal information
+* [ ] Verify that the same workload can be inspected in Phoenix and MLflow
+* [ ] Compare trace visualization and debugging workflows
+* [ ] Compare search and filtering capabilities
+* [ ] Compare latency and error analysis
+* [ ] Compare tool-call representation
+* [ ] Compare local deployment and resource usage
+* [ ] Document the comparison results
+
+### Initial Trace Scope
+
+```text
+concierge.request
+|
++-- slack.receive
+|
++-- hermes.request
+|
++-- calendar.mcp
+|   |
+|   +-- google-calendar.api
+|
++-- slack.response
+```
+
+The exact span hierarchy may evolve as Hermes Agent instrumentation and distributed trace propagation are explored.
+
+### Comparison Criteria
+
+Phoenix and MLflow should initially be compared on:
+
+* Trace visualization
+* Distributed trace navigation
+* Search and filtering
+* Error investigation
+* Latency analysis
+* Tool-call representation
+* Agent-oriented metadata
+* Local deployment complexity
+* Resource usage
+* Evaluation capabilities
+* Experiment management
+* OpenTelemetry interoperability
+
+### Completion Criteria
+
+This milestone is complete when:
+
+1. The OpenTelemetry Collector runs as the common trace ingestion point for instrumented application services.
+2. Phoenix receives traces from the Collector.
+3. MLflow receives traces from the Collector.
+4. Representative Slack and Calendar workloads can be inspected in both observability backends.
+5. Calendar-related requests expose enough spans to identify latency and failures.
+6. Sensitive credentials and personal data are not exported unintentionally.
+7. Phoenix and MLflow have been compared using equivalent representative workloads.
+8. The comparison results and the next observability decision are documented.
+
+## Milestone 6: Human Approval for Calendar Writes
 
 ### Goal
 
@@ -395,7 +520,7 @@ This milestone is complete when the system can:
 5. Create the event only after valid approval.
 6. Report the final result back to Slack.
 
-## Milestone 6: Containerized Concierge Orchestrator
+## Milestone 7: Containerized Concierge Orchestrator
 
 ### Goal
 
@@ -460,7 +585,7 @@ This milestone is complete when:
 4. A custom Agent can be added without changing the Slack integration.
 5. Hermes Agent is treated as one Agent implementation rather than the entire system.
 
-## Milestone 7: Containerized Shared Memory
+## Milestone 8: Containerized Shared Memory
 
 ### Goal
 
@@ -527,25 +652,22 @@ This milestone is complete when:
 * Memories can expire or be deleted.
 * Current external data is still retrieved from its authoritative source.
 
-## Milestone 8: Containerized Observability
+## Milestone 9: Extended Observability
 
 ### Goal
 
-Trace model calls, agent decisions, memory retrieval, tool usage, and external API requests.
+Extend the observability foundation introduced in Milestone 5 across the Orchestrator, Agents, Memory Service, Approval Service, and future tool integrations.
 
-Phoenix should run as a Docker container and receive OpenTelemetry data from the other services.
+The backend strategy for this milestone should follow the results of the Phoenix and MLflow comparison performed in Milestone 5.
 
 ### Tasks
 
-* [ ] Add the Phoenix service to `docker-compose.yml`
-* [ ] Create persistent Phoenix storage if required
-* [ ] Add Phoenix health checks
-* [ ] Add OpenTelemetry instrumentation to the Slack Gateway
 * [ ] Add OpenTelemetry instrumentation to the Orchestrator
 * [ ] Add OpenTelemetry instrumentation to Agent calls
 * [ ] Add OpenTelemetry instrumentation to the Memory Service
-* [ ] Add OpenTelemetry instrumentation to tool calls
-* [ ] Create one trace for each Slack request
+* [ ] Add OpenTelemetry instrumentation to the Approval Service
+* [ ] Add OpenTelemetry instrumentation to additional tool calls
+* [ ] Create one distributed trace for each Slack request
 * [ ] Add spans for model calls
 * [ ] Add spans for agent routing
 * [ ] Add spans for memory retrieval
@@ -553,8 +675,8 @@ Phoenix should run as a Docker container and receive OpenTelemetry data from the
 * [ ] Add spans for external API requests
 * [ ] Record latency and error information
 * [ ] Propagate trace identifiers between containers
-* [ ] Redact secrets and personal information
-* [ ] Consider using a Docker Compose observability profile
+* [ ] Enforce telemetry redaction rules
+* [ ] Decide whether to retain both Phoenix and MLflow or standardize on one backend
 * [ ] Document the tracing model
 
 ### Planned Flow
@@ -567,7 +689,10 @@ Application containers
   |
   | OpenTelemetry
   v
-Phoenix container
+OpenTelemetry Collector
+  |
+  v
+Selected observability backend or backends
 ```
 
 ### Example Trace
@@ -580,13 +705,14 @@ Slack event received
   -> Ollama model call
   -> Tool called
   -> External API requested
+  -> Approval requested if required
   -> Agent response generated
   -> Slack response delivered
 ```
 
 ### Completion Criteria
 
-This milestone is complete when a Slack request can be followed from receipt to final response in Phoenix.
+This milestone is complete when a Slack request can be followed from receipt to final response through the observability stack selected after Milestone 5.
 
 The trace should show:
 
@@ -600,7 +726,7 @@ The trace should show:
 
 Sensitive message content and credentials must not be exposed in exported traces.
 
-## Milestone 9: Evaluation and Reliability
+## Milestone 10: Evaluation and Reliability
 
 ### Goal
 
@@ -645,7 +771,7 @@ This milestone is complete when automated evaluations can detect regressions in:
 * Response quality
 * Service reliability
 
-## Milestone 10: Developer Experience
+## Milestone 11: Developer Experience
 
 ### Goal
 
@@ -737,10 +863,11 @@ infra/ollama-compose
 infra/hermes-container
 feat/slack-gateway
 feat/calendar-read-tool
+infra/observability-lab
 feat/calendar-approval
 feat/agent-orchestrator
 feat/shared-memory
-feat/phoenix-observability
+observability/extended-tracing
 test/agent-evaluations
 docs/developer-setup
 ```
@@ -755,7 +882,7 @@ feat: add Google Calendar read tool
 feat: add calendar approval workflow
 feat: implement agent routing
 feat: add shared memory service
-observability: add Phoenix tracing
+observability: add OpenTelemetry trace fan-out
 test: add agent routing evaluations
 docs: document local container setup
 ```
