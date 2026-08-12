@@ -15,6 +15,12 @@ processors:
 
 exporters:
   debug:
+    verbosity: detailed
+
+  otlphttp/phoenix:
+    endpoint: http://phoenix:6006
+    headers:
+      x-project-name: local-agent-concierge-infra-smoke-test
 
 service:
   extensions:
@@ -28,3 +34,4 @@ service:
         - batch
       exporters:
         - debug
+        - otlphttp/phoenix
