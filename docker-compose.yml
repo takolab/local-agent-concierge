@@ -140,9 +140,53 @@ services:
       retries: 5
       start_period: 15s
 
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    restart: unless-stopped
+
+    command:
+      - mlflow
+      - server
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "5000"
+      - --backend-store-uri
+      - sqlite:////mlflow/mlflow.db
+      - --artifacts-destination
+      - /mlflow/artifacts
+      - --allowed-hosts
+      - "localhost:*,127.0.0.1:*,mlflow:5000"
+
+    ports:
+      - "127.0.0.1:5000:5000"
+
+    volumes:
+      - mlflow-data:/mlflow
+
+    networks:
+      - concierge-network
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen(
+              "http://127.0.0.1:5000/health",
+              timeout=2,
+          ).read()
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+
 volumes:
   ollama-data:
   phoenix-data:
+  mlflow-data:
 
 networks:
   concierge-network:
