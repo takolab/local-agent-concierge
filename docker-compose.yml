@@ -108,8 +108,41 @@ services:
       context: ./mcp/google-calendar
       target: test
 
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    restart: unless-stopped
+
+    environment:
+      PHOENIX_WORKING_DIR: /mnt/data
+
+    ports:
+      - "127.0.0.1:6006:6006"
+
+    volumes:
+      - phoenix-data:/mnt/data
+
+    networks:
+      - concierge-network
+
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen(
+              "http://127.0.0.1:6006/healthz",
+              timeout=2,
+          ).read()
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+
 volumes:
   ollama-data:
+  phoenix-data:
 
 networks:
   concierge-network:
