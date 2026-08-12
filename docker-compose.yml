@@ -108,6 +108,24 @@ services:
       context: ./mcp/google-calendar
       target: test
 
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    restart: unless-stopped
+
+    command:
+      - --config=/etc/otelcol-contrib/config.yaml
+
+    volumes:
+      - ./infra/observability/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+
+    ports:
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+      - "127.0.0.1:13133:13133"
+
+    networks:
+      - concierge-network
+
   phoenix:
     image: arizephoenix/phoenix:latest
     restart: unless-stopped
