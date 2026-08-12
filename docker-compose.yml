@@ -112,6 +112,9 @@ services:
     image: otel/opentelemetry-collector-contrib:latest
     restart: unless-stopped
 
+    environment:
+      MLFLOW_EXPERIMENT_ID: "${MLFLOW_EXPERIMENT_ID:-0}"
+
     command:
       - --config=/etc/otelcol-contrib/config.yaml
 

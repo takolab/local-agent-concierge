@@ -22,6 +22,11 @@ exporters:
     headers:
       x-project-name: local-agent-concierge-infra-smoke-test
 
+  otlphttp/mlflow:
+    endpoint: http://mlflow:5000
+    headers:
+      x-mlflow-experiment-id: ${env:MLFLOW_EXPERIMENT_ID}
+
 service:
   extensions:
     - health_check
@@ -35,3 +40,4 @@ service:
       exporters:
         - debug
         - otlphttp/phoenix
+        - otlphttp/mlflow
