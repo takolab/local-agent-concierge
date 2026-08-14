@@ -15,7 +15,7 @@ The project will be developed incrementally. Each milestone should produce a sma
 * [x] Connect Hermes Agent to Ollama
 * [x] Connect the system to Slack
 * [x] Add Google Calendar integration
-* [ ] Add observability foundation
+* [x] Add observability foundation
 * [ ] Compare Phoenix and MLflow using shared OpenTelemetry traces
 * [ ] Add human approval for sensitive actions
 * [ ] Add multi-agent orchestration
@@ -391,21 +391,22 @@ Phoenix          MLflow
 
 ### Tasks
 
-* [ ] Add an OpenTelemetry Collector service
-* [ ] Add a Phoenix service
-* [ ] Add an MLflow Tracking Server service
-* [ ] Add persistent storage where required
-* [ ] Add health checks for the observability services
-* [ ] Configure the Collector to receive OTLP traces
-* [ ] Configure the Collector to export traces to Phoenix
-* [ ] Configure the Collector to export traces to MLflow
+* [x] Add an OpenTelemetry Collector service
+* [x] Add a Phoenix service
+* [x] Add an MLflow Tracking Server service
+* [x] Add persistent storage where required
+* [x] Add health checks for the observability services
+* [x] Configure the Collector to receive OTLP traces
+* [x] Configure the Collector to export traces to Phoenix
+* [x] Configure the Collector to export traces to MLflow
+* [x] Document the observability infrastructure setup
 * [ ] Add OpenTelemetry instrumentation to the Slack Gateway
 * [ ] Add OpenTelemetry instrumentation to the Google Calendar MCP service
 * [ ] Trace requests from the Slack Gateway to Hermes Agent
 * [ ] Propagate trace identifiers between instrumented services
 * [ ] Record latency and error information
 * [ ] Redact secrets and personal information
-* [ ] Verify that the same workload can be inspected in Phoenix and MLflow
+* [x] Verify that the same synthetic workload can be inspected in Phoenix and MLflow
 * [ ] Compare trace visualization and debugging workflows
 * [ ] Compare search and filtering capabilities
 * [ ] Compare latency and error analysis

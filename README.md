@@ -57,8 +57,8 @@ Ollama / Google Calendar / GitHub
 * [x] Create a Slack application
 * [x] Implement the Slack Gateway
 * [x] Add Google Calendar read access
-* [ ] Add OpenTelemetry observability
-* [ ] Compare Phoenix and MLflow using shared traces
+* [x] Add OpenTelemetry observability foundation
+* [ ] Compare Phoenix and MLflow using shared application traces
 * [ ] Add a human approval workflow
 * [ ] Implement multi-agent routing
 * [ ] Implement the shared memory service
@@ -71,6 +71,7 @@ Ollama / Google Calendar / GitHub
 * [Hermes Agent setup](docs/setup/hermes-agent.md)
 * [Slack Gateway setup](docs/setup/slack.md)
 * [Google Calendar setup](docs/setup/google-calendar.md)
+* [Observability setup](docs/setup/observability.md)
 
 ## Initial Milestone
 
@@ -121,7 +122,8 @@ local-agent-concierge/
 │       ├── ollama.md
 │       ├── hermes-agent.md
 │       ├── slack.md
-│       └── google-calendar.md
+│       ├── google-calendar.md
+│       └── observability.md
 ├── apps/
 │   └── slack-gateway/
 └── mcp/
