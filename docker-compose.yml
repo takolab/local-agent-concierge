@@ -108,8 +108,106 @@ services:
       context: ./mcp/google-calendar
       target: test
 
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    restart: unless-stopped
+
+    environment:
+      MLFLOW_EXPERIMENT_ID: "${MLFLOW_EXPERIMENT_ID:-0}"
+
+    command:
+      - --config=/etc/otelcol-contrib/config.yaml
+
+    volumes:
+      - ./infra/observability/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+
+    ports:
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+      - "127.0.0.1:13133:13133"
+
+    networks:
+      - concierge-network
+
+  phoenix:
+    image: arizephoenix/phoenix:latest
+    restart: unless-stopped
+
+    environment:
+      PHOENIX_WORKING_DIR: /mnt/data
+
+    ports:
+      - "127.0.0.1:6006:6006"
+
+    volumes:
+      - phoenix-data:/mnt/data
+
+    networks:
+      - concierge-network
+
+    healthcheck:
+      test:
+        - CMD
+        - python3
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen(
+              "http://127.0.0.1:6006/healthz",
+              timeout=2,
+          ).read()
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:latest
+    restart: unless-stopped
+
+    command:
+      - mlflow
+      - server
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "5000"
+      - --backend-store-uri
+      - sqlite:////mlflow/mlflow.db
+      - --artifacts-destination
+      - /mlflow/artifacts
+      - --allowed-hosts
+      - "localhost:*,127.0.0.1:*,mlflow:5000"
+
+    ports:
+      - "127.0.0.1:5000:5000"
+
+    volumes:
+      - mlflow-data:/mlflow
+
+    networks:
+      - concierge-network
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen(
+              "http://127.0.0.1:5000/health",
+              timeout=2,
+          ).read()
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+
 volumes:
   ollama-data:
+  phoenix-data:
+  mlflow-data:
 
 networks:
   concierge-network:
