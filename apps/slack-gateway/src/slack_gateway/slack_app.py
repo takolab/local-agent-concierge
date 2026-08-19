@@ -9,6 +9,7 @@ from slack_sdk.web import WebClient
 from slack_gateway.config import Settings
 from slack_gateway.event_deduplicator import EventDeduplicator
 from slack_gateway.hermes_client import HermesClient
+from slack_gateway.telemetry import trace_slack_request
 
 
 PROCESSING_MESSAGE = ":hourglass_flowing_sand: Working on it…"
@@ -155,63 +156,110 @@ def create_slack_app(
             f"slack:{workspace_id}:{channel_id}:{root_thread_ts}"
         )
 
-        processing_message_ts: str | None = None
+        with trace_slack_request(
+            threaded=thread_ts is not None,
+        ):
+            processing_message_ts: str | None = None
 
-        try:
-            processing_response = client.chat_postMessage(
-                channel=channel_id,
-                thread_ts=root_thread_ts,
-                text=PROCESSING_MESSAGE,
-            )
-        except SlackApiError:
-            logger.exception(
-                "Failed to post processing status to Slack "
-                "(event_id=%s channel=%s ts=%s thread_ts=%s)",
-                event_id,
-                channel_id,
-                message_ts,
-                root_thread_ts,
-            )
-        else:
-            returned_ts = processing_response.get("ts")
-
-            if isinstance(returned_ts, str) and returned_ts:
-                processing_message_ts = returned_ts
-            else:
-                logger.warning(
-                    "Processing status response did not contain "
-                    "a valid timestamp "
-                    "(event_id=%s channel=%s ts=%s)",
+            try:
+                processing_response = client.chat_postMessage(
+                    channel=channel_id,
+                    thread_ts=root_thread_ts,
+                    text=PROCESSING_MESSAGE,
+                )
+            except SlackApiError:
+                logger.exception(
+                    "Failed to post processing status to Slack "
+                    "(event_id=%s channel=%s ts=%s thread_ts=%s)",
                     event_id,
                     channel_id,
                     message_ts,
+                    root_thread_ts,
                 )
+            else:
+                returned_ts = processing_response.get("ts")
 
-        logger.info(
-            "Forwarding Slack message to Hermes "
-            "(event_id=%s channel=%s user=%s ts=%s "
-            "conversation=%s processing_ts=%s)",
-            event_id,
-            channel_id,
-            user_id,
-            message_ts,
-            conversation,
-            processing_message_ts,
-        )
+                if isinstance(returned_ts, str) and returned_ts:
+                    processing_message_ts = returned_ts
+                else:
+                    logger.warning(
+                        "Processing status response did not contain "
+                        "a valid timestamp "
+                        "(event_id=%s channel=%s ts=%s)",
+                        event_id,
+                        channel_id,
+                        message_ts,
+                    )
 
-        try:
-            response_text = hermes_client.create_response(
-                input_text=text.strip(),
-                conversation=conversation,
-            )
-        except RuntimeError:
-            logger.exception(
-                "Failed to process Slack message with Hermes "
-                "(event_id=%s channel=%s user=%s ts=%s)",
+            logger.info(
+                "Forwarding Slack message to Hermes "
+                "(event_id=%s channel=%s user=%s ts=%s "
+                "conversation=%s processing_ts=%s)",
                 event_id,
                 channel_id,
                 user_id,
                 message_ts,
+                conversation,
+                processing_message_ts,
+            )
+
+            try:
+                response_text = hermes_client.create_response(
+                    input_text=text.strip(),
+                    conversation=conversation,
+                )
+            except RuntimeError:
+                logger.exception(
+                    "Failed to process Slack message with Hermes "
+                    "(event_id=%s channel=%s user=%s ts=%s)",
+                    event_id,
+                    channel_id,
+                    user_id,
+                    message_ts,
+                )
+
+                try:
+                    delivery_method = _post_thread_message_and_remove_processing_status(
+                        client=client,
+                        channel_id=channel_id,
+                        thread_ts=root_thread_ts,
+                        processing_message_ts=processing_message_ts,
+                        text=ERROR_MESSAGE,
+                        logger=logger,
+                        event_id=event_id,
+                    )
+                except SlackApiError:
+                    logger.exception(
+                        "Failed to display Hermes processing error "
+                        "in Slack "
+                        "(event_id=%s channel=%s ts=%s "
+                        "thread_ts=%s)",
+                        event_id,
+                        channel_id,
+                        message_ts,
+                        root_thread_ts,
+                    )
+                    return
+
+                logger.info(
+                    "Hermes processing error displayed in Slack "
+                    "(event_id=%s channel=%s ts=%s "
+                    "thread_ts=%s delivery=%s)",
+                    event_id,
+                    channel_id,
+                    message_ts,
+                    root_thread_ts,
+                    delivery_method,
+                )
+                return
+
+            logger.info(
+                "Hermes response received "
+                "(event_id=%s channel=%s ts=%s response_chars=%d)",
+                event_id,
+                channel_id,
+                message_ts,
+                len(response_text),
             )
 
             try:
@@ -220,16 +268,14 @@ def create_slack_app(
                     channel_id=channel_id,
                     thread_ts=root_thread_ts,
                     processing_message_ts=processing_message_ts,
-                    text=ERROR_MESSAGE,
+                    text=response_text,
                     logger=logger,
                     event_id=event_id,
                 )
             except SlackApiError:
                 logger.exception(
-                    "Failed to display Hermes processing error "
-                    "in Slack "
-                    "(event_id=%s channel=%s ts=%s "
-                    "thread_ts=%s)",
+                    "Failed to deliver Hermes response to Slack "
+                    "(event_id=%s channel=%s ts=%s thread_ts=%s)",
                     event_id,
                     channel_id,
                     message_ts,
@@ -238,7 +284,7 @@ def create_slack_app(
                 return
 
             logger.info(
-                "Hermes processing error displayed in Slack "
+                "Hermes response delivered to Slack "
                 "(event_id=%s channel=%s ts=%s "
                 "thread_ts=%s delivery=%s)",
                 event_id,
@@ -247,48 +293,6 @@ def create_slack_app(
                 root_thread_ts,
                 delivery_method,
             )
-            return
-
-        logger.info(
-            "Hermes response received "
-            "(event_id=%s channel=%s ts=%s response_chars=%d)",
-            event_id,
-            channel_id,
-            message_ts,
-            len(response_text),
-        )
-
-        try:
-            delivery_method = _post_thread_message_and_remove_processing_status(
-                client=client,
-                channel_id=channel_id,
-                thread_ts=root_thread_ts,
-                processing_message_ts=processing_message_ts,
-                text=response_text,
-                logger=logger,
-                event_id=event_id,
-            )
-        except SlackApiError:
-            logger.exception(
-                "Failed to deliver Hermes response to Slack "
-                "(event_id=%s channel=%s ts=%s thread_ts=%s)",
-                event_id,
-                channel_id,
-                message_ts,
-                root_thread_ts,
-            )
-            return
-
-        logger.info(
-            "Hermes response delivered to Slack "
-            "(event_id=%s channel=%s ts=%s "
-            "thread_ts=%s delivery=%s)",
-            event_id,
-            channel_id,
-            message_ts,
-            root_thread_ts,
-            delivery_method,
-        )
 
     return app
 
