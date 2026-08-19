@@ -400,11 +400,11 @@ Phoenix          MLflow
 * [x] Configure the Collector to export traces to Phoenix
 * [x] Configure the Collector to export traces to MLflow
 * [x] Document the observability infrastructure setup
-* [ ] Add OpenTelemetry instrumentation to the Slack Gateway
+* [x] Add OpenTelemetry instrumentation to the Slack Gateway
 * [ ] Add OpenTelemetry instrumentation to the Google Calendar MCP service
-* [ ] Trace requests from the Slack Gateway to Hermes Agent
+* [x] Trace requests from the Slack Gateway to Hermes Agent
 * [ ] Propagate trace identifiers between instrumented services
-* [ ] Record latency and error information
+* [x] Record latency and error information
 * [ ] Redact secrets and personal information
 * [x] Verify that the same synthetic workload can be inspected in Phoenix and MLflow
 * [ ] Compare trace visualization and debugging workflows
@@ -413,6 +413,37 @@ Phoenix          MLflow
 * [ ] Compare tool-call representation
 * [ ] Compare local deployment and resource usage
 * [ ] Document the comparison results
+
+### Verified Slack Gateway Trace
+
+The Slack Gateway now exports backend-neutral OpenTelemetry traces to the
+shared OpenTelemetry Collector.
+
+The verified trace structure is:
+
+```text
+concierge.request
+|
++-- hermes.request
+|
++-- slack.response
+```
+
+The same representative Slack request traces have been verified in both
+Phoenix and MLflow.
+
+The current instrumentation records request latency, downstream latency,
+span status, and low-cardinality error types.
+
+Slack message bodies, credentials, raw exception messages, conversation
+identifiers, channel identifiers, user identifiers, and workspace identifiers
+are not added to trace attributes.
+
+Failure-path verification confirmed that sanitized application errors are
+reported as `ERROR` spans without exporting raw exception messages.
+
+Cross-service trace-context propagation into Hermes Agent and instrumentation
+of the Google Calendar MCP service remain follow-up work.
 
 ### Initial Trace Scope
 
