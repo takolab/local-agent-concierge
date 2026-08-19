@@ -8,8 +8,12 @@ from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
 from opentelemetry.sdk.resources import Resource
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import BatchSpanProcessor
-from opentelemetry.trace import Span, SpanKind
-
+from opentelemetry.trace import (
+    Span,
+    SpanKind,
+    Status,
+    StatusCode,
+)
 
 def configure_tracing() -> None:
     resource = Resource.create(
@@ -65,3 +69,11 @@ def trace_hermes_request() -> Iterator[Span]:
         set_status_on_exception=True,
     ) as span:
         yield span
+
+def mark_span_error(
+    span: Span,
+    *,
+    error_type: str,
+) -> None:
+    span.set_status(Status(StatusCode.ERROR))
+    span.set_attribute("error.type", error_type)

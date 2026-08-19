@@ -10,6 +10,7 @@ from slack_gateway.config import Settings
 from slack_gateway.event_deduplicator import EventDeduplicator
 from slack_gateway.hermes_client import HermesClient
 from slack_gateway.telemetry import (
+    mark_span_error,
     trace_hermes_request,
     trace_slack_request,
 )
@@ -161,7 +162,7 @@ def create_slack_app(
 
         with trace_slack_request(
             threaded=thread_ts is not None,
-        ):
+        ) as request_span:
             processing_message_ts: str | None = None
 
             try:
@@ -213,6 +214,11 @@ def create_slack_app(
                         conversation=conversation,
                     )
             except RuntimeError:
+                mark_span_error(
+                    request_span,
+                    error_type="hermes.request_error",
+                )
+
                 logger.exception(
                     "Failed to process Slack message with Hermes "
                     "(event_id=%s channel=%s user=%s ts=%s)",
