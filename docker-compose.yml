@@ -55,6 +55,7 @@ services:
   slack-gateway:
     build:
       context: ./apps/slack-gateway
+      target: runtime
 
     restart: unless-stopped
 
@@ -67,9 +68,18 @@ services:
       SLACK_APP_TOKEN: "${SLACK_APP_TOKEN:?SLACK_APP_TOKEN must be set in .env}"
       HERMES_API_BASE_URL: "http://hermes-agent:8642"
       HERMES_API_SERVER_KEY: "${HERMES_API_SERVER_KEY:?HERMES_API_SERVER_KEY must be set in .env}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
 
     networks:
       - concierge-network
+
+  slack-gateway-test:
+    profiles:
+      - test
+
+    build:
+      context: ./apps/slack-gateway
+      target: test
 
   google-calendar-mcp:
     build:

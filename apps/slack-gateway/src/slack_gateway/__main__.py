@@ -2,6 +2,7 @@ import logging
 
 from slack_gateway.config import load_settings
 from slack_gateway.slack_app import run_socket_mode
+from slack_gateway.telemetry import configure_tracing
 
 
 def main() -> None:
@@ -9,6 +10,8 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+
+    configure_tracing()
 
     logger = logging.getLogger("slack_gateway")
     settings = load_settings()

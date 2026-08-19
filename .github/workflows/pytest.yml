@@ -37,3 +37,6 @@ jobs:
 
       - name: Run Google Calendar tests
         run: docker compose --profile test run --rm google-calendar-mcp-test
+
+      - name: Run Slack Gateway tests
+        run: docker compose --profile test run --rm slack-gateway-test
