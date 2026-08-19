@@ -15,5 +15,14 @@ dependencies = [
     "slack-bolt>=1.30.0,<2.0",
 ]
 
+[project.optional-dependencies]
+test = [
+    "pytest>=9,<10",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
 [tool.setuptools.packages.find]
 where = ["src"]
