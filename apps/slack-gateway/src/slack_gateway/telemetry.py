@@ -14,6 +14,7 @@ from opentelemetry.trace import (
     Status,
     StatusCode,
 )
+from slack_sdk.errors import SlackApiError
 
 def configure_tracing() -> None:
     resource = Resource.create(
