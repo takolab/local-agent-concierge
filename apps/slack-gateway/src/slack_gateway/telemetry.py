@@ -50,7 +50,7 @@ def trace_slack_request(
             "slack.message.threaded": threaded,
         },
         record_exception=False,
-        set_status_on_exception=True,
+        set_status_on_exception=False,
     ) as span:
         yield span
 
@@ -66,9 +66,16 @@ def trace_hermes_request() -> Iterator[Span]:
             "concierge.operation": "create_response",
         },
         record_exception=False,
-        set_status_on_exception=True,
+        set_status_on_exception=False,
     ) as span:
-        yield span
+        try:
+            yield span
+        except RuntimeError:
+            mark_span_error(
+                span,
+                error_type="hermes.request_error",
+            )
+            raise
 
 def mark_span_error(
     span: Span,
