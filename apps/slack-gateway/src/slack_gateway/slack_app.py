@@ -9,7 +9,10 @@ from slack_sdk.web import WebClient
 from slack_gateway.config import Settings
 from slack_gateway.event_deduplicator import EventDeduplicator
 from slack_gateway.hermes_client import HermesClient
-from slack_gateway.telemetry import trace_slack_request
+from slack_gateway.telemetry import (
+    trace_hermes_request,
+    trace_slack_request,
+)
 
 
 PROCESSING_MESSAGE = ":hourglass_flowing_sand: Working on it…"
@@ -204,10 +207,11 @@ def create_slack_app(
             )
 
             try:
-                response_text = hermes_client.create_response(
-                    input_text=text.strip(),
-                    conversation=conversation,
-                )
+                with trace_hermes_request():
+                    response_text = hermes_client.create_response(
+                        input_text=text.strip(),
+                        conversation=conversation,
+                    )
             except RuntimeError:
                 logger.exception(
                     "Failed to process Slack message with Hermes "
