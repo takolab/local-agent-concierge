@@ -13,6 +13,7 @@ from slack_gateway.telemetry import (
     mark_span_error,
     trace_hermes_request,
     trace_slack_request,
+    trace_slack_response,
 )
 
 
@@ -229,15 +230,16 @@ def create_slack_app(
                 )
 
                 try:
-                    delivery_method = _post_thread_message_and_remove_processing_status(
-                        client=client,
-                        channel_id=channel_id,
-                        thread_ts=root_thread_ts,
-                        processing_message_ts=processing_message_ts,
-                        text=ERROR_MESSAGE,
-                        logger=logger,
-                        event_id=event_id,
-                    )
+                    with trace_slack_response():
+                        delivery_method = _post_thread_message_and_remove_processing_status(
+                            client=client,
+                            channel_id=channel_id,
+                            thread_ts=root_thread_ts,
+                            processing_message_ts=processing_message_ts,
+                            text=ERROR_MESSAGE,
+                            logger=logger,
+                            event_id=event_id,
+                        )
                 except SlackApiError:
                     logger.exception(
                         "Failed to display Hermes processing error "
@@ -273,16 +275,22 @@ def create_slack_app(
             )
 
             try:
-                delivery_method = _post_thread_message_and_remove_processing_status(
-                    client=client,
-                    channel_id=channel_id,
-                    thread_ts=root_thread_ts,
-                    processing_message_ts=processing_message_ts,
-                    text=response_text,
-                    logger=logger,
-                    event_id=event_id,
-                )
+                with trace_slack_response():
+                    delivery_method = _post_thread_message_and_remove_processing_status(
+                        client=client,
+                        channel_id=channel_id,
+                        thread_ts=root_thread_ts,
+                        processing_message_ts=processing_message_ts,
+                        text=response_text,
+                        logger=logger,
+                        event_id=event_id,
+                    )
             except SlackApiError:
+                mark_span_error(
+                    request_span,
+                    error_type="slack.response_error",
+                )
+
                 logger.exception(
                     "Failed to deliver Hermes response to Slack "
                     "(event_id=%s channel=%s ts=%s thread_ts=%s)",

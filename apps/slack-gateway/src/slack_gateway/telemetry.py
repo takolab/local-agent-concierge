@@ -77,6 +77,29 @@ def trace_hermes_request() -> Iterator[Span]:
             )
             raise
 
+@contextmanager
+def trace_slack_response() -> Iterator[Span]:
+    tracer = trace.get_tracer("slack_gateway")
+
+    with tracer.start_as_current_span(
+        "slack.response",
+        kind=SpanKind.CLIENT,
+        attributes={
+            "concierge.downstream.service": "slack",
+            "concierge.operation": "post_response",
+        },
+        record_exception=False,
+        set_status_on_exception=False,
+    ) as span:
+        try:
+            yield span
+        except SlackApiError:
+            mark_span_error(
+                span,
+                error_type="slack.response_error",
+            )
+            raise
+
 def mark_span_error(
     span: Span,
     *,
