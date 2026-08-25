@@ -42,15 +42,17 @@ def _docker(*args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     )
 
 
-def _container_logs() -> str:
-    return _docker("logs", CONTAINER_NAME, check=False).stdout
+def _container_logs(container_name: str = CONTAINER_NAME) -> str:
+    return _docker("logs", container_name, check=False).stdout
 
 
-def _exported_response_spans() -> list[dict[str, Any]]:
+def _exported_response_spans(
+    container_name: str = CONTAINER_NAME,
+) -> list[dict[str, Any]]:
     """Parse ConsoleSpanExporter's pretty-printed JSON span dumps out of the
     container's stdout logs.
     """
-    logs = _container_logs()
+    logs = _container_logs(container_name)
     spans: list[dict[str, Any]] = []
     decoder = json.JSONDecoder()
     idx = 0
@@ -69,9 +71,12 @@ def _exported_response_spans() -> list[dict[str, Any]]:
     return spans
 
 
-def _post_responses(headers: dict[str, str] | None = None) -> httpx.Response:
+def _post_responses(
+    headers: dict[str, str] | None = None,
+    base_url: str = BASE_URL,
+) -> httpx.Response:
     return httpx.post(
-        f"{BASE_URL}/v1/responses",
+        f"{base_url}/v1/responses",
         headers={
             "Authorization": f"Bearer {API_SERVER_KEY}",
             "Content-Type": "application/json",
@@ -243,12 +248,20 @@ def test_container_restart_with_prior_state_does_not_crash_loop() -> None:
     `gateway already running` crash loop on every restart. This exercises
     that exact restart path directly, using its own container so it does
     not interfere with the shared `hermes_container` fixture.
+
+    It also confirms the post-restart process is actually *serving*
+    requests — not just that the container reports `running` — by calling
+    `/health` and sending one `traceparent`-tagged request and checking the
+    resulting span, the same way the fixture-based tests above do.
     """
     container_name = f"{CONTAINER_NAME}-restart"
+    host_port = HOST_PORT + 1
+    base_url = f"http://127.0.0.1:{host_port}"
     _docker("rm", "-f", container_name, check=False)
 
     run = _docker(
         "run", "-d", "--name", container_name,
+        "-p", f"{host_port}:8642",
         "-e", "API_SERVER_ENABLED=true",
         "-e", "API_SERVER_HOST=0.0.0.0",
         "-e", f"API_SERVER_KEY={API_SERVER_KEY}",
@@ -277,7 +290,21 @@ def test_container_restart_with_prior_state_does_not_crash_loop() -> None:
                 f"container did not reach 'running' in time (last status: {status})"
             )
 
+        def _wait_healthy(seconds: int) -> None:
+            deadline = time.monotonic() + seconds
+            while time.monotonic() < deadline:
+                try:
+                    response = httpx.get(f"{base_url}/health", timeout=2)
+                    if response.status_code == 200:
+                        return
+                except httpx.HTTPError:
+                    pass
+                time.sleep(1)
+            logs = _container_logs(container_name)
+            pytest.fail(f"/health never returned 200 after restart:\n{logs}")
+
         _wait_up(STARTUP_TIMEOUT_SECONDS)
+        _wait_healthy(STARTUP_TIMEOUT_SECONDS)
 
         # Restart the same container (same /opt/data as before) to force
         # reconcile-profiles to see prior run state, exactly like `docker
@@ -294,8 +321,33 @@ def test_container_restart_with_prior_state_does_not_crash_loop() -> None:
         status = _docker(
             "inspect", "-f", "{{.State.Status}}", container_name, check=False,
         ).stdout.strip()
-        logs = _docker("logs", container_name, check=False).stdout
+        logs = _container_logs(container_name)
         assert status == "running", f"status={status}\n{logs}"
         assert "A gateway is already running" not in logs
+
+        # Prove the post-restart process actually serves requests, not
+        # just that the container reports "running".
+        _wait_healthy(STARTUP_TIMEOUT_SECONDS)
+
+        trace_id = uuid.uuid4().hex
+        parent_id = uuid.uuid4().hex[:16]
+        traceparent = f"00-{trace_id}-{parent_id}-01"
+
+        response = _post_responses(
+            headers={"traceparent": traceparent}, base_url=base_url,
+        )
+        assert response.status_code == 200
+
+        time.sleep(SPAN_EXPORT_WAIT_SECONDS)
+        spans = _exported_response_spans(container_name)
+        matching = [
+            span for span in spans
+            if span["context"]["trace_id"] == f"0x{trace_id}"
+        ]
+        assert matching, (
+            f"no exported span matched injected trace id after restart; "
+            f"spans={spans}"
+        )
+        assert matching[-1]["parent_id"] == f"0x{parent_id}"
     finally:
         _docker("rm", "-f", container_name, check=False)
