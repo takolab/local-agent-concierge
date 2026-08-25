@@ -212,7 +212,8 @@ The service configuration is:
 
 ```yaml
 hermes-agent:
-  image: nousresearch/hermes-agent:latest
+  build:
+    context: ./apps/hermes-agent
   restart: unless-stopped
 
   command:
@@ -236,8 +237,16 @@ hermes-agent:
 
 Important properties:
 
-* `nousresearch/hermes-agent:latest` provides the official Hermes Agent image.
-* `gateway run` is the long-running gateway command.
+* `apps/hermes-agent/Dockerfile` builds `nousresearch/hermes-agent` (pinned
+  to a specific release tag, not `:latest`) with OpenTelemetry
+  auto-instrumentation layered on top, activated via a build-time
+  `PYTHONPATH` rather than a command wrapper. See
+  `docs/observability/hermes-trace-context.md` for why (including a real
+  incident it fixed), and `docs/roadmap.md` (Milestone 5) for the
+  underlying investigation.
+* `gateway run` is the unmodified, standard long-running gateway command —
+  incoming trace context is extracted without changing how Hermes is
+  invoked.
 * Hermes waits for the Ollama health check.
 * Hermes and Ollama share `concierge-network`.
 * Hermes data persists through the `/opt/data` bind mount.
