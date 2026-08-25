@@ -1,6 +1,7 @@
 from typing import Any
 
 import httpx
+from opentelemetry.propagate import inject
 
 
 class HermesClient:
@@ -9,6 +10,7 @@ class HermesClient:
         base_url: str,
         api_key: str,
         timeout_seconds: float = 300.0,
+        transport: httpx.BaseTransport | None = None,
     ) -> None:
         self._client = httpx.Client(
             base_url=base_url.rstrip("/"),
@@ -17,6 +19,7 @@ class HermesClient:
                 "Content-Type": "application/json",
             },
             timeout=timeout_seconds,
+            transport=transport,
         )
 
     def close(self) -> None:
@@ -27,9 +30,13 @@ class HermesClient:
         input_text: str,
         conversation: str,
     ) -> str:
+        trace_headers: dict[str, str] = {}
+        inject(trace_headers)
+
         try:
             response = self._client.post(
                 "/v1/responses",
+                headers=trace_headers,
                 json={
                     "model": "hermes-agent",
                     "input": input_text,

@@ -403,7 +403,8 @@ Phoenix          MLflow
 * [x] Add OpenTelemetry instrumentation to the Slack Gateway
 * [ ] Add OpenTelemetry instrumentation to the Google Calendar MCP service
 * [x] Trace requests from the Slack Gateway to Hermes Agent
-* [ ] Propagate trace identifiers between instrumented services
+* [x] Inject W3C Trace Context into the Slack Gateway's outgoing Hermes request
+* [ ] Extract incoming trace context in Hermes Agent and join the same distributed trace
 * [x] Record latency and error information
 * [ ] Redact secrets and personal information
 * [x] Verify that the same synthetic workload can be inspected in Phoenix and MLflow
@@ -442,8 +443,17 @@ are not added to trace attributes.
 Failure-path verification confirmed that sanitized application errors are
 reported as `ERROR` spans without exporting raw exception messages.
 
-Cross-service trace-context propagation into Hermes Agent and instrumentation
-of the Google Calendar MCP service remain follow-up work.
+The Slack Gateway's outgoing HTTP request to Hermes Agent now carries a
+standard OpenTelemetry `traceparent` header, injected using the OpenTelemetry
+API's global propagator (`opentelemetry.propagate.inject`) while the
+`hermes.request` span is active. The injected header's trace ID and parent
+span ID match the `hermes.request` span, and existing `Authorization` and
+`Content-Type` headers are preserved.
+
+Hermes Agent does not yet extract this incoming trace context or create its
+own spans, so the distributed trace does not yet continue past the HTTP
+boundary into Hermes Agent. That extraction step, along with instrumentation
+of the Google Calendar MCP service, remains follow-up work.
 
 ### Initial Trace Scope
 
