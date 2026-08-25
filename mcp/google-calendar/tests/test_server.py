@@ -121,3 +121,43 @@ async def test_list_events_rejects_datetime_without_timezone():
         in getattr(content, "text", "")
         for content in result.content
     )
+
+
+@pytest.mark.anyio
+async def test_list_events_rejects_non_positive_max_results():
+    async with Client(server.mcp) as client:
+        result = await client.call_tool(
+            "list_events",
+            {
+                "time_min": "2026-08-10T09:00:00+01:00",
+                "max_results": 0,
+            },
+        )
+
+    assert result.is_error is True
+
+    assert any(
+        "max_results must be greater than zero"
+        in getattr(content, "text", "")
+        for content in result.content
+    )
+
+
+@pytest.mark.anyio
+async def test_list_busy_periods_rejects_time_max_before_time_min():
+    async with Client(server.mcp) as client:
+        result = await client.call_tool(
+            "list_busy_periods",
+            {
+                "time_min": "2026-08-10T18:00:00+01:00",
+                "time_max": "2026-08-10T09:00:00+01:00",
+            },
+        )
+
+    assert result.is_error is True
+
+    assert any(
+        "time_max must be later than time_min"
+        in getattr(content, "text", "")
+        for content in result.content
+    )
