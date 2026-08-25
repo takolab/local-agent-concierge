@@ -36,12 +36,17 @@ The current observability infrastructure includes:
 - Health checks
 - Manual synthetic trace verification
 
+The Slack Gateway's outgoing request to Hermes Agent now injects a W3C Trace
+Context `traceparent` header using the OpenTelemetry API's global propagator,
+so the request carries the `hermes.request` span's trace ID and span ID.
+Hermes Agent does not yet extract this header or create spans of its own, so
+the trace does not yet continue past that HTTP boundary.
+
 The following are not implemented yet:
 
-- Slack Gateway instrumentation
 - Google Calendar MCP instrumentation
 - Hermes Agent instrumentation
-- Distributed trace propagation
+- Hermes Agent extracting incoming trace context to join the same distributed trace
 - Phoenix-specific application instrumentation
 - MLflow-specific application instrumentation
 - Evaluation datasets
