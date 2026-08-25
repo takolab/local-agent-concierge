@@ -25,7 +25,9 @@ services:
       start_period: 15s
 
   hermes-agent:
-    image: nousresearch/hermes-agent:latest
+    build:
+      context: ./apps/hermes-agent
+
     restart: unless-stopped
 
     command:
@@ -39,12 +41,31 @@ services:
       google-calendar-mcp:
         condition: service_healthy
 
+      otel-collector:
+        condition: service_started
+
     environment:
       HERMES_UID: "${HERMES_UID:-1000}"
       HERMES_GID: "${HERMES_GID:-1000}"
       API_SERVER_ENABLED: "true"
       API_SERVER_HOST: "0.0.0.0"
       API_SERVER_KEY: "${HERMES_API_SERVER_KEY:?HERMES_API_SERVER_KEY must be set in .env}"
+
+      # Auto-instrumentation is activated via PYTHONPATH, set as a build-time
+      # ENV in apps/hermes-agent/Dockerfile — not via a `command:` wrapper.
+      # Hermes' own gateway supervision (the s6-rc "gateway-<profile>"
+      # service, restored on every container start by cont-init's
+      # 02-reconcile-profiles) starts its gateway process independently of
+      # whatever this service's `command:` says, so a command-line wrapper
+      # here would only instrument the very first invocation and get
+      # silently dropped on every supervised restart. The Dockerfile's
+      # PYTHONPATH survives that because s6 re-injects the full container
+      # environment into every process it supervises.
+      OTEL_SERVICE_NAME: "hermes-agent"
+      OTEL_TRACES_EXPORTER: "otlp_proto_http"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4318"
+      OTEL_METRICS_EXPORTER: "none"
+      OTEL_LOGS_EXPORTER: "none"
 
     volumes:
       - ./data/hermes:/opt/data

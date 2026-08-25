@@ -32,6 +32,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
 
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
       - name: Build containers
         run: docker compose --profile test build
 
@@ -40,3 +45,9 @@ jobs:
 
       - name: Run Slack Gateway tests
         run: docker compose --profile test run --rm slack-gateway-test
+
+      - name: Install Hermes Agent test dependencies
+        run: pip install -r apps/hermes-agent/tests/requirements.txt
+
+      - name: Run Hermes Agent trace context propagation tests
+        run: python -m pytest apps/hermes-agent/tests

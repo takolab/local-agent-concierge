@@ -404,7 +404,7 @@ Phoenix          MLflow
 * [ ] Add OpenTelemetry instrumentation to the Google Calendar MCP service
 * [x] Trace requests from the Slack Gateway to Hermes Agent
 * [x] Inject W3C Trace Context into the Slack Gateway's outgoing Hermes request
-* [ ] Extract incoming trace context in Hermes Agent and join the same distributed trace
+* [x] Extract incoming trace context in Hermes Agent and join the same distributed trace
 * [x] Record latency and error information
 * [ ] Redact secrets and personal information
 * [x] Verify that the same synthetic workload can be inspected in Phoenix and MLflow
@@ -450,10 +450,28 @@ API's global propagator (`opentelemetry.propagate.inject`) while the
 span ID match the `hermes.request` span, and existing `Authorization` and
 `Content-Type` headers are preserved.
 
-Hermes Agent does not yet extract this incoming trace context or create its
-own spans, so the distributed trace does not yet continue past the HTTP
-boundary into Hermes Agent. That extraction step, along with instrumentation
-of the Google Calendar MCP service, remains follow-up work.
+Hermes Agent now extracts this incoming trace context and creates a matching
+`SERVER` span for each API server request, so the distributed trace continues
+past the HTTP boundary into Hermes Agent:
+
+```text
+concierge.request
+|
++-- hermes.request
+|   |
+|   +-- /v1/responses (Hermes Agent)
+|
++-- slack.response
+```
+
+This is implemented as an OpenTelemetry auto-instrumentation layer added on
+top of the unmodified official Hermes Agent image
+(`apps/hermes-agent/Dockerfile`), rather than a change to Hermes Agent's own
+source — see `docs/observability/hermes-trace-context.md` for the
+investigation, the extraction approach, and its verification. Spans for
+Hermes-internal processing (LLM calls, tool calls) are not added yet; that is
+tracked under Milestone 9. Instrumentation of the Google Calendar MCP service
+also remains follow-up work.
 
 ### Initial Trace Scope
 
