@@ -2,6 +2,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from mcp.server import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from google_calendar_mcp.calendar_client import (
     BusyPeriod,
@@ -34,7 +35,7 @@ def get_current_datetime(
     try:
         zone = ZoneInfo(time_zone)
     except ZoneInfoNotFoundError as error:
-        raise ValueError(
+        raise ToolError(
             f"Unknown IANA time zone: {time_zone}"
         ) from error
 
@@ -105,12 +106,12 @@ def _parse_datetime(
     try:
         parsed = datetime.fromisoformat(value)
     except ValueError as error:
-        raise ValueError(
+        raise ToolError(
             f"{name} must be a valid ISO 8601 date-time"
         ) from error
 
     if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ValueError(
+        raise ToolError(
             f"{name} must include time zone information"
         )
 
