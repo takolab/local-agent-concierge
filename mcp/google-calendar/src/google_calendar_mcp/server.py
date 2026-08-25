@@ -53,7 +53,10 @@ def list_upcoming_events(
     max_results: int = 10,
 ) -> list[Event]:
     """Return upcoming events from the primary Google Calendar."""
-    return fetch_upcoming_events(max_results=max_results)
+    try:
+        return fetch_upcoming_events(max_results=max_results)
+    except ValueError as error:
+        raise ToolError(str(error)) from error
 
 
 @mcp.tool()
@@ -63,15 +66,18 @@ def list_events(
     max_results: int = 10,
 ) -> list[Event]:
     """Return primary calendar events within an ISO 8601 time range."""
-    return fetch_events(
-        time_min=_parse_datetime(time_min, "time_min"),
-        time_max=(
-            _parse_datetime(time_max, "time_max")
-            if time_max is not None
-            else None
-        ),
-        max_results=max_results,
-    )
+    try:
+        return fetch_events(
+            time_min=_parse_datetime(time_min, "time_min"),
+            time_max=(
+                _parse_datetime(time_max, "time_max")
+                if time_max is not None
+                else None
+            ),
+            max_results=max_results,
+        )
+    except ValueError as error:
+        raise ToolError(str(error)) from error
 
 
 @mcp.tool()
@@ -80,10 +86,13 @@ def list_busy_periods(
     time_max: str,
 ) -> list[BusyPeriod]:
     """Return busy periods within an ISO 8601 time range."""
-    return fetch_busy_periods(
-        time_min=_parse_datetime(time_min, "time_min"),
-        time_max=_parse_datetime(time_max, "time_max"),
-    )
+    try:
+        return fetch_busy_periods(
+            time_min=_parse_datetime(time_min, "time_min"),
+            time_max=_parse_datetime(time_max, "time_max"),
+        )
+    except ValueError as error:
+        raise ToolError(str(error)) from error
 
 
 @mcp.tool()
@@ -92,10 +101,13 @@ def list_free_periods(
     time_max: str,
 ) -> list[FreePeriod]:
     """Return free periods within an ISO 8601 time range."""
-    return fetch_free_periods(
-        time_min=_parse_datetime(time_min, "time_min"),
-        time_max=_parse_datetime(time_max, "time_max"),
-    )
+    try:
+        return fetch_free_periods(
+            time_min=_parse_datetime(time_min, "time_min"),
+            time_max=_parse_datetime(time_max, "time_max"),
+        )
+    except ValueError as error:
+        raise ToolError(str(error)) from error
 
 
 def _parse_datetime(
