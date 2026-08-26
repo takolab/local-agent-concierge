@@ -519,6 +519,16 @@ unmodified vendor image), out of scope here; see
 `docs/observability/google-calendar-mcp-telemetry.md` for the full
 evidence and what a follow-up would require.
 
+This matches a confirmed, tracked upstream issue
+([NousResearch/hermes-agent#60177](https://github.com/NousResearch/hermes-agent/issues/60177))
+with an open, unmerged fix
+([NousResearch/hermes-agent#78965](https://github.com/NousResearch/hermes-agent/pull/78965)).
+The planned approach for this repository — recorded in
+`docs/observability/hermes-trace-context.md` — is to wait for that (or a
+successor) to merge upstream, then bump the pinned tag in
+`apps/hermes-agent/Dockerfile` and enable its `mcp.trace_propagation: true`
+config, rather than patching Hermes Agent source directly.
+
 ### Initial Trace Scope
 
 ```text

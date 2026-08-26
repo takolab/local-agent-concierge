@@ -250,17 +250,20 @@ the `mcp` SDK, to Hermes Agent, or to Slack Gateway.
 
 ## Manual follow-up
 
-- Re-run the OAuth bootstrap (`python -m google_calendar_mcp.bootstrap`) to
-  restore a valid Google Calendar refresh token, then confirm a
-  **successful** `tools/call list_events` (or similar) span end to end — the
-  live verification above happened to hit an expired-credential error path
-  before a success path with real calendar data.
-- If continuing the distributed trace from Slack through to Google Calendar
-  MCP is wanted, scope a follow-up change to Hermes Agent's own
-  instrumentation (its internal request-context propagation into its MCP
-  client), separately from this change.
+- ~~Re-run the OAuth bootstrap to restore a valid Google Calendar refresh
+  token, then confirm a successful `tools/call list_events` span end to
+  end.~~ Done: after re-running `python -m google_calendar_mcp.bootstrap`,
+  a real Slack question ("今日の予定を教えて") produced a successful
+  `tools/call list_events`/`list_upcoming_events` span with real calendar
+  data, with no calendar content in the exported span.
+- Continuing the distributed trace from Slack through to Google Calendar MCP
+  requires a change on the Hermes Agent side (its outbound MCP calls don't
+  propagate trace context at all, independent of Google Calendar MCP) — this
+  is tracked as a known upstream gap with a planned path forward in
+  `docs/observability/hermes-trace-context.md`, not something to fix here.
 
-This was not performed as part of this change since it requires a live
-Slack message and real Google Calendar data; the synthetic and
-session-handshake-level verification above covers what is possible without
-that.
+The first item above was not performed as part of the original PR since it
+required a live Slack message and real Google Calendar data unavailable at
+the time; it was completed as manual verification afterward. The second
+item remains open and depends on upstream Hermes Agent work outside this
+repository's control.
