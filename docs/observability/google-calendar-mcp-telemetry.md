@@ -135,29 +135,51 @@ the SDK's built-in `extract_trace_context`, exercised directly by
 which sends a synthetic `traceparent` in a tool call's `_meta` and confirms
 the resulting span's trace ID and parent span ID match it.
 
-Whether Hermes Agent's own MCP client actually sends that `_meta` today was
-out of scope to change (Hermes Agent is the unmodified
-`nousresearch/hermes-agent` image; see
-`docs/observability/hermes-trace-context.md`), but it was possible to
-*observe* real Hermes Agent traffic during this work's Docker Compose
-verification: when the locally running Hermes Agent container reconnected to
-a recreated `google-calendar-mcp` container, its own OpenTelemetry
-instrumentation (the same `mcp-python-sdk` instrumentation scope, `service.name
-= hermes-agent`) emitted `Kind: Client` spans named `MCP send initialize`
-etc., and the corresponding Google Calendar MCP `Kind: Server` spans (`initialize`,
-`tools/list`) shared the same trace ID and were parented under them —
-without any change on either side. This shows the mechanism already works
-for MCP session-management requests between the real Hermes Agent and
-Google Calendar MCP.
+Whether Hermes Agent's own MCP client actually sends that `_meta` was out of
+scope to change (Hermes Agent is the unmodified `nousresearch/hermes-agent`
+image; see `docs/observability/hermes-trace-context.md`), but it was
+possible to confirm with a real, live Hermes Agent deployment and a real
+Slack message ("今日の予定を教えて", asking about today's schedule). The
+Collector received, among others:
 
-This was an incidental observation of session-handshake traffic
-(`initialize`, `ping`, `tools/list`), not a `tools/call` triggered by an
-actual user request end-to-end through Slack. Confirming that a real
-Slack-triggered `concierge.request` → `hermes.request` chain also continues
-into a `tools/call <tool>` span on Google Calendar MCP is recorded below as
-manual follow-up — nothing in the mechanism suggests it would behave
-differently, since the same MCP client code path is used for every request
-type, but it has not been directly observed.
+```text
+service.name: hermes-agent      Kind: Client   Name: MCP send tools/call list_events
+service.name: google-calendar-mcp  Kind: Server  Name: tools/call list_events
+  (same Trace ID, Google Calendar MCP span parented under Hermes Agent's)
+service.name: hermes-agent      Kind: Client   Name: MCP send tools/call list_upcoming_events
+service.name: google-calendar-mcp  Kind: Server  Name: tools/call list_upcoming_events
+  (same Trace ID, same parenting)
+```
+
+Both tool calls happened to fail (the account's stored Google OAuth refresh
+token was invalid — an unrelated, pre-existing credential issue, not caused
+by this change), which incidentally also confirmed the sensitive-data
+boundary against a real Google API error rather than just a synthetic one:
+both spans carried `error.type: tool_error` and `Status code: Error` with an
+**empty** status message — the real `google.auth.exceptions.RefreshError`
+text (visible in the container's stdout logs, which are unrelated to
+tracing) never reached the span.
+
+So: **the MCP-level propagation mechanism between Hermes Agent and Google
+Calendar MCP is confirmed working** — Hermes Agent's MCP client does send a
+`traceparent`, and Google Calendar MCP correctly joins as a child, for real
+`tools/call` requests, not just session-handshake traffic.
+
+However, this same verification also showed that chain does **not** extend
+back to the Slack-originated trace. The same request produced a *separate*
+Slack Gateway trace (`concierge.request` → `hermes.request` →
+`/v1/responses` on Hermes Agent → `slack.response`) with its own, different
+trace ID — Hermes Agent's `/v1/responses` `SERVER` span (which does inherit
+the Slack Gateway's trace, per `docs/observability/hermes-trace-context.md`)
+and its outgoing `MCP send tools/call ...` `CLIENT` span are both rooted
+independently (`Parent ID` empty on both), rather than the latter nesting
+under the former. This means Hermes Agent's own internal request-handling
+code does not propagate its current span into its MCP client calls — a gap
+inside Hermes Agent itself (a closed, unmodified vendor image), not
+something addressable from the Google Calendar MCP side. Closing it would
+require a change to Hermes Agent's own source or a further layer of
+auto-instrumentation on top of it, which is out of scope here and is
+recorded as follow-up.
 
 ## Privacy / sensitive-data boundary
 
@@ -176,9 +198,13 @@ string `"tool_error"`:
 
 This is exercised directly by
 `tests/test_telemetry.py::test_list_events_span_omits_calendar_content`
-(sentinel event summary/ID), and
+(sentinel event summary/ID),
 `tests/test_telemetry.py::test_unexpected_failure_omits_raw_message_and_credentials`
-(sentinel raw exception text containing a fake `refresh_token=...` value).
+(sentinel raw exception text containing a fake `refresh_token=...` value),
+and confirmed again with a real Google API failure during live verification
+(a real `RefreshError` from an invalid stored OAuth token — see "Incoming
+trace context" above): the span carried only `error.type: tool_error`, no
+message.
 
 ## Scope
 
@@ -190,21 +216,31 @@ Implemented:
 - Automated tests for successful, validation-error, and unexpected-failure
   tool calls, sensitive-data absence, and incoming trace-context joining.
 
+Confirmed live (real Hermes Agent, real Slack message, real — if currently
+failing — Google credentials): Hermes Agent's MCP client does propagate a
+`traceparent` into its `tools/call` requests, and Google Calendar MCP
+correctly joins as a child, for both a successful (`get_current_datetime`)
+and a failing (`list_events`, `list_upcoming_events`) tool call. See
+"Incoming trace context" above.
+
 Not implemented (tracked as follow-up under Milestone 5 / Milestone 9 in
 `docs/roadmap.md`):
 
 - Instrumentation of the Google Calendar API HTTP request itself (a
   `google-calendar.api` child span). Tool spans currently cover only the MCP
   request boundary, not the outbound Google API call latency separately.
-- A confirmed, real, Slack-triggered end-to-end trace
-  (`concierge.request` → `hermes.request` → `tools/call <tool>`) — the
-  session-handshake-level observation above is strong evidence the
-  mechanism works, but this specific chain has not been captured with a real
-  Slack message.
-- Any change to Hermes Agent itself. If the incidental observation above
-  turns out not to generalize to `tools/call`, closing that gap would
-  require changes to Hermes Agent's MCP client, which is out of scope here
-  and would need to be scoped separately.
+- A trace connecting Slack's `concierge.request` all the way into a Google
+  Calendar MCP `tools/call <tool>` span. Live verification confirmed the
+  Hermes Agent ↔ Google Calendar MCP leg works, but also confirmed that leg
+  is *not* currently joined to the Slack-originated trace — Hermes Agent's
+  own internal code does not carry its `/v1/responses` server span's context
+  into its outgoing MCP client calls. This is a gap inside Hermes Agent
+  itself (the unmodified vendor image), not something the Google Calendar
+  MCP side can address; closing it would require a change to Hermes Agent's
+  own source or a further auto-instrumentation layer on top of it (compare
+  `apps/hermes-agent/Dockerfile`'s existing aiohttp-server instrumentation),
+  which is out of scope here.
+- Any change to Hermes Agent itself.
 
 ## Ownership boundary
 
@@ -214,14 +250,15 @@ the `mcp` SDK, to Hermes Agent, or to Slack Gateway.
 
 ## Manual follow-up
 
-With real Google OAuth credentials configured, run a representative
-read-only query (e.g. through Slack: "what's on my calendar today?") and
-confirm in the Collector / Phoenix / MLflow that the resulting
-`tools/call list_events` (or similar) span on `google-calendar-mcp`:
-
-1. Shares a trace ID with the originating `concierge.request` /
-   `hermes.request` spans.
-2. Carries no calendar content, matching the sensitive-data boundary above.
+- Re-run the OAuth bootstrap (`python -m google_calendar_mcp.bootstrap`) to
+  restore a valid Google Calendar refresh token, then confirm a
+  **successful** `tools/call list_events` (or similar) span end to end — the
+  live verification above happened to hit an expired-credential error path
+  before a success path with real calendar data.
+- If continuing the distributed trace from Slack through to Google Calendar
+  MCP is wanted, scope a follow-up change to Hermes Agent's own
+  instrumentation (its internal request-context propagation into its MCP
+  client), separately from this change.
 
 This was not performed as part of this change since it requires a live
 Slack message and real Google Calendar data; the synthetic and

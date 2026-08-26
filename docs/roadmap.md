@@ -503,11 +503,21 @@ the MCP request using the standard OpenTelemetry API, a Google Calendar MCP
 tool span joins an incoming distributed trace as a child span whenever the
 caller supplies one — with no Google Calendar MCP-side code dedicated to
 this beyond the existing SDK configuration, and no change to Hermes Agent.
-This was directly observed with the real, already-running Hermes Agent
-container's own MCP session-handshake traffic during verification, though a
-full Slack-triggered `concierge.request` → `hermes.request` →
-`tools/call <tool>` chain has not yet been captured end-to-end; that
-remains a manual follow-up (see the observability document above).
+This was confirmed live with the real, already-running Hermes Agent
+container and a real Slack message: Hermes Agent's own `tools/call
+list_events` / `tools/call list_upcoming_events` MCP client spans and Google
+Calendar MCP's corresponding server spans shared a trace ID and were
+correctly parented, for both a successful and a (separately, credential-
+related) failing tool call.
+
+That same live check also showed this Hermes Agent ↔ Google Calendar MCP
+trace is not currently joined to the Slack-originated
+`concierge.request` → `hermes.request` trace — Hermes Agent's own internal
+code does not carry its `/v1/responses` server span's context into its
+outgoing MCP client calls. That is a gap inside Hermes Agent itself (the
+unmodified vendor image), out of scope here; see
+`docs/observability/google-calendar-mcp-telemetry.md` for the full
+evidence and what a follow-up would require.
 
 ### Initial Trace Scope
 
