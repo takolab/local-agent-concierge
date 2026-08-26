@@ -401,7 +401,7 @@ Phoenix          MLflow
 * [x] Configure the Collector to export traces to MLflow
 * [x] Document the observability infrastructure setup
 * [x] Add OpenTelemetry instrumentation to the Slack Gateway
-* [ ] Add OpenTelemetry instrumentation to the Google Calendar MCP service
+* [x] Add OpenTelemetry instrumentation to the Google Calendar MCP service
 * [x] Trace requests from the Slack Gateway to Hermes Agent
 * [x] Inject W3C Trace Context into the Slack Gateway's outgoing Hermes request
 * [x] Extract incoming trace context in Hermes Agent and join the same distributed trace
@@ -473,6 +473,62 @@ Hermes-internal processing (LLM calls, tool calls) are not added yet; that is
 tracked under Milestone 9. Instrumentation of the Google Calendar MCP service
 also remains follow-up work.
 
+### Verified Google Calendar MCP Trace
+
+The Google Calendar MCP service now exports backend-neutral OpenTelemetry
+traces to the shared OpenTelemetry Collector, reusing the same
+`service.namespace` convention, the same OTLP/gRPC exporter, and the same
+Collector endpoint configuration as the Slack Gateway
+(`service.name = google-calendar-mcp`).
+
+Unlike the Slack Gateway and Hermes Agent, no application span-creation code
+was added. The `mcp` Python SDK the service already depends on ships its own
+`OpenTelemetryMiddleware`, enabled by default, which wraps every MCP
+`tools/call` request in a span:
+
+```text
+tools/call <tool_name>
+```
+
+with a bounded, low-cardinality attribute set (`mcp.method.name`,
+`gen_ai.tool.name`, `gen_ai.operation.name`, `jsonrpc.request.id`), a
+sanitized `error.type = "tool_error"` on failure, and no calendar content,
+credentials, or raw exception text — verified both by automated tests and by
+a real Docker Compose run against the shared Collector. See
+`docs/observability/google-calendar-mcp-telemetry.md` for the full design
+notes, the sensitive-data verification, and what remains follow-up work.
+
+Because the same SDK middleware extracts an incoming W3C `traceparent` from
+the MCP request using the standard OpenTelemetry API, a Google Calendar MCP
+tool span joins an incoming distributed trace as a child span whenever the
+caller supplies one — with no Google Calendar MCP-side code dedicated to
+this beyond the existing SDK configuration, and no change to Hermes Agent.
+This was confirmed live with the real, already-running Hermes Agent
+container and a real Slack message: Hermes Agent's own `tools/call
+list_events` / `tools/call list_upcoming_events` MCP client spans and Google
+Calendar MCP's corresponding server spans shared a trace ID and were
+correctly parented, for both a successful and a (separately, credential-
+related) failing tool call.
+
+That same live check also showed this Hermes Agent ↔ Google Calendar MCP
+trace is not currently joined to the Slack-originated
+`concierge.request` → `hermes.request` trace — Hermes Agent's own internal
+code does not carry its `/v1/responses` server span's context into its
+outgoing MCP client calls. That is a gap inside Hermes Agent itself (the
+unmodified vendor image), out of scope here; see
+`docs/observability/google-calendar-mcp-telemetry.md` for the full
+evidence and what a follow-up would require.
+
+This matches a confirmed, tracked upstream issue
+([NousResearch/hermes-agent#60177](https://github.com/NousResearch/hermes-agent/issues/60177))
+with an open, unmerged fix
+([NousResearch/hermes-agent#78965](https://github.com/NousResearch/hermes-agent/pull/78965)).
+The planned approach for this repository — recorded in
+`docs/observability/hermes-trace-context.md` — is to wait for that (or a
+successor) to merge upstream, then bump the pinned tag in
+`apps/hermes-agent/Dockerfile` and enable its `mcp.trace_propagation: true`
+config, rather than patching Hermes Agent source directly.
+
 ### Initial Trace Scope
 
 ```text
@@ -488,6 +544,13 @@ concierge.request
 |
 +-- slack.response
 ```
+
+This was the originally planned span hierarchy. The Google Calendar MCP
+span actually implemented is named `tools/call <tool_name>` (from the `mcp`
+SDK's own instrumentation, see "Verified Google Calendar MCP Trace" above)
+rather than `calendar.mcp`, and the Google Calendar API HTTP request itself
+does not yet have its own child span (`google-calendar.api`) — that remains
+follow-up work.
 
 The exact span hierarchy may evolve as Hermes Agent instrumentation and distributed trace propagation are explored.
 

@@ -36,17 +36,25 @@ The current observability infrastructure includes:
 - Health checks
 - Manual synthetic trace verification
 
-The Slack Gateway's outgoing request to Hermes Agent now injects a W3C Trace
+The Slack Gateway's outgoing request to Hermes Agent injects a W3C Trace
 Context `traceparent` header using the OpenTelemetry API's global propagator,
 so the request carries the `hermes.request` span's trace ID and span ID.
-Hermes Agent does not yet extract this header or create spans of its own, so
-the trace does not yet continue past that HTTP boundary.
+Hermes Agent extracts this header (via OpenTelemetry auto-instrumentation
+layered on the unmodified official image, see
+`docs/observability/hermes-trace-context.md`) and creates a matching
+`SERVER` span, so the trace continues past that HTTP boundary.
+
+The Google Calendar MCP service exports its own OpenTelemetry traces to the
+Collector (`service.name = google-calendar-mcp`), using the `mcp` SDK's
+built-in per-tool-call instrumentation — see
+`docs/observability/google-calendar-mcp-telemetry.md`.
 
 The following are not implemented yet:
 
-- Google Calendar MCP instrumentation
-- Hermes Agent instrumentation
-- Hermes Agent extracting incoming trace context to join the same distributed trace
+- Spans for Hermes Agent's own internal processing (LLM calls, tool calls)
+- A dedicated span for the Google Calendar API HTTP request itself
+- A confirmed, real, Slack-triggered end-to-end trace continuing from Hermes
+  Agent into a Google Calendar MCP tool span
 - Phoenix-specific application instrumentation
 - MLflow-specific application instrumentation
 - Evaluation datasets
@@ -527,22 +535,11 @@ Application telemetry schemas and redaction rules will be designed together with
 
 ## Next Step
 
-The next observability implementation phase will instrument the Slack Gateway using OpenTelemetry.
+The Slack Gateway, Hermes Agent's HTTP boundary, and the Google Calendar MCP
+service are now instrumented. The next observability work is comparing
+Phoenix and MLflow using the resulting traces (see Milestone 5 in
+`docs/roadmap.md`), and later extending instrumentation to the Orchestrator,
+other Agents, and remaining tool integrations (Milestone 9).
 
-The intended flow is:
-
-```text
-Slack Gateway
-      |
-      | OpenTelemetry
-      v
-OpenTelemetry Collector
-      |
-      +------> Phoenix
-      |
-      +------> MLflow
-```
-
-The Slack Gateway should depend only on OpenTelemetry and the Collector endpoint.
-
-It should not use Phoenix-specific or MLflow-specific tracing SDKs during the initial backend comparison.
+Each instrumented service depends only on OpenTelemetry and the Collector
+endpoint, and does not use Phoenix-specific or MLflow-specific tracing SDKs.

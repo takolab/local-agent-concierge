@@ -109,6 +109,9 @@ services:
 
     restart: unless-stopped
 
+    environment:
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
+
     volumes:
       - ./data/google-calendar:/data/google-calendar
 
