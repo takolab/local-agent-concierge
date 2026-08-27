@@ -618,8 +618,8 @@ Allow the concierge to propose calendar changes without executing them until the
 
 ### Tasks
 
-* [ ] Define a proposed-action schema
-* [ ] Define approval states
+* [x] Define a proposed-action schema
+* [x] Define approval states
 * [ ] Create the Approval Service
 * [ ] Add a Dockerfile for the Approval Service
 * [ ] Add the Approval Service to `docker-compose.yml`
@@ -636,6 +636,33 @@ Allow the concierge to propose calendar changes without executing them until the
 * [ ] Record the result of approved actions
 * [ ] Add approval workflow tests
 * [ ] Document the approval security model
+
+### Proposed-Action Schema and Approval States
+
+The domain foundation for this milestone is now defined in
+`packages/approvals`: a `ProposedAction` schema covering
+`calendar.create_event`, `calendar.update_event`, and
+`calendar.delete_event`, and an `ApprovalState` lifecycle
+(`pending` → `approved` / `rejected` / `expired`, with `approved`,
+`rejected`, and `expired` all terminal).
+
+`ProposedAction` is an immutable, validated record of exactly what a
+calendar write would do (action type, target event ID where applicable,
+and a flat string parameter set); because it is a frozen dataclass, exact
+structural equality is a future Approval Service's basis for detecting
+whether an action changed after approval. `Approval` binds a
+`ProposedAction` to the requesting actor and originating conversation and
+enforces its state transitions through an exhaustive, tested transition
+table — an approval can never move out of a terminal state, so a rejected
+or expired proposal cannot be turned into an approved one.
+
+This is schema and state-machine only: no Approval Service, no
+persistence, no Slack controls, no approval expiration scheduling, and no
+calendar write execution exist yet. See
+`docs/approval/domain-model.md` for the full design, the security
+boundary this establishes (and what it deliberately does not cover yet),
+and `packages/approvals/tests` for the automated verification (128 tests,
+100% line coverage).
 
 ### Planned Flow
 

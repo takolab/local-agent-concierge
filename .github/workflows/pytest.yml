@@ -46,6 +46,12 @@ jobs:
       - name: Run Slack Gateway tests
         run: docker compose --profile test run --rm slack-gateway-test
 
+      - name: Install Approvals domain package
+        run: pip install -e "packages/approvals[test]"
+
+      - name: Run Approvals domain tests
+        run: python -m pytest packages/approvals/tests
+
       - name: Install Hermes Agent test dependencies
         run: pip install -r apps/hermes-agent/tests/requirements.txt
 
