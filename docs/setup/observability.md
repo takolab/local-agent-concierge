@@ -35,6 +35,9 @@ The current observability infrastructure includes:
 - Trace fan-out from the Collector to Phoenix and MLflow
 - Health checks
 - Manual synthetic trace verification
+- Collector-side redaction of known-sensitive span attributes (defense in
+  depth behind application-side sanitization), see
+  `docs/observability/collector-redaction.md`
 
 The Slack Gateway's outgoing request to Hermes Agent injects a W3C Trace
 Context `traceparent` header using the OpenTelemetry API's global propagator,
@@ -325,6 +328,9 @@ The current Collector trace pipeline is:
 OTLP receiver
     |
     v
+redaction processor
+    |
+    v
 batch processor
     |
     +------> debug exporter
@@ -337,6 +343,17 @@ batch processor
 The debug exporter currently uses `verbosity: detailed` so that smoke-test spans can be inspected through Docker logs.
 
 It is intended for local development and validation and may be removed or disabled later.
+
+The `redaction` processor runs before `batch`, so it applies uniformly to
+every exporter below it, the debug exporter included. It is a
+defense-in-depth layer behind application-side sanitization (Slack Gateway,
+Google Calendar MCP already avoid placing sensitive data in span
+attributes by design) — it masks a fixed list of known-sensitive attribute
+keys in case application code regresses or some other instrumentation
+exporting into this Collector attaches one by mistake. See
+`docs/observability/collector-redaction.md` for the full design rationale,
+attribute list, and verification, and the "Collector Redaction Smoke Test"
+section below for how to check it locally.
 
 ## Synthetic Fan-Out Smoke Test
 
@@ -446,6 +463,84 @@ docker compose logs --since=2m otel-collector \
 
 No exporter error should be reported for the smoke-test trace.
 
+## Collector Redaction Smoke Test
+
+The automated version of this check is
+`infra/observability/tests/test_redaction.py`:
+
+```bash
+pip install -r infra/observability/tests/requirements.txt
+python -m pytest infra/observability/tests
+```
+
+This requires a Docker daemon (it runs its own throwaway Collector
+container on ports 24318/24133 so it does not conflict with an
+already-running `docker compose up`) and uses only synthetic placeholder
+values — see `docs/observability/collector-redaction.md`.
+
+To check it manually against the real running stack instead, send a
+synthetic span carrying both a known-sensitive attribute and a safe one:
+
+```bash
+python3 - <<'PY'
+import json
+import secrets
+import time
+import urllib.request
+
+payload = {
+    "resourceSpans": [
+        {
+            "resource": {
+                "attributes": [
+                    {"key": "service.name", "value": {"stringValue": "synthetic-redaction-test"}},
+                ]
+            },
+            "scopeSpans": [
+                {
+                    "scope": {"name": "manual-redaction-smoke-test"},
+                    "spans": [
+                        {
+                            "traceId": secrets.token_hex(16),
+                            "spanId": secrets.token_hex(8),
+                            "name": "collector-redaction-smoke-test",
+                            "kind": 1,
+                            "startTimeUnixNano": str(time.time_ns()),
+                            "endTimeUnixNano": str(time.time_ns() + 10_000_000),
+                            "attributes": [
+                                {"key": "operation.name", "value": {"stringValue": "synthetic-operation"}},
+                                {"key": "authorization", "value": {"stringValue": "Bearer fake-secret-value-for-redaction-test"}},
+                            ],
+                        }
+                    ],
+                }
+            ],
+        }
+    ]
+}
+
+request = urllib.request.Request(
+    "http://127.0.0.1:4318/v1/traces",
+    data=json.dumps(payload).encode("utf-8"),
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+with urllib.request.urlopen(request, timeout=5) as response:
+    print("HTTP status:", response.status)
+PY
+```
+
+Then confirm both halves of the redaction contract in the same log output:
+
+```bash
+docker compose logs --since=2m otel-collector \
+  | grep -A 15 "collector-redaction-smoke-test"
+```
+
+Expected: `operation.name: Str(synthetic-operation)` is unchanged, and
+`authorization: Str(****)` — the masked placeholder, not
+`fake-secret-value-for-redaction-test` — appears instead of the raw value.
+
 ## Verify Phoenix
 
 Open:
@@ -531,13 +626,23 @@ Do not place the following information in trace attributes:
 - Passwords
 - Personal information
 
-Application telemetry schemas and redaction rules will be designed together with the first application instrumentation.
+Application instrumentation (Slack Gateway, Google Calendar MCP) is the
+primary defense against exporting the data above, verified by their own
+tests. The shared Collector's `redaction` processor adds a second,
+defense-in-depth layer that masks a fixed list of known-sensitive attribute
+keys before any exporter sees them — see
+`docs/observability/collector-redaction.md` for the design rationale and
+`docs/roadmap.md` Milestone 5 for the checklist status. Neither layer is a
+general-purpose PII detector; both target the specific categories listed
+above.
 
 ## Next Step
 
 The Slack Gateway, Hermes Agent's HTTP boundary, and the Google Calendar MCP
-service are now instrumented. The next observability work is comparing
-Phoenix and MLflow using the resulting traces (see Milestone 5 in
+service are now instrumented, and the shared Collector applies a
+defense-in-depth redaction layer to known-sensitive attributes (see
+`docs/observability/collector-redaction.md`). The next observability work is
+comparing Phoenix and MLflow using the resulting traces (see Milestone 5 in
 `docs/roadmap.md`), and later extending instrumentation to the Orchestrator,
 other Agents, and remaining tool integrations (Milestone 9).
 

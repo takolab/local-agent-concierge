@@ -406,7 +406,7 @@ Phoenix          MLflow
 * [x] Inject W3C Trace Context into the Slack Gateway's outgoing Hermes request
 * [x] Extract incoming trace context in Hermes Agent and join the same distributed trace
 * [x] Record latency and error information
-* [ ] Redact secrets and personal information
+* [x] Redact secrets and personal information
 * [x] Verify that the same synthetic workload can be inspected in Phoenix and MLflow
 * [ ] Compare trace visualization and debugging workflows
 * [ ] Compare search and filtering capabilities
@@ -528,6 +528,32 @@ The planned approach for this repository — recorded in
 successor) to merge upstream, then bump the pinned tag in
 `apps/hermes-agent/Dockerfile` and enable its `mcp.trace_propagation: true`
 config, rather than patching Hermes Agent source directly.
+
+### Verified Collector-Side Redaction
+
+Application instrumentation (Slack Gateway, Google Calendar MCP) already
+avoids placing sensitive data in span attributes by design, verified by the
+tests referenced above. The shared OpenTelemetry Collector now adds a second,
+defense-in-depth layer: a `redaction` processor
+(`infra/observability/otel-collector.yaml`) that masks a fixed list of
+known-sensitive span attribute keys — credentials, tokens, Authorization
+headers, Slack/Calendar identifiers and content, raw exception text — before
+*any* exporter (`debug` included, not just Phoenix and MLflow) sees them.
+Every other attribute, including ones not explicitly known about in advance,
+passes through unchanged (`allow_all_keys: true`), so this cannot silently
+drop future legitimate telemetry the way an exhaustive allowlist would.
+
+This protects against an application-side regression or an auto-instrumented
+dependency (e.g. Hermes Agent's own OpenTelemetry auto-instrumentation, which
+exports to this same Collector) attaching one of these keys by mistake. It
+does not attempt general-purpose PII detection over arbitrary free-text
+attribute values — see `docs/observability/collector-redaction.md` for the
+full design rationale, the processor evaluated and rejected, the complete
+attribute list and its reasoning, and the verification evidence (an
+automated test suite at `infra/observability/tests/test_redaction.py` using
+only synthetic placeholder values, plus a real Docker Compose run confirming
+Phoenix and MLflow both still receive the (now-redacted) trace without
+export errors).
 
 ### Initial Trace Scope
 

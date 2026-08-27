@@ -11,6 +11,82 @@ receivers:
         endpoint: 0.0.0.0:4318
 
 processors:
+  # Defense-in-depth only. Application instrumentation (Slack Gateway,
+  # Google Calendar MCP) is the first line of defense and never places
+  # sensitive data in span attributes by design — see
+  # docs/observability/collector-redaction.md. This processor's job is to
+  # mask a known-sensitive attribute anyway, before it reaches *any*
+  # exporter below (debug included), in case application code regresses or
+  # an auto-instrumented dependency (e.g. Hermes Agent's own OpenTelemetry
+  # auto-instrumentation) attaches one of these keys unexpectedly. It does
+  # not attempt general-purpose PII detection over free-text values.
+  redaction:
+    # Preserve every attribute this Collector doesn't already know to be
+    # sensitive; only blocked_key_patterns below removes anything. This
+    # fails open for unknown-but-legitimate attributes (so future,
+    # non-sensitive instrumentation isn't silently dropped) and fails
+    # closed only for the specific key patterns listed.
+    allow_all_keys: true
+    # Explicit safety net: these currently-emitted attributes (Slack
+    # Gateway, Google Calendar MCP, Hermes Agent's HTTP auto-instrumentation)
+    # are known-safe and are guaranteed to pass through untouched regardless
+    # of the blocked_key_patterns list below, per the redaction processor's
+    # own documented precedence (ignored keys are checked first).
+    ignored_keys:
+      - error.type
+      - mcp.method.name
+      - mcp.protocol.version
+      - gen_ai.operation.name
+      - gen_ai.tool.name
+      - jsonrpc.request.id
+      - concierge.request.source
+      - concierge.downstream.service
+      - concierge.operation
+      - slack.event.type
+      - slack.message.threaded
+      - http.scheme
+      - http.host
+      - http.route
+      - http.method
+      - http.status_code
+    blocked_key_patterns:
+      # Credentials and tokens. ".*token.*" / ".*api[_-]?key.*" mirror the
+      # upstream redactionprocessor's own documented example; the rest are
+      # the same shape of credential-related key that generic HTTP /
+      # OpenTelemetry auto-instrumentation is known to attach (e.g. a
+      # captured request header), not something observed in this
+      # repository's own instrumentation.
+      - '.*token.*'
+      - '.*secret.*'
+      - '.*password.*'
+      - '.*api[_-]?key.*'
+      - '.*credential.*'
+      - '(?i)^authorization$'
+      - 'http\.request\.header\.authorization'
+      - 'http\.response\.header\.authorization'
+      # Personal / identifying data and message content that application
+      # instrumentation already documents as excluded by design (Slack
+      # message body, conversation/channel/user/workspace identifiers,
+      # Calendar event and attendee data).
+      - '.*email.*'
+      - 'slack\.(user|channel|workspace|team)\.(id|name|email)'
+      - '^conversation\.id$'
+      - 'slack\.message\.(text|body|content)'
+      - 'calendar\.event\.(id|title|summary)'
+      - '^calendar\.id$'
+      - '(request|response)\.body'
+      # Raw exception/error text (application instrumentation already
+      # avoids this; these are the standard OpenTelemetry semantic-
+      # convention exception attribute names in case something else, e.g.
+      # `record_exception`, is ever used upstream of this Collector).
+      - 'exception\.(message|stacktrace)'
+      - '^error\.message$'
+    # Adds a small integer count attribute (e.g. redaction.masked.count)
+    # only to spans that actually had something masked, so redaction is
+    # independently verifiable without listing the redacted key names on
+    # every span.
+    summary: info
+
   batch:
 
 exporters:
@@ -36,6 +112,7 @@ service:
       receivers:
         - otlp
       processors:
+        - redaction
         - batch
       exporters:
         - debug
