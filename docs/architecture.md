@@ -485,7 +485,7 @@ Useful telemetry includes:
 - Error type
 - Final task status
 
-Personal message content, credentials, OAuth tokens, and other sensitive information must be redacted before traces are exported.
+Personal message content, credentials, OAuth tokens, and other sensitive information must be redacted before traces are exported. Application instrumentation is the primary boundary; the shared OpenTelemetry Collector applies a second, defense-in-depth redaction layer for a fixed list of known-sensitive attribute keys — see `docs/observability/collector-redaction.md`.
 
 The initial Phoenix and MLflow comparison should use backend-neutral OpenTelemetry instrumentation wherever practical. Backend-specific instrumentation may be evaluated separately after the shared tracing baseline has been established.
 
@@ -607,6 +607,5 @@ The following decisions will be documented as the implementation progresses:
 - Memory embedding model
 - PostgreSQL and pgvector schema
 - Approval token design
-- OpenTelemetry redaction strategy
 - Observability backend selection after the Phoenix and MLflow comparison
 - Authentication between internal services

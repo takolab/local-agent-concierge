@@ -51,3 +51,9 @@ jobs:
 
       - name: Run Hermes Agent trace context propagation tests
         run: python -m pytest apps/hermes-agent/tests
+
+      - name: Install OpenTelemetry Collector redaction test dependencies
+        run: pip install -r infra/observability/tests/requirements.txt
+
+      - name: Run OpenTelemetry Collector redaction tests
+        run: python -m pytest infra/observability/tests
