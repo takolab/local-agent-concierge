@@ -159,6 +159,35 @@ task's stated boundaries:
   remain unconstrained beyond "non-empty string" until this repository
   defines them somewhere.
 
+## Open design questions for future Milestone 7 work
+
+Raised during review of the PR that added this package
+([#17](https://github.com/takolab/local-agent-concierge/pull/17)) as
+non-blocking for this bounded schema, but worth deciding explicitly
+before `AgentRequest` is wired into the Orchestrator or another runtime:
+
+1. **`trace_id` vs. OpenTelemetry context.** Whether `trace_id` is only a
+   logical correlation identifier, or is expected to correspond to the
+   active OpenTelemetry trace ID. Distributed trace propagation should
+   likely continue to rely on W3C Trace Context / `traceparent` rather
+   than this field becoming the propagation mechanism itself.
+2. **`permissions` enforcement boundary.** The schema stays opaque here
+   by design; once the Orchestrator and tool integrations exist, where a
+   permission like `calendar.read` is actually enforced (Orchestrator,
+   agent adapter, tool service, or some combination) needs an explicit
+   decision, so this field doesn't stay advisory-only metadata.
+3. **Optional fields in serialized form.** `memory_scopes`, `permissions`,
+   and `trace_id` have constructor defaults, but `agent_request_from_dict`
+   currently requires all 7 fields to be present in the serialized form —
+   internally consistent, but once this becomes an actual transport
+   contract, whether the wire schema should keep requiring explicit `[]`
+   / `null`, or should let omitted optional fields map to the constructor
+   defaults, needs a decision.
+
+None of these are resolved by this change; they're carried forward as
+open questions for whichever future task wires `AgentRequest` into the
+Orchestrator or another transport.
+
 ## Tests
 
 `packages/agent-contracts/tests/` — 87 tests, 100% line coverage of
