@@ -32,9 +32,12 @@ showed that the SDK already ships built-in OpenTelemetry instrumentation:
 Given this, the natural, minimal-footprint design is to configure the
 OpenTelemetry SDK (a `TracerProvider` with a `Resource` and an OTLP exporter)
 the same way `apps/slack-gateway` already does, and let the SDK's own
-instrumentation produce the spans. No custom span-creation code was added to
-`server.py` or `calendar_client.py`, and no application error-handling
-behavior was changed.
+instrumentation produce the `tools/call` span. No custom span-creation code
+was needed for that span in `server.py` or `calendar_client.py`, and no
+application error-handling behavior was changed. (`calendar_client.py` does
+now create one child span of its own, for the one boundary the SDK's
+middleware does not cover — the outbound Google API request itself; see
+"Google Calendar API child span" below.)
 
 ## Implementation
 
@@ -103,6 +106,72 @@ and no other attribute, event, or status description — matching the
 sanitized, low-cardinality classification style already used by
 `error.type = "hermes.request_error"` / `"slack.response_error"` in the
 Slack Gateway.
+
+### Google Calendar API child span
+
+The actual Google Calendar API request — the `googleapiclient` `.execute()`
+call inside `calendar_client.py` — now has its own `CLIENT` child span,
+created with application code (`telemetry.trace_calendar_api`), unlike the
+SDK-provided `tools/call` span above:
+
+```text
+tools/call list_events
+└── google-calendar.api
+```
+
+`trace_calendar_api()` wraps only the `.execute()` call itself — not
+`create_calendar_service()` (credential loading and client construction) and
+not request validation or response formatting — so the span name stays
+constant and low-cardinality regardless of which tool triggered it:
+
+```text
+google-calendar.api
+```
+
+The specific Google API operation is recorded as a single bounded attribute
+with exactly two possible values:
+
+```text
+google_calendar.operation = "events.list" | "freebusy.query"
+```
+
+`list_events` and `list_busy_periods` are the only two call sites
+(`.events().list()` and `.freebusy().query()`); `list_upcoming_events` and
+`list_free_periods` call into those same two functions rather than issuing
+their own API request, so they produce the same span with no additional
+instrumentation.
+
+Because the span is created with `tracer.start_as_current_span(...)` while
+the SDK's `tools/call` span is still the active OpenTelemetry span (ordinary
+ambient context propagation, no manual trace/span ID handling), it nests
+under whichever `tools/call` span triggered it whenever one is active, and
+becomes a root span otherwise.
+
+On failure, the span status becomes `ERROR` with the same sanitized,
+low-cardinality style as the tool-level span:
+
+```text
+error.type = "google_calendar.api_error"
+```
+
+`record_exception` and `set_status_on_exception` are both disabled on the
+span (the same choice `apps/slack-gateway` makes for its own child spans),
+so the SDK's default exception-recording behavior never attaches a raw
+exception message or exception type as a span event; the original exception
+is re-raised unchanged (a bare `raise`, no wrapping) so caller-visible error
+handling is unaffected by this instrumentation.
+
+Verified by `tests/test_telemetry.py`:
+`test_calendar_api_span_for_list_events`,
+`test_calendar_api_span_for_list_busy_periods`,
+`test_calendar_api_span_marks_error_and_preserves_exception`,
+`test_calendar_api_span_omits_calendar_content`,
+`test_calendar_api_span_is_child_of_tool_call_span`, and
+`test_calendar_api_span_for_list_busy_periods_tool_is_child` — the last two
+drive a real `tools/call` request through the MCP `Client` (rather than
+constructing a span directly) to confirm the parent/child relationship end
+to end, with only `create_calendar_service()` mocked to avoid a real Google
+API call.
 
 ### Verified span export
 
@@ -206,6 +275,20 @@ and confirmed again with a real Google API failure during live verification
 trace context" above): the span carried only `error.type: tool_error`, no
 message.
 
+The same guarantee extends to the `google-calendar.api` span (see "Google
+Calendar API child span" above): `trace_calendar_api()` only ever receives a
+fixed `operation` string literal written at the two `calendar_client.py`
+call sites (`"events.list"` / `"freebusy.query"`), never a value derived
+from calendar content, credentials, or the API response, and its error path
+attaches only the fixed string `google_calendar.api_error` — never
+`str(exception)` — with both `record_exception` and `set_status_on_exception`
+disabled so the OpenTelemetry SDK's default exception-recording behavior
+cannot attach one either. Exercised by
+`tests/test_telemetry.py::test_calendar_api_span_omits_calendar_content` and
+`tests/test_telemetry.py::test_calendar_api_span_marks_error_and_preserves_exception`
+(sentinel event summary/ID and a sentinel `refresh_token=...` value inside a
+synthetic exception message, respectively).
+
 ## Scope
 
 Implemented:
@@ -215,6 +298,10 @@ Implemented:
 - Export to the shared OpenTelemetry Collector over OTLP/gRPC.
 - Automated tests for successful, validation-error, and unexpected-failure
   tool calls, sensitive-data absence, and incoming trace-context joining.
+- A `google-calendar.api` child span around the actual Google Calendar API
+  `.execute()` call (`events.list` / `freebusy.query`), nested under the
+  active `tools/call` span via ordinary OpenTelemetry context propagation.
+  See "Google Calendar API child span" above.
 
 Confirmed live (real Hermes Agent, real Slack message, real — if currently
 failing — Google credentials): Hermes Agent's MCP client does propagate a
@@ -226,9 +313,6 @@ and a failing (`list_events`, `list_upcoming_events`) tool call. See
 Not implemented (tracked as follow-up under Milestone 5 / Milestone 9 in
 `docs/roadmap.md`):
 
-- Instrumentation of the Google Calendar API HTTP request itself (a
-  `google-calendar.api` child span). Tool spans currently cover only the MCP
-  request boundary, not the outbound Google API call latency separately.
 - A trace connecting Slack's `concierge.request` all the way into a Google
   Calendar MCP `tools/call <tool>` span. Live verification confirmed the
   Hermes Agent ↔ Google Calendar MCP leg works, but also confirmed that leg

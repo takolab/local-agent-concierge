@@ -1,18 +1,20 @@
 from collections.abc import Sequence
+from datetime import datetime
 from unittest.mock import MagicMock
 
 import mcp.shared._otel as mcp_otel
 import pytest
 from mcp import Client
+from opentelemetry import trace
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import (
     SimpleSpanProcessor,
     SpanExporter,
     SpanExportResult,
 )
-from opentelemetry.trace import StatusCode
+from opentelemetry.trace import SpanKind, StatusCode
 
-from google_calendar_mcp import server, telemetry
+from google_calendar_mcp import calendar_client, server, telemetry
 
 
 class RecordingSpanExporter(SpanExporter):
@@ -53,6 +55,9 @@ def exported_spans(
     )
 
     monkeypatch.setattr(mcp_otel, "_tracer", tracer)
+    monkeypatch.setattr(
+        trace, "get_tracer_provider", lambda: tracer_provider
+    )
 
     return exporter.spans
 
@@ -69,6 +74,16 @@ def _tool_call_span(
     ]
     assert len(matches) == 1
     return matches[0]
+
+
+def _calendar_api_spans(
+    spans: list[ReadableSpan],
+) -> list[ReadableSpan]:
+    return [
+        span
+        for span in spans
+        if span.name == "google-calendar.api"
+    ]
 
 
 def test_configure_tracing_builds_expected_resource() -> None:
@@ -282,3 +297,255 @@ async def test_missing_trace_context_falls_back_to_root_span(
     span = _tool_call_span(exported_spans, "get_server_status")
 
     assert span.parent is None
+
+
+def test_calendar_api_span_for_list_events(
+    exported_spans: list[ReadableSpan],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_service = MagicMock()
+    fake_service.events.return_value.list.return_value.execute.return_value = {
+        "items": []
+    }
+
+    monkeypatch.setattr(
+        calendar_client,
+        "create_calendar_service",
+        lambda: fake_service,
+    )
+
+    calendar_client.list_events(
+        time_min=datetime.fromisoformat(
+            "2026-08-10T09:00:00+01:00"
+        ),
+    )
+
+    spans = _calendar_api_spans(exported_spans)
+    assert len(spans) == 1
+
+    span = spans[0]
+    assert span.kind == SpanKind.CLIENT
+    assert span.attributes["google_calendar.operation"] == (
+        "events.list"
+    )
+    assert span.status.status_code == StatusCode.UNSET
+    assert "error.type" not in span.attributes
+
+
+def test_calendar_api_span_for_list_busy_periods(
+    exported_spans: list[ReadableSpan],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_service = MagicMock()
+    fake_service.freebusy.return_value.query.return_value.execute.return_value = {
+        "calendars": {
+            "primary": {
+                "busy": [],
+            }
+        }
+    }
+
+    monkeypatch.setattr(
+        calendar_client,
+        "create_calendar_service",
+        lambda: fake_service,
+    )
+
+    calendar_client.list_busy_periods(
+        time_min=datetime.fromisoformat(
+            "2026-08-10T09:00:00+01:00"
+        ),
+        time_max=datetime.fromisoformat(
+            "2026-08-10T18:00:00+01:00"
+        ),
+    )
+
+    spans = _calendar_api_spans(exported_spans)
+    assert len(spans) == 1
+
+    span = spans[0]
+    assert span.attributes["google_calendar.operation"] == (
+        "freebusy.query"
+    )
+    assert span.status.status_code == StatusCode.UNSET
+
+
+def test_calendar_api_span_marks_error_and_preserves_exception(
+    exported_spans: list[ReadableSpan],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_error_message = (
+        "synthetic Google API failure for "
+        "refresh_token=sentinel-refresh-token-value"
+    )
+
+    class FakeApiError(Exception):
+        pass
+
+    fake_service = MagicMock()
+    fake_service.events.return_value.list.return_value.execute.side_effect = (
+        FakeApiError(raw_error_message)
+    )
+
+    monkeypatch.setattr(
+        calendar_client,
+        "create_calendar_service",
+        lambda: fake_service,
+    )
+
+    with pytest.raises(FakeApiError) as exc_info:
+        calendar_client.list_events(
+            time_min=datetime.fromisoformat(
+                "2026-08-10T09:00:00+01:00"
+            ),
+        )
+
+    assert str(exc_info.value) == raw_error_message
+
+    spans = _calendar_api_spans(exported_spans)
+    assert len(spans) == 1
+
+    span = spans[0]
+    assert span.status.status_code == StatusCode.ERROR
+    assert span.attributes["error.type"] == (
+        "google_calendar.api_error"
+    )
+    assert len(span.events) == 0
+
+    serialized_span = "".join(
+        [
+            str(span.attributes),
+            str(span.events),
+            str(span.status),
+        ]
+    )
+
+    assert raw_error_message not in serialized_span
+    assert "sentinel-refresh-token-value" not in serialized_span
+    assert "FakeApiError" not in serialized_span
+
+
+def test_calendar_api_span_omits_calendar_content(
+    exported_spans: list[ReadableSpan],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sensitive_summary = "Therapy session with Dr. Sentinel-Summary"
+    sensitive_event_id = "sentinel-event-id-9f3c"
+
+    fake_service = MagicMock()
+    fake_service.events.return_value.list.return_value.execute.return_value = {
+        "items": [
+            {
+                "id": sensitive_event_id,
+                "summary": sensitive_summary,
+                "start": {
+                    "dateTime": "2026-08-10T10:00:00+01:00",
+                },
+                "end": {
+                    "dateTime": "2026-08-10T11:00:00+01:00",
+                },
+                "status": "confirmed",
+            }
+        ]
+    }
+
+    monkeypatch.setattr(
+        calendar_client,
+        "create_calendar_service",
+        lambda: fake_service,
+    )
+
+    calendar_client.list_events(
+        time_min=datetime.fromisoformat(
+            "2026-08-10T09:00:00+01:00"
+        ),
+    )
+
+    spans = _calendar_api_spans(exported_spans)
+    assert len(spans) == 1
+
+    serialized_span = str(spans[0].attributes) + str(
+        spans[0].events
+    )
+
+    assert sensitive_summary not in serialized_span
+    assert sensitive_event_id not in serialized_span
+
+
+@pytest.mark.anyio
+async def test_calendar_api_span_is_child_of_tool_call_span(
+    exported_spans: list[ReadableSpan],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_service = MagicMock()
+    fake_service.events.return_value.list.return_value.execute.return_value = {
+        "items": []
+    }
+
+    monkeypatch.setattr(
+        calendar_client,
+        "create_calendar_service",
+        lambda: fake_service,
+    )
+
+    async with Client(server.mcp) as client:
+        result = await client.call_tool(
+            "list_events",
+            {
+                "time_min": "2026-08-10T09:00:00+01:00",
+            },
+        )
+
+    assert result.is_error is False
+
+    tool_span = _tool_call_span(exported_spans, "list_events")
+    api_spans = _calendar_api_spans(exported_spans)
+    assert len(api_spans) == 1
+
+    api_span = api_spans[0]
+    assert api_span.context.trace_id == tool_span.context.trace_id
+    assert api_span.parent is not None
+    assert api_span.parent.span_id == tool_span.context.span_id
+
+
+@pytest.mark.anyio
+async def test_calendar_api_span_for_list_busy_periods_tool_is_child(
+    exported_spans: list[ReadableSpan],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_service = MagicMock()
+    fake_service.freebusy.return_value.query.return_value.execute.return_value = {
+        "calendars": {
+            "primary": {
+                "busy": [],
+            }
+        }
+    }
+
+    monkeypatch.setattr(
+        calendar_client,
+        "create_calendar_service",
+        lambda: fake_service,
+    )
+
+    async with Client(server.mcp) as client:
+        result = await client.call_tool(
+            "list_busy_periods",
+            {
+                "time_min": "2026-08-10T09:00:00+01:00",
+                "time_max": "2026-08-10T18:00:00+01:00",
+            },
+        )
+
+    assert result.is_error is False
+
+    tool_span = _tool_call_span(exported_spans, "list_busy_periods")
+    api_spans = _calendar_api_spans(exported_spans)
+    assert len(api_spans) == 1
+
+    api_span = api_spans[0]
+    assert api_span.attributes["google_calendar.operation"] == (
+        "freebusy.query"
+    )
+    assert api_span.parent is not None
+    assert api_span.parent.span_id == tool_span.context.span_id
