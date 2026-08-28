@@ -4,6 +4,7 @@ from typing import Any
 from googleapiclient.discovery import Resource, build
 
 from google_calendar_mcp.auth import load_credentials
+from google_calendar_mcp.telemetry import trace_calendar_api
 
 
 Event = dict[str, str | bool | None]
@@ -53,11 +54,12 @@ def list_events(
 
     service = create_calendar_service()
 
-    response = (
-        service.events()
-        .list(**request)
-        .execute()
-    )
+    with trace_calendar_api(operation="events.list"):
+        response = (
+            service.events()
+            .list(**request)
+            .execute()
+        )
 
     return [
         _format_event(event)
@@ -90,21 +92,22 @@ def list_busy_periods(
 
     service = create_calendar_service()
 
-    response = (
-        service.freebusy()
-        .query(
-            body={
-                "timeMin": time_min.isoformat(),
-                "timeMax": time_max.isoformat(),
-                "items": [
-                    {
-                        "id": "primary",
-                    }
-                ],
-            }
+    with trace_calendar_api(operation="freebusy.query"):
+        response = (
+            service.freebusy()
+            .query(
+                body={
+                    "timeMin": time_min.isoformat(),
+                    "timeMax": time_max.isoformat(),
+                    "items": [
+                        {
+                            "id": "primary",
+                        }
+                    ],
+                }
+            )
+            .execute()
         )
-        .execute()
-    )
 
     calendars = response.get("calendars", {})
 
