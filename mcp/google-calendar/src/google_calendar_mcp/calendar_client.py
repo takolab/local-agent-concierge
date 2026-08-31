@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from googleapiclient.discovery import Resource, build
+from googleapiclient.errors import HttpError
 
 from google_calendar_mcp.auth import load_credentials
 from google_calendar_mcp.telemetry import trace_calendar_api
@@ -75,6 +76,34 @@ def list_upcoming_events(
         time_min=datetime.now(timezone.utc),
         max_results=max_results,
     )
+
+
+def get_event(event_id: str) -> Event:
+    """Return a single event from the primary calendar."""
+    if not isinstance(event_id, str) or not event_id.strip():
+        raise ValueError("event_id must be a non-empty string")
+
+    service = create_calendar_service()
+
+    try:
+        with trace_calendar_api(operation="events.get"):
+            event = (
+                service.events()
+                .get(
+                    calendarId="primary",
+                    eventId=event_id,
+                )
+                .execute()
+            )
+    except HttpError as error:
+        if error.resp.status == 404:
+            raise ValueError(
+                f"Event not found: {event_id}"
+            ) from error
+
+        raise
+
+    return _format_event(event)
 
 
 def list_busy_periods(

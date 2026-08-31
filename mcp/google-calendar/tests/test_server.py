@@ -27,6 +27,7 @@ async def test_server_exposes_expected_tools():
         "get_current_datetime",
         "list_upcoming_events",
         "list_events",
+        "get_event",
         "list_busy_periods",
         "list_free_periods",
     }
@@ -138,6 +139,77 @@ async def test_list_events_rejects_non_positive_max_results():
 
     assert any(
         "max_results must be greater than zero"
+        in getattr(content, "text", "")
+        for content in result.content
+    )
+
+
+@pytest.mark.anyio
+async def test_get_event_through_mcp(
+    monkeypatch,
+):
+    fake_event = {
+        "id": "event-1",
+        "summary": "Team meeting",
+        "start": "2026-08-10T10:00:00+01:00",
+        "end": "2026-08-10T11:00:00+01:00",
+        "is_all_day": False,
+        "status": "confirmed",
+    }
+
+    fetch_event = MagicMock(
+        return_value=fake_event,
+    )
+
+    monkeypatch.setattr(
+        server,
+        "fetch_event",
+        fetch_event,
+    )
+
+    async with Client(server.mcp) as client:
+        result = await client.call_tool(
+            "get_event",
+            {
+                "event_id": "event-1",
+            },
+        )
+
+    assert result.is_error is False
+
+    assert result.structured_content == fake_event
+
+    fetch_event.assert_called_once_with(
+        event_id="event-1",
+    )
+
+
+@pytest.mark.anyio
+async def test_get_event_not_found_through_mcp(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        server,
+        "fetch_event",
+        MagicMock(
+            side_effect=ValueError(
+                "Event not found: missing-event"
+            )
+        ),
+    )
+
+    async with Client(server.mcp) as client:
+        result = await client.call_tool(
+            "get_event",
+            {
+                "event_id": "missing-event",
+            },
+        )
+
+    assert result.is_error is True
+
+    assert any(
+        "Event not found: missing-event"
         in getattr(content, "text", "")
         for content in result.content
     )
