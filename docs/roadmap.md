@@ -1030,6 +1030,14 @@ Each milestone should:
 9. Keep service responsibilities separate.
 10. Update this roadmap when the implementation status changes.
 
+Some of this work is produced by delegating implementation to autonomous
+Coding Agents, including running independent tasks in parallel. Those
+delegation experiments test the delegation workflow itself (agent
+capability, human review burden) rather than tracking product milestones,
+so they are logged separately under `docs/delegated-development/` — see
+[`docs/delegated-development/level3-experiment-2.md`](delegated-development/level3-experiment-2.md)
+for the latest.
+
 ## Branch Naming
 
 Suggested branch names include:
