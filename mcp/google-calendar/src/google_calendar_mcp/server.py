@@ -8,6 +8,7 @@ from google_calendar_mcp.calendar_client import (
     BusyPeriod,
     Event,
     FreePeriod,
+    get_event as fetch_event,
     list_busy_periods as fetch_busy_periods,
     list_events as fetch_events,
     list_free_periods as fetch_free_periods,
@@ -76,6 +77,17 @@ def list_events(
             ),
             max_results=max_results,
         )
+    except ValueError as error:
+        raise ToolError(str(error)) from error
+
+
+@mcp.tool()
+def get_event(
+    event_id: str,
+) -> Event:
+    """Return a single event from the primary Google Calendar."""
+    try:
+        return fetch_event(event_id=event_id)
     except ValueError as error:
         raise ToolError(str(error)) from error
 

@@ -1,7 +1,9 @@
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
+import httplib2
 import pytest
+from googleapiclient.errors import HttpError
 from hypothesis import given, strategies as st
 
 from google_calendar_mcp import calendar_client
@@ -147,6 +149,105 @@ def test_list_events_uses_google_calendar_service(monkeypatch):
         singleEvents=True,
         orderBy="startTime",
     )
+
+
+def test_get_event_uses_google_calendar_service(monkeypatch):
+    fake_service = MagicMock()
+
+    fake_service.events.return_value.get.return_value.execute.return_value = {
+        "id": "event-1",
+        "summary": "Team meeting",
+        "start": {
+            "dateTime": "2026-08-10T10:00:00+01:00",
+        },
+        "end": {
+            "dateTime": "2026-08-10T11:00:00+01:00",
+        },
+        "status": "confirmed",
+    }
+
+    monkeypatch.setattr(
+        calendar_client,
+        "create_calendar_service",
+        lambda: fake_service,
+    )
+
+    result = calendar_client.get_event(event_id="event-1")
+
+    assert result == {
+        "id": "event-1",
+        "summary": "Team meeting",
+        "start": "2026-08-10T10:00:00+01:00",
+        "end": "2026-08-10T11:00:00+01:00",
+        "is_all_day": False,
+        "status": "confirmed",
+    }
+
+    fake_service.events.return_value.get.assert_called_once_with(
+        calendarId="primary",
+        eventId="event-1",
+    )
+
+
+@pytest.mark.parametrize(
+    "event_id",
+    [123, None, "", "   "],
+)
+def test_get_event_rejects_invalid_event_id(event_id):
+    with pytest.raises(
+        ValueError,
+        match="event_id must be a non-empty string",
+    ):
+        calendar_client.get_event(event_id=event_id)
+
+
+def test_get_event_raises_value_error_when_not_found(monkeypatch):
+    fake_service = MagicMock()
+
+    not_found_response = httplib2.Response({"status": 404})
+    fake_service.events.return_value.get.return_value.execute.side_effect = (
+        HttpError(
+            not_found_response,
+            b'{"error": {"code": 404, "message": "Not Found"}}',
+            uri=(
+                "https://www.googleapis.com/calendar/v3/calendars/"
+                "primary/events/missing-event"
+            ),
+        )
+    )
+
+    monkeypatch.setattr(
+        calendar_client,
+        "create_calendar_service",
+        lambda: fake_service,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Event not found: missing-event",
+    ):
+        calendar_client.get_event(event_id="missing-event")
+
+
+def test_get_event_reraises_non_404_http_error(monkeypatch):
+    fake_service = MagicMock()
+
+    server_error_response = httplib2.Response({"status": 500})
+    fake_service.events.return_value.get.return_value.execute.side_effect = (
+        HttpError(
+            server_error_response,
+            b'{"error": {"code": 500, "message": "Internal Error"}}',
+        )
+    )
+
+    monkeypatch.setattr(
+        calendar_client,
+        "create_calendar_service",
+        lambda: fake_service,
+    )
+
+    with pytest.raises(HttpError):
+        calendar_client.get_event(event_id="event-1")
 
 
 def test_list_busy_periods_uses_freebusy_api(monkeypatch):

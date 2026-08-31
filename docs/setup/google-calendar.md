@@ -33,6 +33,7 @@ It supports:
 
 * Reading upcoming calendar events
 * Reading events within a specified time range
+* Reading a single event by its event ID
 * Reading busy periods
 * Calculating free periods
 * Getting the current date and time for an IANA time zone
@@ -420,11 +421,14 @@ get_server_status
 get_current_datetime
 list_upcoming_events
 list_events
+get_event
 list_busy_periods
 list_free_periods
 ```
 
 `list_events` requires ISO 8601 date-time values containing time-zone information.
+
+`get_event` returns a single event from the primary calendar, in the same shape as each entry returned by `list_events`. It requires a non-empty `event_id` and raises a bounded "Event not found" error when the primary calendar has no event with that ID.
 
 For example:
 
