@@ -188,6 +188,89 @@ async def test_list_events_span_omits_calendar_content(
 
 
 @pytest.mark.anyio
+async def test_get_event_tool_call_span_omits_event_id_argument(
+    exported_spans: list[ReadableSpan],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sensitive_event_id = "sentinel-event-id-9f3c"
+
+    fake_event = {
+        "id": sensitive_event_id,
+        "summary": "Team meeting",
+        "start": "2026-08-10T10:00:00+01:00",
+        "end": "2026-08-10T11:00:00+01:00",
+        "is_all_day": False,
+        "status": "confirmed",
+    }
+
+    monkeypatch.setattr(
+        server,
+        "fetch_event",
+        MagicMock(return_value=fake_event),
+    )
+
+    async with Client(server.mcp) as client:
+        result = await client.call_tool(
+            "get_event",
+            {
+                "event_id": sensitive_event_id,
+            },
+        )
+
+    assert result.is_error is False
+    assert result.structured_content == fake_event
+
+    span = _tool_call_span(exported_spans, "get_event")
+
+    assert span.status.status_code == StatusCode.UNSET
+
+    serialized_attributes = str(span.attributes)
+    serialized_events = str(span.events)
+
+    assert sensitive_event_id not in serialized_attributes
+    assert sensitive_event_id not in serialized_events
+
+
+@pytest.mark.anyio
+async def test_get_event_not_found_tool_call_span_omits_event_id(
+    exported_spans: list[ReadableSpan],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sensitive_event_id = "sentinel-event-id-9f3c"
+
+    monkeypatch.setattr(
+        server,
+        "fetch_event",
+        MagicMock(
+            side_effect=ValueError(
+                f"Event not found: {sensitive_event_id}"
+            )
+        ),
+    )
+
+    async with Client(server.mcp) as client:
+        result = await client.call_tool(
+            "get_event",
+            {
+                "event_id": sensitive_event_id,
+            },
+        )
+
+    assert result.is_error is True
+
+    span = _tool_call_span(exported_spans, "get_event")
+
+    assert span.status.status_code == StatusCode.ERROR
+    assert span.attributes["error.type"] == "tool_error"
+
+    serialized_attributes = str(span.attributes)
+    serialized_events = str(span.events)
+
+    assert sensitive_event_id not in serialized_attributes
+    assert sensitive_event_id not in serialized_events
+
+
+@pytest.mark.anyio
 async def test_validation_error_produces_sanitized_error_span(
     exported_spans: list[ReadableSpan],
 ) -> None:

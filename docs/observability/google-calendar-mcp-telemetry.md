@@ -91,7 +91,7 @@ vocabulary):
 mcp.method.name        = "tools/call"
 mcp.protocol.version    = "<negotiated MCP protocol version>"
 gen_ai.operation.name   = "execute_tool"
-gen_ai.tool.name        = "<one of the 6 known tool names>"
+gen_ai.tool.name        = "<one of the 7 known tool names>"
 jsonrpc.request.id      = "<request id>"
 ```
 
@@ -129,17 +129,17 @@ google-calendar.api
 ```
 
 The specific Google API operation is recorded as a single bounded attribute
-with exactly two possible values:
+with exactly three possible values:
 
 ```text
-google_calendar.operation = "events.list" | "freebusy.query"
+google_calendar.operation = "events.list" | "freebusy.query" | "events.get"
 ```
 
-`list_events` and `list_busy_periods` are the only two call sites
-(`.events().list()` and `.freebusy().query()`); `list_upcoming_events` and
-`list_free_periods` call into those same two functions rather than issuing
-their own API request, so they produce the same span with no additional
-instrumentation.
+`list_events`, `list_busy_periods`, and `get_event` are the only three call
+sites (`.events().list()`, `.freebusy().query()`, and `.events().get()`);
+`list_upcoming_events` and `list_free_periods` call into `list_events` and
+`list_busy_periods` respectively rather than issuing their own API request,
+so they produce the same span with no additional instrumentation.
 
 Because the span is created with `tracer.start_as_current_span(...)` while
 the SDK's `tools/call` span is still the active OpenTelemetry span (ordinary
@@ -163,15 +163,19 @@ handling is unaffected by this instrumentation.
 
 Verified by `tests/test_telemetry.py`:
 `test_calendar_api_span_for_list_events`,
+`test_calendar_api_span_for_get_event`,
 `test_calendar_api_span_for_list_busy_periods`,
 `test_calendar_api_span_marks_error_and_preserves_exception`,
+`test_calendar_api_span_marks_error_for_get_event_not_found`,
 `test_calendar_api_span_omits_calendar_content`,
-`test_calendar_api_span_is_child_of_tool_call_span`, and
-`test_calendar_api_span_for_list_busy_periods_tool_is_child` — the last two
-drive a real `tools/call` request through the MCP `Client` (rather than
-constructing a span directly) to confirm the parent/child relationship end
-to end, with only `create_calendar_service()` mocked to avoid a real Google
-API call.
+`test_calendar_api_span_omits_event_id_and_content_for_get_event`,
+`test_calendar_api_span_is_child_of_tool_call_span`,
+`test_calendar_api_span_for_list_busy_periods_tool_is_child`, and
+`test_calendar_api_span_for_get_event_tool_is_child` — the child-of-span
+tests drive a real `tools/call` request through the MCP `Client` (rather
+than constructing a span directly) to confirm the parent/child relationship
+end to end, with only `create_calendar_service()` mocked to avoid a real
+Google API call.
 
 ### Verified span export
 
@@ -254,9 +258,9 @@ recorded as follow-up.
 
 None of the following are ever placed in a span attribute, span name, event,
 or status description, because the SDK's built-in middleware never inspects
-tool arguments or return values — it only records the method name, the tool
-name, the protocol version, the request id, and (on failure) the fixed
-string `"tool_error"`:
+tool arguments or return values, for any tool — it only records the method
+name, the tool name, the protocol version, the request id, and (on failure)
+the fixed string `"tool_error"`:
 
 - Event title / summary, event ID, attendees, email addresses, calendar ID
 - Raw Google Calendar API responses
@@ -265,9 +269,24 @@ string `"tool_error"`:
 - Raw exception messages
 - The specific date/time values passed to a tool
 
+`get_event`'s `event_id` argument is covered by the same guarantee: it is
+the first tool whose input is itself a Google Calendar identifier (every
+other tool only ever risked leaking identifiers through *response* data),
+but the SDK middleware's `tools/call` span construction does not vary by
+tool, so it never inspects that argument either — confirmed even though
+`get_event`'s own not-found error message is allowed to (and does) echo the
+caller-supplied `event_id` back in the tool result content (documented in
+`docs/setup/google-calendar.md`'s Google Calendar MCP Tools section); the
+span still never carries it.
+
 This is exercised directly by
 `tests/test_telemetry.py::test_list_events_span_omits_calendar_content`
 (sentinel event summary/ID),
+`tests/test_telemetry.py::test_get_event_tool_call_span_omits_event_id_argument`
+(sentinel `event_id` argument, successful call),
+`tests/test_telemetry.py::test_get_event_not_found_tool_call_span_omits_event_id`
+(sentinel `event_id` argument, not-found error path — the tool result text
+does contain it, but the span does not),
 `tests/test_telemetry.py::test_unexpected_failure_omits_raw_message_and_credentials`
 (sentinel raw exception text containing a fake `refresh_token=...` value),
 and confirmed again with a real Google API failure during live verification
@@ -277,17 +296,21 @@ message.
 
 The same guarantee extends to the `google-calendar.api` span (see "Google
 Calendar API child span" above): `trace_calendar_api()` only ever receives a
-fixed `operation` string literal written at the two `calendar_client.py`
-call sites (`"events.list"` / `"freebusy.query"`), never a value derived
-from calendar content, credentials, or the API response, and its error path
-attaches only the fixed string `google_calendar.api_error` — never
-`str(exception)` — with both `record_exception` and `set_status_on_exception`
-disabled so the OpenTelemetry SDK's default exception-recording behavior
-cannot attach one either. Exercised by
-`tests/test_telemetry.py::test_calendar_api_span_omits_calendar_content` and
-`tests/test_telemetry.py::test_calendar_api_span_marks_error_and_preserves_exception`
-(sentinel event summary/ID and a sentinel `refresh_token=...` value inside a
-synthetic exception message, respectively).
+fixed `operation` string literal written at the three `calendar_client.py`
+call sites (`"events.list"` / `"freebusy.query"` / `"events.get"`), never a
+value derived from calendar content, credentials, or the API response, and
+its error path attaches only the fixed string `google_calendar.api_error` —
+never `str(exception)` — with both `record_exception` and
+`set_status_on_exception` disabled so the OpenTelemetry SDK's default
+exception-recording behavior cannot attach one either. Exercised by
+`tests/test_telemetry.py::test_calendar_api_span_omits_calendar_content`,
+`tests/test_telemetry.py::test_calendar_api_span_omits_event_id_and_content_for_get_event`,
+`tests/test_telemetry.py::test_calendar_api_span_marks_error_and_preserves_exception`,
+and
+`tests/test_telemetry.py::test_calendar_api_span_marks_error_for_get_event_not_found`
+(sentinel event summary/ID, sentinel `event_id` argument, a sentinel
+`refresh_token=...` value inside a synthetic exception message, and a
+synthetic 404 `HttpError`, respectively).
 
 ## Scope
 
@@ -299,9 +322,9 @@ Implemented:
 - Automated tests for successful, validation-error, and unexpected-failure
   tool calls, sensitive-data absence, and incoming trace-context joining.
 - A `google-calendar.api` child span around the actual Google Calendar API
-  `.execute()` call (`events.list` / `freebusy.query`), nested under the
-  active `tools/call` span via ordinary OpenTelemetry context propagation.
-  See "Google Calendar API child span" above.
+  `.execute()` call (`events.list` / `freebusy.query` / `events.get`),
+  nested under the active `tools/call` span via ordinary OpenTelemetry
+  context propagation. See "Google Calendar API child span" above.
 
 Confirmed live (real Hermes Agent, real Slack message, real — if currently
 failing — Google credentials): Hermes Agent's MCP client does propagate a
