@@ -80,11 +80,41 @@ def test_agent_request_fields_are_plain_built_in_types():
     assert all(isinstance(permission, str) for permission in request.permissions)
 
 
+_STDLIB_ENTRY_VALUE_TYPES = (str, int, float, bool, type(None), tuple, MappingProxyType)
+
+
+def _assert_stdlib_only_value(value: object) -> None:
+    assert isinstance(value, _STDLIB_ENTRY_VALUE_TYPES), (
+        f"Non-stdlib type crossed the AgentResponse boundary: {type(value)!r}"
+    )
+    if isinstance(value, MappingProxyType):
+        for key, item in value.items():
+            assert isinstance(key, str)
+            _assert_stdlib_only_value(item)
+    elif isinstance(value, tuple):
+        for item in value:
+            _assert_stdlib_only_value(item)
+
+
 def test_agent_response_fields_are_stdlib_only_types():
+    # A nested/heterogeneous entry (mirroring a real
+    # packages.approvals.ProposedAction's action_to_dict() shape) so the
+    # recursive check below actually exercises int/float/bool/None/nested
+    # tuple/mapping, not just flat strings.
     response = AgentResponse(
         status="needs_approval",
         summary="Tuesday from 19:00 to 21:00 is available.",
-        proposed_actions=[{"type": "calendar.create_event", "title": "Ollama study"}],
+        proposed_actions=[
+            {
+                "action_type": "calendar.create_event",
+                "target_event_id": None,
+                "confirmed": False,
+                "attempt": 1,
+                "score": 0.5,
+                "parameters": {"title": "Ollama study"},
+                "tags": ["study", "recurring"],
+            }
+        ],
         memory_candidates=[{"content": "Prefers evening study sessions"}],
     )
 
@@ -97,9 +127,7 @@ def test_agent_response_fields_are_stdlib_only_types():
             # A stdlib immutable mapping, not a plain dict — see module
             # docstring above.
             assert isinstance(entry, MappingProxyType)
-            for key, value in entry.items():
-                assert isinstance(key, str)
-                assert isinstance(value, str)
+            _assert_stdlib_only_value(entry)
 
 
 def _assert_plain_json_compatible_type(value: object) -> None:
@@ -110,7 +138,7 @@ def _assert_plain_json_compatible_type(value: object) -> None:
     elif type(value) is list:
         for item in value:
             _assert_plain_json_compatible_type(item)
-    elif type(value) is str:
+    elif type(value) in (str, int, float, bool, type(None)):
         pass
     else:
         raise AssertionError(f"Non-JSON-compatible type crossed the boundary: {type(value)!r}")
@@ -120,7 +148,17 @@ def test_agent_response_to_dict_output_is_plain_json_compatible_types():
     response = AgentResponse(
         status="needs_approval",
         summary="Tuesday from 19:00 to 21:00 is available.",
-        proposed_actions=[{"type": "calendar.create_event", "title": "Ollama study"}],
+        proposed_actions=[
+            {
+                "action_type": "calendar.create_event",
+                "target_event_id": None,
+                "confirmed": False,
+                "attempt": 1,
+                "score": 0.5,
+                "parameters": {"title": "Ollama study"},
+                "tags": ["study", "recurring"],
+            }
+        ],
         memory_candidates=[{"content": "Prefers evening study sessions"}],
     )
 

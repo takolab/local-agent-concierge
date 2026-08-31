@@ -147,15 +147,69 @@ def test_container_rejects_entries_with_blank_keys(field):
 
 
 @pytest.mark.parametrize("field", ["proposed_actions", "memory_candidates"])
-def test_container_rejects_entries_with_non_string_values(field):
-    with pytest.raises(ValueError, match=f"{field} entry value must be a non-empty string"):
-        _make_response(**{field: [{"type": 42}]})
+@pytest.mark.parametrize(
+    "value",
+    [None, True, False, 0, -3, 3.14, "", "  "],
+    ids=["none", "true", "false", "zero", "negative-int", "float", "empty-str", "blank-str"],
+)
+def test_container_accepts_json_compatible_scalar_values(field, value):
+    # Entry values are opaque JSON-compatible data, not specifically
+    # non-empty strings — unlike entry *keys*, which still must be
+    # non-empty strings (see key tests above).
+    response = _make_response(**{field: [{"v": value}]})
+    assert getattr(response, field)[0]["v"] == value
 
 
 @pytest.mark.parametrize("field", ["proposed_actions", "memory_candidates"])
-def test_container_rejects_entries_with_blank_values(field):
-    with pytest.raises(ValueError, match=f"{field} entry value must be a non-empty string"):
-        _make_response(**{field: [{"type": "  "}]})
+def test_container_accepts_nested_list_and_mapping_values(field):
+    response = _make_response(
+        **{field: [{"tags": ["a", "b"], "detail": {"nested": "value"}}]}
+    )
+    entry = getattr(response, field)[0]
+    assert entry["tags"] == ("a", "b")
+    assert entry["detail"] == MappingProxyType({"nested": "value"})
+
+
+@pytest.mark.parametrize("field", ["proposed_actions", "memory_candidates"])
+def test_container_accepts_proposed_action_shaped_entry(field):
+    # Regression test: packages.approvals.ProposedAction's own
+    # action_to_dict() shape — a nullable target_event_id and a nested
+    # parameters mapping — must fit here without agent-contracts taking a
+    # dependency on packages/approvals (see PR #19 review discussion).
+    action_shaped_entry = {
+        "action_type": "calendar.create_event",
+        "target_event_id": None,
+        "parameters": {
+            "title": "Ollama study",
+            "start": "2026-08-04T19:00:00+01:00",
+            "end": "2026-08-04T21:00:00+01:00",
+        },
+    }
+    response = _make_response(**{field: [action_shaped_entry]})
+    entry = getattr(response, field)[0]
+    assert entry["target_event_id"] is None
+    assert entry["parameters"] == MappingProxyType(action_shaped_entry["parameters"])
+
+
+class _NotJsonCompatible:
+    pass
+
+
+@pytest.mark.parametrize("field", ["proposed_actions", "memory_candidates"])
+@pytest.mark.parametrize(
+    "bad_value",
+    [{1, 2, 3}, b"bytes", _NotJsonCompatible()],
+    ids=["set", "bytes", "custom-object"],
+)
+def test_container_rejects_non_json_compatible_values(field, bad_value):
+    with pytest.raises(ValueError, match=f"{field} entry.*must be a JSON-compatible value"):
+        _make_response(**{field: [{"v": bad_value}]})
+
+
+@pytest.mark.parametrize("field", ["proposed_actions", "memory_candidates"])
+def test_container_rejects_non_json_compatible_nested_values(field):
+    with pytest.raises(ValueError, match=f"{field} entry.*must be a JSON-compatible value"):
+        _make_response(**{field: [{"detail": {"bad": _NotJsonCompatible()}}]})
 
 
 # --- immutability ------------------------------------------------------------------
@@ -194,6 +248,20 @@ def test_proposed_action_entry_mapping_cannot_be_item_assigned():
         response.proposed_actions[0]["type"] = "hijacked"
 
 
+def test_nested_mapping_value_cannot_be_item_assigned():
+    response = _make_response(
+        proposed_actions=[{"detail": {"nested": "value"}}]
+    )
+    with pytest.raises(TypeError):
+        response.proposed_actions[0]["detail"]["nested"] = "hijacked"
+
+
+def test_nested_list_value_cannot_be_item_assigned():
+    response = _make_response(proposed_actions=[{"tags": ["a", "b"]}])
+    with pytest.raises(TypeError):
+        response.proposed_actions[0]["tags"][0] = "hijacked"
+
+
 # --- caller-owned mutable collections -----------------------------------------------
 
 
@@ -217,6 +285,28 @@ def test_mutating_source_entry_dict_after_construction_does_not_affect_response(
     assert response.proposed_actions == (MappingProxyType({"type": "calendar.create_event"}),)
 
 
+def test_mutating_source_nested_dict_value_after_construction_does_not_affect_response():
+    nested = {"nested": "value"}
+    entry = {"detail": nested}
+    response = _make_response(proposed_actions=[entry])
+
+    nested["nested"] = "hijacked"
+    entry["detail"] = {"replaced": "hijacked"}
+
+    assert response.proposed_actions[0]["detail"] == MappingProxyType({"nested": "value"})
+
+
+def test_mutating_source_nested_list_value_after_construction_does_not_affect_response():
+    tags = ["a", "b"]
+    entry = {"tags": tags}
+    response = _make_response(proposed_actions=[entry])
+
+    tags.append("c")
+    tags[0] = "hijacked"
+
+    assert response.proposed_actions[0]["tags"] == ("a", "b")
+
+
 # --- serialization: to_dict --------------------------------------------------------
 
 
@@ -231,6 +321,20 @@ def test_to_dict_uses_plain_lists_and_dicts_not_tuples_or_mapping_proxies():
     assert all(type(entry) is dict for entry in data["proposed_actions"])
     assert isinstance(data["memory_candidates"], list)
     assert all(type(entry) is dict for entry in data["memory_candidates"])
+
+
+def test_to_dict_recursively_converts_nested_values_to_plain_types():
+    response = _make_response(
+        proposed_actions=[
+            {"target_event_id": None, "parameters": {"title": "x"}, "tags": ["a"]}
+        ]
+    )
+    data = agent_response_to_dict(response)
+    entry = data["proposed_actions"][0]
+    assert type(entry) is dict
+    assert type(entry["parameters"]) is dict
+    assert type(entry["tags"]) is list
+    assert entry["target_event_id"] is None
 
 
 def test_to_dict_is_actually_json_serializable():
@@ -278,6 +382,24 @@ def test_round_trip_preserves_entry_and_key_order():
 
 def test_round_trip_through_actual_json_text():
     original = _make_response()
+    json_text = json.dumps(agent_response_to_dict(original))
+    restored = agent_response_from_dict(json.loads(json_text))
+    assert restored == original
+
+
+def test_round_trip_with_nested_and_scalar_entry_values():
+    original = _make_response(
+        proposed_actions=[
+            {
+                "action_type": "calendar.create_event",
+                "target_event_id": None,
+                "parameters": {"title": "Ollama study"},
+                "count": 2,
+                "confirmed": False,
+                "tags": ["study", "recurring"],
+            }
+        ],
+    )
     json_text = json.dumps(agent_response_to_dict(original))
     restored = agent_response_from_dict(json.loads(json_text))
     assert restored == original
@@ -347,7 +469,23 @@ def test_responses_with_different_status_are_not_equal():
 
 
 _non_blank_text = st.text(min_size=1, max_size=40).filter(lambda s: s.strip())
-_entry_mapping = st.dictionaries(_non_blank_text, _non_blank_text, max_size=3)
+
+_json_scalar = st.one_of(
+    st.none(),
+    st.booleans(),
+    st.integers(min_value=-1000, max_value=1000),
+    st.floats(allow_nan=False, allow_infinity=False),
+    st.text(max_size=20),
+)
+_json_value = st.recursive(
+    _json_scalar,
+    lambda children: st.one_of(
+        st.lists(children, max_size=3),
+        st.dictionaries(_non_blank_text, children, max_size=3),
+    ),
+    max_leaves=6,
+)
+_entry_mapping = st.dictionaries(_non_blank_text, _json_value, max_size=3)
 
 
 @given(
