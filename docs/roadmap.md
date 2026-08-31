@@ -706,8 +706,8 @@ The Orchestrator will allow new agents and frameworks to be added without coupli
 
 ### Tasks
 
-* [ ] Define the common agent request schema
-* [ ] Define the common agent response schema
+* [x] Define the common agent request schema
+* [x] Define the common agent response schema
 * [ ] Create the `services/orchestrator` application
 * [ ] Add a Dockerfile for the Orchestrator
 * [ ] Add the Orchestrator service to `docker-compose.yml`
