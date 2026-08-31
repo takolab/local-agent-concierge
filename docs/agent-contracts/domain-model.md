@@ -1,13 +1,25 @@
-# AgentRequest Domain Model
+# Agent Contracts Domain Model
 
 This document describes the domain foundation added for Milestone 7
-(Containerized Concierge Orchestrator): the `AgentRequest` schema,
-implemented in `packages/agent-contracts`.
+(Containerized Concierge Orchestrator): the `AgentRequest` and
+`AgentResponse` schemas, implemented in `packages/agent-contracts`.
 
-This is deliberately the **first, bounded** slice of Milestone 7's "Define
-the common agent request schema" task. It defines only the normalized
-request shape a caller hands to an Agent implementation. It does not
-implement `AgentResponse`, the Orchestrator service, agent routing, or any
+`AgentRequest` was added first, as the **first, bounded** slice of
+Milestone 7's "Define the common agent request schema" task
+([#17](https://github.com/takolab/local-agent-concierge/pull/17)). It
+defines only the normalized request shape a caller hands to an Agent
+implementation.
+
+`AgentResponse` is the next bounded slice: Milestone 7's "Define the
+common agent response schema" task. **It is a provisional domain
+representation** — the minimal schema matching the response already shown
+in `docs/architecture.md`'s Agent Contract example, not a final or
+permanent Agent Contract. `docs/architecture.md` itself says the exact
+schema will evolve; this change deliberately does not anticipate that
+evolution (see `AgentResponse`'s own section below for what it leaves
+open).
+
+Neither schema implements the Orchestrator service, agent routing, or any
 transport (HTTP, MCP, or otherwise). See "Deliberately not implemented
 yet" below and `docs/roadmap.md` Milestone 7 for what comes next.
 
@@ -141,12 +153,147 @@ ignoring or defaulting:
   `AgentRequest` from the parsed fields, so it cannot accept anything the
   constructor itself would reject.
 
+## `AgentResponse`
+
+An immutable, normalized response returned by an Agent implementation —
+defined in
+`packages/agent-contracts/src/agent_contracts/agent_response.py`.
+**Provisional**: this is the minimal shape needed to match
+`docs/architecture.md`'s existing response example, not a final schema.
+
+```python
+@dataclass(frozen=True)
+class AgentResponse:
+    status: str
+    summary: str
+    proposed_actions: tuple[Mapping[str, str], ...] = ()
+    memory_candidates: tuple[Mapping[str, str], ...] = ()
+```
+
+This mirrors the normalized response example already shown in
+`docs/architecture.md`'s Agent Contract section:
+
+```json
+{
+  "status": "needs_approval",
+  "summary": "Tuesday from 19:00 to 21:00 is available.",
+  "proposed_actions": [
+    {
+      "type": "calendar.create_event",
+      "title": "Ollama study",
+      "start": "2026-08-04T19:00:00+01:00",
+      "end": "2026-08-04T21:00:00+01:00"
+    }
+  ],
+  "memory_candidates": []
+}
+```
+
+### Fields
+
+| Field | Required | Type | Notes |
+|---|---|---|---|
+| `status` | yes | non-empty `str` | Opaque status label. No enum vocabulary is enforced (e.g. `needs_approval` is not a hardcoded value) — none is defined anywhere in this repository yet. |
+| `summary` | yes | non-empty `str` | Free-text summary. No length limit or content validation. |
+| `proposed_actions` | no | tuple of string-to-string mappings | Defaults to `()`. Each entry is opaque: any mapping whose keys and values are all non-empty strings. Not `packages/approvals.ProposedAction` — see "Deliberately deferred" below. |
+| `memory_candidates` | no | tuple of string-to-string mappings | Defaults to `()`. Same entry shape and opaqueness as `proposed_actions`. |
+
+`proposed_actions` and `memory_candidates` are deliberately treated as
+opaque data in this slice: the domain model only constrains the *container*
+(must be a `list`/`tuple`, so a bare string or a single mapping can't be
+silently misread as the outer collection) and each *entry* (must be a
+mapping of non-empty `str` keys to non-empty `str` values). It does not
+interpret `type`, `title`, or any other key inside an entry.
+
+### Validation
+
+Construction rejects, with `ValueError`:
+
+- a blank or non-`str` `status` or `summary` (blank means empty or
+  all-whitespace after `.strip()`);
+- a `proposed_actions` or `memory_candidates` value that isn't a `list` or
+  `tuple` (mirroring `AgentRequest`'s `memory_scopes`/`permissions` rule —
+  a bare string or a single mapping is rejected rather than silently
+  misread as the outer collection);
+- any entry within `proposed_actions`/`memory_candidates` that isn't a
+  mapping, or whose keys/values are blank or not `str`.
+
+As with `AgentRequest`, every rule runs in `__post_init__`, so
+construction either succeeds completely or raises.
+
+### Immutability and defensive copy
+
+`AgentResponse` is a frozen dataclass. `proposed_actions` and
+`memory_candidates` are defensively copied — not just into a new outer
+`tuple` (as `AgentRequest` does for `memory_scopes`/`permissions`), but
+with each entry individually copied into a new `dict` and wrapped in a
+read-only `types.MappingProxyType`. As a result:
+
+- mutating a `list` a caller originally passed in for `proposed_actions`
+  or `memory_candidates`, *or* mutating a `dict` inside that list, after
+  constructing the response, does not change the stored response;
+- `response.status = "..."` (or any other field) raises
+  `dataclasses.FrozenInstanceError`;
+- `response.proposed_actions[0] = {...}` raises `TypeError` (tuples have
+  no item assignment);
+- `response.proposed_actions[0]["type"] = "..."` raises `TypeError`
+  (`MappingProxyType` has no item assignment).
+
+There is no supported way to edit an `AgentResponse`, or anything inside
+it, in place.
+
+### Serialization
+
+`agent_response_to_dict` / `agent_response_from_dict` convert to and from
+a JSON-compatible `dict` (plain `str`, `list`, and `dict` values only — no
+tuples, `MappingProxyType`, enums, or other non-JSON-native types):
+
+```python
+def agent_response_to_dict(response: AgentResponse) -> dict[str, Any]: ...
+def agent_response_from_dict(data: Mapping[str, Any]) -> AgentResponse: ...
+```
+
+`agent_response_from_dict(agent_response_to_dict(response)) == response`
+for every valid response, including entry order within
+`proposed_actions`/`memory_candidates` and key order within each entry
+(order is preserved, not sorted).
+
+`agent_response_from_dict` rejects, with `ValueError`, rather than
+silently ignoring or defaulting:
+
+- a non-mapping input;
+- a mapping missing any of the 4 fields (including `proposed_actions` /
+  `memory_candidates`, even though the constructor itself defaults them —
+  the same all-fields-required-in-serialized-form behavior as
+  `agent_request_from_dict`; see open design question 3 under
+  `AgentRequest` above, which this change does not resolve either);
+- a mapping with any field beyond the 4 known ones;
+- a mapping whose field values fail the same validation construction
+  applies directly.
+
+### Deliberately deferred for `AgentResponse`
+
+Beyond the general "Deliberately not implemented yet" list below, this
+slice specifically does not:
+
+- add a `status` enum or hardcode any specific status value (e.g.
+  `needs_approval`) — the vocabulary isn't decided anywhere in this
+  repository yet;
+- add any field beyond the 4 shown above — no `task_id`, `trace_id`,
+  `error`, `agent_id`, or `metadata`; whether any of these are needed is
+  left for whichever future task wires `AgentResponse` into the
+  Orchestrator;
+- depend on `packages/approvals.ProposedAction` for `proposed_actions`
+  entries, or otherwise give `proposed_actions`/`memory_candidates` a
+  richer, non-opaque shape;
+- change `AgentRequest` in any way, or resolve any of its existing open
+  design questions.
+
 ## Deliberately not implemented yet
 
 Out of scope for this change, per Milestone 7's remaining tasks and this
 task's stated boundaries:
 
-- `AgentResponse` (the other half of the Agent Contract).
 - The `services/orchestrator` application, its Dockerfile, or its
   `docker-compose.yml` entry.
 - Agent registration, request classification, or agent selection.
@@ -188,9 +335,41 @@ None of these are resolved by this change; they're carried forward as
 open questions for whichever future task wires `AgentRequest` into the
 Orchestrator or another transport.
 
+### Open design questions for `AgentResponse`
+
+Not resolved by this change; logged here rather than decided, per this
+schema's provisional status:
+
+4. **`status` vocabulary.** No enum exists yet. Once the Orchestrator and
+   Slack Gateway need to branch on `status` (e.g. to render an approval
+   prompt for `needs_approval`), the actual set of valid values needs an
+   explicit decision — and, separately, whether that decision belongs in
+   `agent-contracts` at all or in the consuming service.
+5. **`proposed_actions` vs. `packages/approvals.ProposedAction`.** This
+   slice keeps `proposed_actions` entries opaque string-to-string
+   mappings, matching `docs/architecture.md`'s example exactly, and takes
+   no dependency on `packages/approvals`. Whether a future `AgentResponse`
+   should instead hold typed `ProposedAction` values (requiring
+   `agent-contracts` to depend on `approvals`, or some translation layer
+   between them) is the same open cross-package dependency question
+   `docs/approval/domain-model.md` already logs for `AgentRequest` — still
+   undecided, now relevant on the response side too.
+6. **`memory_candidates` shape.** `docs/architecture.md`'s separate Memory
+   Access Model shows a much richer memory record (`scope`, `source_agent`,
+   `confidence`, `expires_at`, ...). Whether an `AgentResponse`'s
+   `memory_candidates` entries should eventually mirror that shape, stay
+   opaque, or become something else again is left for whenever the Memory
+   Service is designed.
+7. **Wire-schema optionality**, extended to `AgentResponse`: the same
+   question logged as open design question 3 for `AgentRequest` above
+   (whether omitted optional fields should be allowed in serialized form)
+   applies equally to `AgentResponse`'s `proposed_actions` /
+   `memory_candidates`, which also have constructor defaults but are
+   currently required keys in `agent_response_from_dict`.
+
 ## Tests
 
-`packages/agent-contracts/tests/` — 87 tests, 100% line coverage of
+`packages/agent-contracts/tests/` — 156 tests, 100% line coverage of
 `packages/agent-contracts/src` (verified with `pytest-cov` locally; not
 part of the CI step itself, matching `packages/approvals`' precedent).
 
@@ -203,9 +382,28 @@ part of the CI step itself, matching `packages/approvals`' precedent).
   `json.dumps`/`json.loads` text and insertion-order preservation),
   missing/unknown/malformed serialized field rejection, and a Hypothesis
   property test that the round trip holds for generated valid requests.
+- `test_agent_response.py` — the same depth of coverage for
+  `AgentResponse`: construction and validation for `status`/`summary` and
+  for the `proposed_actions`/`memory_candidates` container and entry
+  rules (parametrized across both fields, since the rule is identical),
+  immutability (frozen-field reassignment, outer-tuple item assignment,
+  *and* per-entry `MappingProxyType` item assignment), caller-owned
+  mutable list *and* mutable entry-dict mutation after construction,
+  `to_dict`/`from_dict` round-trips (including actual JSON text and both
+  entry-order and key-order preservation), missing/unknown/malformed
+  serialized field rejection, value-equality for separately constructed
+  responses, and a Hypothesis property test for generated valid
+  responses.
 - `test_dependency_boundary.py` — the package's `pyproject.toml` declares
-  zero runtime dependencies, `agent_request.py` imports only from the
-  Python standard library (checked via `ast` + `sys.stdlib_module_names`,
-  not a hand-maintained list), and every `AgentRequest` field holds only a
-  plain built-in type — so no Slack, Hermes, MCP, or HTTP framework object
-  can cross this boundary.
+  zero runtime dependencies; both `agent_request.py` and
+  `agent_response.py` import only from the Python standard library
+  (checked via `ast` + `sys.stdlib_module_names`, not a hand-maintained
+  list, parametrized over both modules); every `AgentRequest` field holds
+  only a plain built-in type, while every `AgentResponse` field holds only
+  a `str`, `tuple`, or `MappingProxyType` (a stdlib type, not a plain
+  built-in — deliberate, since entries must be individually immutable);
+  and `agent_response_to_dict`'s output is recursively checked to contain
+  only plain `dict`/`list`/`str` types. Together these confirm no Slack,
+  Hermes, MCP, or HTTP framework object can cross either boundary, and
+  that `AgentResponse`'s richer internal representation still serializes
+  to plain JSON-compatible types only.
