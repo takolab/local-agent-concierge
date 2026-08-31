@@ -77,8 +77,10 @@ Both tasks started from `17a38d3b703daec2345192477a751cd3ae97a0ed` — PR
 `git fetch` + `git log origin/master -1`; the task-provided SHA needed no
 drift correction). [PR #19](https://github.com/takolab/local-agent-concierge/pull/19)
 and [PR #20](https://github.com/takolab/local-agent-concierge/pull/20) were
-opened one second apart (2026-08-31T12:23:39Z and 12:23:40Z), confirming a
-genuinely parallel start.
+opened one second apart (2026-08-31T12:23:39Z and 12:23:40Z) — consistent
+with, though not itself proof of, a genuinely parallel start; PR-creation
+time reflects when each branch was pushed, not necessarily the exact
+moment each task began executing.
 
 ## Experiment protocol
 
@@ -104,7 +106,7 @@ Both tasks reached a PR-ready state without any human intervention during
 the original run:
 
 - **Task A**: 0 clarifications, 0 escalations, 0 unnecessary intervention,
-  no scope expansion. Tests: 186 passed / 0 failed (up from 87 at
+  no scope expansion. Tests: 156 passed / 0 failed (up from 87 at
   BASE_SHA), 100% line coverage. CI: both `Python tests` and
   `Agent Contracts tests` workflows green.
 - **Task B**: 0 clarifications, 0 escalations, 0 unnecessary intervention,
@@ -127,7 +129,14 @@ protocol correction held.
 The timing and rating figures below are the reviewer's own account of a
 silent reading process; GitHub has no record of how long a human spent
 reading a diff before commenting, so these are self-reported as part of the
-experiment record, not something pulled from GitHub.
+experiment record, not something pulled from GitHub. They are given in the
+reviewer's local time, inferred to be UTC+1: every commit in this review
+window is recorded with a consistent `+0100` offset (e.g. `git log` shows
+PR #20's merge at `2026-08-31 17:14:34 +0100` against the GitHub API's
+`2026-08-31T16:14:35Z`). Every other timestamp in this document is UTC, as
+returned by the GitHub API. Normalized to UTC: PR #19's window is
+12:56–13:01, PR #20's is 13:05–13:09 — i.e. both self-reported human scans
+precede both independent-AI-review comments below (13:48–13:49 UTC).
 
 **PR #19**
 - Review window: 13:56–14:01 (5 min active review time)
@@ -278,10 +287,11 @@ run:
 The original hypothesis was that adding more parallel Coding Agents
 increases human-side context-switching/review workload until it becomes
 the bottleneck. This experiment did not get far enough to test that — a
-more basic problem sat in front of it. When the human does not have a
-clear, durable understanding of exactly what was delegated to the agent and
-what they are personally responsible for verifying in the resulting PR,
-review confidence stays low regardless of how quickly the PR can be read.
+more basic problem sat in front of it. In this experiment, low review
+confidence coincided with the reviewer lacking a clear model of what had
+been delegated and what they were responsible for verifying. This is an
+observation from one reviewer across two PRs, not a general causal
+relationship (see "Limitations / confounders").
 
 Concretely, the human in this experiment tends to skim the long delegation
 prompts an AI assistant drafts before handing them to a Coding Agent, so
@@ -321,8 +331,11 @@ confidence, not just review speed. At minimum, record:
   findings, changes requested, and manual verification requirements — the
   same shape of data collected in this experiment.
 
-**Primary question:** does the human clearly understanding what was
-delegated, at delegation time, raise review confidence at PR time?
+**Primary question:** is higher pre-delegation human understanding
+associated with higher post-PR review confidence, improving on Experiment
+#2's baseline (2/5 confidence on both PRs despite a clean, issue-free
+scan)? Treat this as evidence accumulating across delegated tasks over
+time, not a single pass/fail test of the Delegation Summary.
 
 ### Independent AI reviewer
 
@@ -336,6 +349,11 @@ dedicated.
 
 ## Limitations / confounders
 
+- **Single-reviewer, two-PR observation.** This experiment observed one
+  reviewer's reaction to two PRs. The relationship this document describes
+  between delegation-time understanding and PR-time review confidence
+  ("Main finding") is an observation from that one pairing, not a general
+  causal relationship established across reviewers or a larger PR sample.
 - **PR size difference.** Task A (PR #19: 186 tests, a pure schema/
   validation package) and Task B (PR #20: 54 tests, an API-integration-
   plus-tracing feature) were not equivalent in size or shape. The
