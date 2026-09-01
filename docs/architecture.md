@@ -601,7 +601,10 @@ The initial version will not attempt to:
 The following decisions will be documented as the implementation progresses:
 
 - Programming language and framework for the Slack Gateway
-- Programming language and framework for the Orchestrator
+- Framework for the Orchestrator's eventual service/transport layer.
+  Python has been selected for the initial `services/orchestrator`
+  implementation, currently a plain in-process package with no service or
+  transport of its own yet — see `docs/orchestrator/domain-model.md`.
 - Initial Hermes deployment method
 - Agent transport protocol
 - Memory embedding model

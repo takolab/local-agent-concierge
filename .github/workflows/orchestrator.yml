@@ -1,0 +1,45 @@
+name: Orchestrator tests
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - "services/orchestrator/**"
+      - "packages/agent-contracts/**"
+      - ".github/workflows/orchestrator.yml"
+
+  push:
+    branches:
+      - master
+    paths:
+      - "services/orchestrator/**"
+      - "packages/agent-contracts/**"
+      - ".github/workflows/orchestrator.yml"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install Agent Contracts domain package
+        run: pip install -e packages/agent-contracts
+
+      - name: Install Orchestrator test dependencies
+        run: pip install -e "services/orchestrator[test]"
+
+      - name: Run Orchestrator tests
+        run: python -m pytest services/orchestrator/tests
