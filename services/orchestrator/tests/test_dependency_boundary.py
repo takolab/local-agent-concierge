@@ -11,7 +11,10 @@ from pathlib import Path
 
 import pytest
 
+import orchestrator.__main__ as main_module
 import orchestrator.agent as agent_module
+import orchestrator.dev_agents as dev_agents_module
+import orchestrator.http_server as http_server_module
 import orchestrator.orchestrator as orchestrator_module
 import orchestrator.registry as registry_module
 
@@ -27,8 +30,22 @@ def test_pyproject_declares_exactly_the_agent_contracts_dependency():
 
 @pytest.mark.parametrize(
     "module",
-    [agent_module, registry_module, orchestrator_module],
-    ids=["agent", "registry", "orchestrator"],
+    [
+        agent_module,
+        registry_module,
+        orchestrator_module,
+        http_server_module,
+        dev_agents_module,
+        main_module,
+    ],
+    ids=[
+        "agent",
+        "registry",
+        "orchestrator",
+        "http_server",
+        "dev_agents",
+        "__main__",
+    ],
 )
 def test_core_modules_only_import_stdlib_or_agent_contracts(module):
     source = Path(module.__file__).read_text()

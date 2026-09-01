@@ -142,6 +142,49 @@ services:
       context: ./mcp/google-calendar
       target: test
 
+  orchestrator:
+    build:
+      context: .
+      dockerfile: services/orchestrator/Dockerfile
+      target: runtime
+
+    restart: unless-stopped
+
+    # Not yet depended on by, or calling, any other service: this slice
+    # only proves the HTTP -> Orchestrator.dispatch() -> HTTP boundary
+    # works against a synthetic development Agent. See
+    # docs/orchestrator/domain-model.md.
+    ports:
+      - "127.0.0.1:8700:8700"
+
+    networks:
+      - concierge-network
+
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen(
+              "http://127.0.0.1:8700/health",
+              timeout=2,
+          ).read()
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+
+  orchestrator-test:
+    profiles:
+      - test
+
+    build:
+      context: .
+      dockerfile: services/orchestrator/Dockerfile
+      target: test
+
   otel-collector:
     image: otel/opentelemetry-collector-contrib:latest
     restart: unless-stopped
