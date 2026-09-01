@@ -46,6 +46,74 @@ jobs:
       - name: Run Slack Gateway tests
         run: docker compose --profile test run --rm slack-gateway-test
 
+      - name: Run Orchestrator container tests
+        run: docker compose --profile test run --rm orchestrator-test
+
+      - name: Start Orchestrator runtime container
+        run: docker compose up -d --wait --wait-timeout 60 orchestrator
+
+      - name: Runtime smoke test - GET /health
+        run: |
+          status=$(curl -s -o /tmp/orchestrator_health.json -w "%{http_code}" \
+            http://127.0.0.1:8700/health)
+          echo "GET /health -> HTTP $status"
+          cat /tmp/orchestrator_health.json
+          test "$status" = "200"
+
+      - name: Runtime smoke test - POST /dispatch known agent
+        run: |
+          status=$(curl -s -o /tmp/orchestrator_dispatch_known.json \
+            -w "%{http_code}" -X POST http://127.0.0.1:8700/dispatch \
+            -H "Content-Type: application/json" \
+            -d '{"agent_name": "dev-echo", "request": {"task_id": "ci-smoke-1", "user_id": "ci", "conversation_id": "ci-smoke", "instruction": "ci-ping", "memory_scopes": [], "permissions": [], "trace_id": null}}')
+          echo "POST /dispatch (known agent) -> HTTP $status"
+          cat /tmp/orchestrator_dispatch_known.json
+          test "$status" = "200"
+          python3 <<'PYEOF'
+          import json
+
+          with open("/tmp/orchestrator_dispatch_known.json") as f:
+              data = json.load(f)
+
+          expected = {
+              "status": "completed",
+              "summary": "echo: ci-ping",
+              "proposed_actions": [],
+              "memory_candidates": [],
+          }
+          assert data == expected, f"unexpected AgentResponse body: {data!r}"
+          print("OK: /dispatch response matches the expected AgentResponse")
+          PYEOF
+
+      - name: Runtime smoke test - POST /dispatch unknown agent
+        run: |
+          status=$(curl -s -o /tmp/orchestrator_dispatch_unknown.json \
+            -w "%{http_code}" -X POST http://127.0.0.1:8700/dispatch \
+            -H "Content-Type: application/json" \
+            -d '{"agent_name": "does-not-exist", "request": {"task_id": "ci-smoke-2", "user_id": "ci", "conversation_id": "ci-smoke", "instruction": "ci-ping", "memory_scopes": [], "permissions": [], "trace_id": null}}')
+          echo "POST /dispatch (unknown agent) -> HTTP $status"
+          cat /tmp/orchestrator_dispatch_unknown.json
+          test "$status" = "404"
+          python3 <<'PYEOF'
+          import json
+
+          with open("/tmp/orchestrator_dispatch_unknown.json") as f:
+              data = json.load(f)
+
+          assert data.get("error") == "unknown_agent", f"unexpected error body: {data!r}"
+          print("OK: unknown agent dispatch returned a defined 4xx error body")
+          PYEOF
+
+      - name: Show Orchestrator container logs
+        if: always()
+        run: docker compose logs orchestrator
+
+      - name: Stop Orchestrator runtime container
+        if: always()
+        run: |
+          docker compose stop orchestrator
+          docker compose rm -f orchestrator
+
       - name: Install Approvals domain package
         run: pip install -e "packages/approvals[test]"
 
