@@ -1,37 +1,50 @@
 # Orchestrator Domain Model
 
-This document describes the first bounded implementation slice of
-Milestone 7 (Containerized Concierge Orchestrator): `services/orchestrator`,
-a minimal in-process routing skeleton, implemented in
+This document describes `services/orchestrator`'s implementation slices
+for Milestone 7 (Containerized Concierge Orchestrator), implemented in
 `services/orchestrator/src/orchestrator`.
 
-This slice proves that the existing Agent contracts
-(`packages/agent-contracts`'s `AgentRequest` / `AgentResponse`) can be
-connected through an `Orchestrator` implementation — nothing more. A
-caller explicitly supplies an Agent name; the `Orchestrator` looks up that
-Agent in an `AgentRegistry`, passes it an existing `AgentRequest`
-unmodified, and returns its `AgentResponse` unchanged.
+**Slice 1** ([PR #23](https://github.com/takolab/local-agent-concierge/pull/23))
+proved that the existing Agent contracts (`packages/agent-contracts`'s
+`AgentRequest` / `AgentResponse`) can be connected through an
+`Orchestrator` implementation — nothing more. A caller explicitly
+supplies an Agent name; the `Orchestrator` looks up that Agent in an
+`AgentRegistry`, passes it an existing `AgentRequest` unmodified, and
+returns its `AgentResponse` unchanged. This dispatch mechanism (`Agent`,
+`AgentRegistry`, `Orchestrator.dispatch` below) is unchanged by Slice 2.
 
-It does not implement request classification, automatic agent selection,
-any transport, or any of the other Milestone 7 tasks — see "Deliberately
-not implemented yet" below and `docs/roadmap.md` Milestone 7 for what
-comes next.
+**Slice 2** turns that in-process library into a runnable, containerized
+process with a minimal, provisional HTTP boundary (`GET /health`,
+`POST /dispatch`), verified by a real Docker container health check and
+real HTTP requests crossing the container boundary — not just in-process
+Python calls. It deliberately does not connect to Hermes Agent or the
+Slack Gateway. See "Runtime HTTP Boundary" below.
+
+Neither slice implements request classification, automatic agent
+selection, Hermes Agent or Slack Gateway integration, or any of the other
+Milestone 7 tasks — see "Deliberately not implemented yet" below and
+`docs/roadmap.md` Milestone 7 for what comes next.
 
 ## Where this lives, and why
 
-`services/orchestrator` is a plain, in-process Python library package
-(`src/` layout, `pyproject.toml`), not a running service yet: no
-Dockerfile, no `docker-compose.yml` entry, no HTTP or other transport.
-Nothing in this slice needs it to run anywhere on its own — it only needs
-to be importable and tested, the same way `packages/agent-contracts` and
-`packages/approvals` are today.
+`services/orchestrator` is a Python library package (`src/` layout,
+`pyproject.toml`) that, as of Slice 2, also runs as a containerized
+process: `services/orchestrator/Dockerfile` and `docker-compose.yml`'s
+`orchestrator` / `orchestrator-test` services now exist (see "Docker /
+Compose runtime" below). Slice 1's dispatch/registry/agent code
+(`agent.py`, `registry.py`, `orchestrator.py`) is unchanged by Slice 2 —
+Slice 2 adds a thin HTTP layer (`http_server.py`), a runtime entrypoint
+(`__main__.py`), and a development-only synthetic Agent
+(`dev_agents.py`) around it, not a rewrite of the dispatch mechanism
+itself.
 
 It lives under `services/` rather than `packages/` because
 `docs/architecture.md`'s Repository Mapping already reserves
 `services/orchestrator/` by name for "Agent routing and coordination," and
 `docs/roadmap.md` Milestone 7 names it "Create the `services/orchestrator`
-application." The name anticipates the future containerized service; this
-slice is the first, bounded step toward it, not the service itself.
+application." Slice 2 is the next bounded step toward the eventual
+production containerized service, not the finished service — see
+"Deliberately not implemented yet" below for what still doesn't exist.
 
 ## `Agent`
 
@@ -167,13 +180,23 @@ no index behind it, install order is load-bearing: running `pip install
 have `agent-contracts` installed would have pip search the configured
 index (PyPI by default) for `local-agent-concierge-agent-contracts` and
 fail, since that name is not published anywhere. This works today only
-because every install path that matters — this doc, and the CI workflow —
-installs `agent-contracts` first, into the same environment, before
-`services/orchestrator`. Revisit this (a private package index, a lock
-file, or Dockerfile-controlled build order) when the Orchestrator is
-containerized (`docs/roadmap.md` Milestone 7's "Add a Dockerfile for the
-Orchestrator" task), rather than assuming this two-step sequence is the
-permanent answer.
+because every install path that matters — this doc, the CI workflow, and
+(as of Slice 2) `services/orchestrator/Dockerfile` — installs
+`agent-contracts` first, into the same environment, before
+`services/orchestrator`.
+
+**Resolved for the containerized path in Slice 2, as anticipated above.**
+`services/orchestrator/Dockerfile` builds from the *repository root* as
+its Docker build context (`docker-compose.yml`'s `orchestrator` /
+`orchestrator-test` services set `context: .` and
+`dockerfile: services/orchestrator/Dockerfile`, unlike
+`apps/slack-gateway` or `mcp/google-calendar`, which build from their own
+subdirectory) specifically so it can `COPY packages/agent-contracts` and
+`pip install` it before installing `services/orchestrator` itself —
+reproducing this same two-step order as a Dockerfile build step rather
+than two separate `pip install` invocations. This is still not a private
+package index or a lock file; it is the "Dockerfile-controlled build
+order" option named above, not a long-term dependency standard.
 
 ## Current boundaries
 
@@ -183,7 +206,11 @@ permanent answer.
   `register()` calls from whatever constructs the `AgentRegistry`; nothing
   here loads Agents from configuration or discovers them automatically.
 - `Orchestrator` and `AgentRegistry` are plain Python objects, used
-  in-process. Nothing here runs as a service yet.
+  in-process — this is unchanged by Slice 2. What changed is that
+  something now constructs and runs them as a service: as of Slice 2,
+  `orchestrator.__main__.build_orchestrator()` builds this same
+  `Orchestrator`/`AgentRegistry` pair and serves it over the minimal HTTP
+  boundary described in "Runtime HTTP Boundary" below.
 
 ### Relationship to the Milestone 7 registration task
 
@@ -199,14 +226,225 @@ anything beyond what already exists here is left for whichever future
 task revisits Milestone 7's checkboxes — this document does not update
 `docs/roadmap.md`.
 
+## Runtime HTTP Boundary (Slice 2)
+
+Slice 2 adds a minimal, provisional HTTP transport around Slice 1's
+unchanged `Orchestrator.dispatch()`:
+
+```text
+HTTP request -> AgentRequest deserialization -> Orchestrator.dispatch()
+-> AgentResponse serialization -> HTTP response
+```
+
+Implemented in `services/orchestrator/src/orchestrator/http_server.py`
+using Python's standard library `http.server`
+(`ThreadingHTTPServer` + `BaseHTTPRequestHandler`) — **no new runtime
+dependency**. Two routes only; any other path returns `404`, and a known
+path called with the wrong HTTP method is not specially handled beyond
+that (out of scope for this minimal a surface). `services/orchestrator`
+still declares exactly the one `local-agent-concierge-agent-contracts`
+runtime dependency it declared after Slice 1 —
+`test_dependency_boundary.py` now also parametrizes over `http_server`,
+`dev_agents`, and `__main__` to confirm they, too, import only the
+standard library, `agent_contracts`, or `orchestrator`'s own modules.
+
+**Why the standard library instead of a framework.** The surface is two
+routes with simple JSON in/out. A hand-rolled handler needs a small,
+bounded amount of code to get JSON parsing, routing, and — most
+importantly — exception-to-4xx/5xx translation right (see "No leaked
+internal detail" below), but none of that is unnatural or contorted at
+this size, and it keeps the dependency footprint at exactly what Slice 1
+already established (one runtime dependency, `agent-contracts`) rather
+than adding a web framework for two routes. This is a deliberate choice
+for *this* minimal slice, not a standing rule for whatever the
+Orchestrator's HTTP surface eventually grows into.
+
+### `GET /health`
+
+Liveness only. Always `200 {"status": "ok"}` if the HTTP process is
+running. No business logic, no registry inspection, no Agent
+connectivity check — deliberately, per this slice's own scope.
+
+### `POST /dispatch`
+
+Request body:
+
+```json
+{
+  "agent_name": "dev-echo",
+  "request": {
+    "task_id": "task-1",
+    "user_id": "user-1",
+    "conversation_id": "conversation-1",
+    "instruction": "do something",
+    "memory_scopes": [],
+    "permissions": [],
+    "trace_id": null
+  }
+}
+```
+
+`request` must include all 7 `AgentRequest` fields explicitly (including
+`memory_scopes: []`, `permissions: []`, `trace_id: null` when unused) —
+`agent_request_from_dict` (Slice 1's existing deserializer, reused
+unchanged) requires every field to be present in the serialized form; see
+open design question 3 in `docs/agent-contracts/domain-model.md`, which
+this slice does not resolve.
+
+Response bodies and status codes:
+
+| Condition | Status | Body |
+|---|---|---|
+| Known Agent, valid request | `200` | `agent_response_to_dict(response)` — the Agent's exact `AgentResponse`, unwrapped |
+| Unknown `agent_name` | `404` | `{"error": "unknown_agent", "detail": "No agent is registered under '<name>'."}` |
+| Body is not valid JSON | `400` | `{"error": "invalid_json", "detail": "..."}` |
+| Body is valid JSON but not `{"agent_name": str, "request": object}`, or `request` fails `AgentRequest` validation | `400` | `{"error": "invalid_request", "detail": "..."}` (`detail` may echo the underlying `ValueError` message from `agent_contracts` — a field-validation message, e.g. `"task_id must be a non-empty string"`, never an internal exception or traceback) |
+| Unknown path | `404` | `{"error": "not_found", "detail": "..."}` |
+| Anything else unexpected (e.g. an Agent's `handle()` raises) | `500` | `{"error": "internal_error", "detail": "An unexpected error occurred while dispatching the request."}` |
+
+This exact request/response shape, and these status codes, are
+**provisional** — a deliberately minimal contract sized for this slice's
+proof target, not a stable or versioned public API. Expect it to change
+once Hermes Agent integration, classification, or Slack Gateway
+connectivity are designed.
+
+**No leaked internal detail.** Every code path in `do_GET/do_POST` is
+wrapped so that an unexpected exception (anything not already translated
+into one of the defined 4xx cases above) is logged in full server-side
+via `logging.exception(...)`, but the HTTP response always stays the
+generic, bounded `internal_error` body above — never the exception's
+message, its type, or a traceback. `test_http_server.py`'s
+`test_dispatch_agent_exception_returns_500_without_leaking_internal_details`
+asserts this directly (an Agent that raises with a distinctive message;
+the response body is asserted not to contain that message, `"Traceback"`,
+or the exception's type name), and also asserts the server is still
+responsive (`GET /health` still returns `200`) immediately afterward —
+one bad dispatch must not crash or hang the runtime process.
+
+### Serialization flow
+
+No new domain schema. `POST /dispatch` reuses Slice 1's existing
+`agent_contracts` (de)serializers unchanged: `agent_request_from_dict`
+for the incoming `request` object, `agent_response_to_dict` for the
+outgoing body. `AgentRequest` / `AgentResponse` themselves, and their
+validation rules, are exactly as documented in
+`docs/agent-contracts/domain-model.md` — this slice does not touch
+`packages/agent-contracts`.
+
+### Synthetic Agent
+
+`services/orchestrator/src/orchestrator/dev_agents.py` defines
+`EchoAgent`, registered by `orchestrator.__main__` under the name
+`"dev-echo"` — deliberately not `"hermes"`, `"calendar"`, or any name
+that could be mistaken for a real domain Agent. `EchoAgent.handle()`
+deterministically returns
+`AgentResponse(status="completed", summary=f"echo: {request.instruction}")`
+with no reasoning, no model call, and no side effects.
+
+**This is a development/smoke-test fixture, not a production Agent.** It
+exists only so the HTTP -> `Orchestrator.dispatch()` -> Agent contract
+path has something real to dispatch to when the container starts — for
+the Docker health check, the CI runtime smoke test, and optional manual
+verification. `orchestrator.__main__.build_orchestrator()` hardcodes
+this one registration; there is no configuration file, discovery
+mechanism, or environment-variable-driven registration. A production
+Agent registration mechanism (e.g. a `HermesAgent` adapter wrapping
+Hermes Agent's existing `/v1/responses` API, the way
+`apps/slack-gateway/src/slack_gateway/hermes_client.py` already does) is
+a separate, later task and is not designed here.
+
+### Docker / Compose runtime
+
+`services/orchestrator/Dockerfile` follows the same
+`base -> test -> runtime` multi-stage pattern as
+`apps/slack-gateway/Dockerfile` and `mcp/google-calendar/Dockerfile`,
+with one deliberate difference: its Docker build **context is the
+repository root**, not `services/orchestrator/`, so it can install
+`packages/agent-contracts` before `services/orchestrator` itself — see
+"Resolved for the containerized path in Slice 2" above. The `runtime`
+stage's `CMD` actually starts the HTTP process (`python -m orchestrator`)
+— it is not a placeholder or no-op container.
+
+`docker-compose.yml` adds:
+
+- `orchestrator` — the runtime container. Published to the host as
+  `127.0.0.1:8700:8700` (unlike `hermes-agent` or `google-calendar-mcp`,
+  which are internal-only, reached only by sibling containers today).
+  This slice publishes the port deliberately, so both the CI runtime
+  smoke test and an optional human `curl` can reach it directly from
+  outside the Compose network, matching the human-observable-boundary
+  goal of this slice. A `healthcheck` polls `GET /health` via
+  `urllib.request` (the same pattern already used by the `phoenix` and
+  `mlflow` services). Not depended on by, and does not depend on, any
+  other service yet.
+- `orchestrator-test` — `profiles: [test]`, builds the `test` stage,
+  runs `services/orchestrator/tests` inside the container (same shape as
+  `slack-gateway-test` / `google-calendar-mcp-test`).
+
+`.github/workflows/pytest.yml` runs `orchestrator-test`, then separately
+starts the real `orchestrator` runtime container
+(`docker compose up -d --wait --wait-timeout 60 orchestrator`) and drives
+it with real `curl` requests over the published port — `GET /health`, a
+known-Agent `POST /dispatch`, and an unknown-Agent `POST /dispatch` —
+asserting both status codes and response bodies, before tearing the
+container down. This is deliberately not just an in-process test client:
+it is the automated evidence that the HTTP <-> Orchestrator boundary
+holds across the real container boundary, not only inside a single
+Python process. `.github/workflows/orchestrator.yml` (the fast,
+Docker-free `pip install` + `pytest` path) is unchanged and still runs
+the full `services/orchestrator/tests` suite, including
+`test_http_server.py`, entirely in-process.
+
+### Authorization boundary — carried over from PR #23 review
+
+[PR #23](https://github.com/takolab/local-agent-concierge/pull/23)'s
+review flagged, non-blocking, that the dispatch layer's silent pass-through
+of `AgentRequest.permissions` should be documented explicitly as *not*
+an authorization boundary before the Orchestrator is wired into a real
+runtime. Slice 2 is that runtime wiring, so this is now recorded
+explicitly: **neither `Orchestrator.dispatch()` nor the `POST /dispatch`
+HTTP layer added in Slice 2 is an authorization boundary.**
+`AgentRequest.permissions` continues to be passed through unexamined —
+Slice 2 does not inspect, enforce, or validate it. The presence of a
+`permissions` entry in a request must not be read by any future caller as
+evidence that authorization has already occurred anywhere in this path.
+Where a permission such as `calendar.read` is actually enforced remains
+the same open question already logged in
+`docs/agent-contracts/domain-model.md` ("`permissions` enforcement
+boundary").
+
+Separately, and for the same reason: the `POST /dispatch` HTTP endpoint
+itself has **no authentication and no authorization**. Anything that can
+reach `127.0.0.1:8700` (today: the local host and other containers on
+`concierge-network`) can call it. This is an explicit, deliberate scope
+boundary for this slice — see "Deliberately not implemented yet" below —
+not an oversight, and not yet suitable for exposure beyond local
+development.
+
+### Current limitations
+
+- The `POST /dispatch` request/response shape and status codes above are
+  provisional, not a stable or versioned contract.
+- No authentication or authorization on the HTTP endpoint.
+- `AgentRequest.permissions` is not enforced anywhere in this path.
+- No connection to Hermes Agent or the Slack Gateway.
+- The only registered Agent is the synthetic, non-production `EchoAgent`
+  ("Synthetic Agent" above); there is no production Agent registration
+  mechanism.
+- No request classification or automatic Agent selection — `agent_name`
+  is still supplied explicitly by the caller, exactly as in Slice 1.
+- No trace context propagation into or out of the HTTP layer.
+- `orchestrator`'s Docker Compose service is not depended on by any other
+  service, and does not itself depend on or call any other service.
+
 ## Deliberately not implemented yet
 
-Out of scope for this slice, per its stated boundaries and
+Out of scope for Slice 2, per its stated boundaries and
 `docs/roadmap.md` Milestone 7's remaining tasks:
 
-- HTTP, MCP, or any other transport.
-- Docker.
-- Docker Compose.
+- MCP, or any transport beyond the minimal, provisional HTTP boundary
+  described in "Runtime HTTP Boundary" above.
+- Transport authentication or authorization.
 - Slack Gateway integration.
 - Hermes Agent integration.
 - Request classification.
@@ -217,10 +455,12 @@ Out of scope for this slice, per its stated boundaries and
 - Multi-agent delegation.
 - Result aggregation.
 - Trace propagation.
+- Production Agent registration/discovery (only the hardcoded
+  development `EchoAgent` is registered — see "Synthetic Agent" above).
 
-Also out of scope: agent discovery, persistence, dynamic loading,
-configuration-file-based registration, network registration, and any
-change to `packages/agent-contracts` or `packages/approvals`.
+Also out of scope: persistence, dynamic loading, configuration-file-based
+registration, network registration, and any change to
+`packages/agent-contracts` or `packages/approvals`.
 
 ## Open questions carried forward
 
@@ -257,11 +497,27 @@ This slice resolves none of the open questions already logged in
   targets an unknown name, and an Agent-raised exception propagating out
   of `dispatch()` as the identical exception instance (not caught,
   wrapped, or translated).
+- `test_http_server.py` (Slice 2) — runs the real
+  `OrchestratorHTTPServer` on an ephemeral localhost port in a background
+  thread and drives it with real HTTP requests (`urllib`, standard
+  library only): `GET /health`; a known-Agent `POST /dispatch` returning
+  the exact `AgentResponse` (round-tripped through `agent_contracts`);
+  an unknown-Agent `POST /dispatch` returning `404` and confirming no
+  Agent is called; invalid-JSON, non-object, missing-`agent_name`, and
+  incomplete/invalid `AgentRequest` bodies each returning `400`; an
+  Agent that raises returning `500` with a body asserted *not* to contain
+  the exception's message, its type name, or `"Traceback"`, followed by a
+  `GET /health` check confirming the server is still responsive; and an
+  unknown path returning `404`.
 - `test_dependency_boundary.py` — `pyproject.toml` declares exactly the
-  one `local-agent-concierge-agent-contracts` dependency, and
-  `agent.py` / `registry.py` / `orchestrator.py` import only from the
-  standard library or `agent_contracts`.
+  one `local-agent-concierge-agent-contracts` dependency, and (as of
+  Slice 2) `agent.py` / `registry.py` / `orchestrator.py` / `http_server.py`
+  / `dev_agents.py` / `__main__.py` all import only from the standard
+  library, `agent_contracts`, or `orchestrator`'s own modules.
 - `stub_agents.py` — not a test module itself; the `RecordingAgent` /
-  `ExplodingAgent` stub Agents shared by the two test modules above. Both
-  exist only under `tests/` — there are no stub Agents under
-  `services/orchestrator/src`.
+  `ExplodingAgent` stub Agents shared by `test_orchestrator.py` and (as of
+  Slice 2) `test_http_server.py`. Both exist only under `tests/` — not to
+  be confused with `orchestrator.dev_agents.EchoAgent`, which ships in
+  `services/orchestrator/src` because the running container needs a real
+  registered Agent at startup, but is equally not production code (see
+  "Synthetic Agent" above for the distinction between the two).
