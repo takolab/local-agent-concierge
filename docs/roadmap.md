@@ -709,8 +709,8 @@ The Orchestrator will allow new agents and frameworks to be added without coupli
 * [x] Define the common agent request schema
 * [x] Define the common agent response schema
 * [ ] Create the `services/orchestrator` application
-* [ ] Add a Dockerfile for the Orchestrator
-* [ ] Add the Orchestrator service to `docker-compose.yml`
+* [x] Add a Dockerfile for the Orchestrator
+* [x] Add the Orchestrator service to `docker-compose.yml`
 * [ ] Move agent-selection responsibility out of the Slack Gateway
 * [ ] Implement agent registration
 * [ ] Implement request classification

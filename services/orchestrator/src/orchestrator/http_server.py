@@ -96,7 +96,13 @@ class OrchestratorRequestHandler(BaseHTTPRequestHandler):
 
         try:
             payload = json.loads(body)
-        except json.JSONDecodeError:
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            # json.loads(bytes) decodes UTF-8 internally before parsing, so
+            # a body that isn't valid UTF-8 raises UnicodeDecodeError, not
+            # JSONDecodeError -- both are "the body was not valid JSON" from
+            # this endpoint's point of view, and must not fall through to
+            # the unexpected-error path below (that would misreport a
+            # client-originated malformed body as a 500 internal_error).
             self._send_error(
                 HTTPStatus.BAD_REQUEST,
                 "invalid_json",

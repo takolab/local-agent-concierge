@@ -129,6 +129,19 @@ def test_dispatch_invalid_json_body_returns_400(running_server):
     assert body["error"] == "invalid_json"
 
 
+def test_dispatch_invalid_utf8_body_returns_400_not_500(running_server):
+    base_url, _, _ = running_server
+
+    # json.loads(bytes) decodes UTF-8 internally, so a body that isn't
+    # valid UTF-8 raises UnicodeDecodeError rather than JSONDecodeError.
+    # This must still be reported as invalid_json (400), not fall through
+    # to the unexpected-error path (500) -- regression test for that.
+    status, body = _post(f"{base_url}/dispatch", b"\xff\xfe\xfd")
+
+    assert status == 400
+    assert body["error"] == "invalid_json"
+
+
 def test_dispatch_missing_agent_name_returns_400(running_server):
     base_url, _, _ = running_server
 
