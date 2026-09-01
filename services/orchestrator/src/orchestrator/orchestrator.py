@@ -21,10 +21,11 @@ class Orchestrator:
         """Look up agent_name, call its handle(request), and return the result.
 
         The request is passed through unmodified and the response is
-        returned unwrapped. Exceptions raised by the Agent (including
-        UnknownAgentError from an unregistered agent_name) propagate to
-        the caller unchanged — this method does not catch, translate, or
-        retry them.
+        returned unwrapped. Two distinct failure paths propagate to the
+        caller unchanged, neither caught, translated, nor retried here:
+        AgentRegistry.get() raising UnknownAgentError when agent_name is
+        not registered (the Agent is never called in that case), and any
+        exception the Agent itself raises from handle().
         """
         agent = self._registry.get(agent_name)
         return agent.handle(request)

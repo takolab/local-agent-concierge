@@ -1,6 +1,7 @@
 """Tests for orchestrator.registry.AgentRegistry: registration, retrieval,
 duplicate-name rejection without mutating the existing registration,
-unknown-name rejection, and membership checks.
+unknown-name rejection, membership checks, and the agent-name identifier
+rule (non-empty, no leading/trailing whitespace).
 """
 
 import pytest
@@ -32,6 +33,30 @@ def test_register_rejects_non_empty_string_names(bad_name):
         registry.register(bad_name, _agent())
 
     assert bad_name not in registry
+
+
+@pytest.mark.parametrize("padded_name", [" calendar", "calendar ", " calendar "])
+def test_register_rejects_names_with_leading_or_trailing_whitespace(padded_name):
+    registry = AgentRegistry()
+
+    with pytest.raises(ValueError):
+        registry.register(padded_name, _agent())
+
+    assert padded_name not in registry
+
+
+def test_padded_name_is_never_treated_as_equivalent_to_its_trimmed_form():
+    registry = AgentRegistry()
+    registry.register("calendar", _agent())
+
+    with pytest.raises(ValueError):
+        registry.register(" calendar ", _agent())
+
+    with pytest.raises(UnknownAgentError):
+        registry.get(" calendar ")
+
+    assert " calendar " not in registry
+    assert "calendar" in registry
 
 
 def test_register_duplicate_name_raises_and_does_not_mutate_registration():

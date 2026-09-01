@@ -23,12 +23,17 @@ class AgentRegistry:
     def register(self, name: str, agent: Agent) -> None:
         """Register agent under name.
 
-        Raises ValueError if name is not a non-empty string, or
-        DuplicateAgentError if name is already registered — in which case
-        the existing registration is left unchanged.
+        Raises ValueError if name is not a non-empty string, or if it has
+        leading or trailing whitespace — otherwise " foo " and "foo" would
+        silently become distinct registry keys. Raises DuplicateAgentError
+        if name is already registered — in which case the existing
+        registration is left unchanged.
         """
-        if not isinstance(name, str) or not name.strip():
-            raise ValueError("agent name must be a non-empty string")
+        if not isinstance(name, str) or not name.strip() or name != name.strip():
+            raise ValueError(
+                "agent name must be a non-empty string with no leading or "
+                "trailing whitespace"
+            )
 
         if name in self._agents:
             raise DuplicateAgentError(f"Agent already registered: {name!r}")

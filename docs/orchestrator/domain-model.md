@@ -64,10 +64,14 @@ class AgentRegistry:
     def __contains__(self, name: object) -> bool: ...
 ```
 
-- `register(name, agent)` requires `name` to be a non-empty string
-  (`ValueError` otherwise) and raises `DuplicateAgentError` if `name` is
-  already registered. On a duplicate, the existing registration is left
-  untouched — the rejected call has no side effect.
+- `register(name, agent)` requires `name` to be a non-empty string with no
+  leading or trailing whitespace (`ValueError` otherwise — a padded name
+  like `" calendar "` is rejected outright rather than silently becoming a
+  key distinct from `"calendar"`, or silently normalized into the same
+  key; see `test_padded_name_is_never_treated_as_equivalent_to_its_trimmed_form`)
+  and raises `DuplicateAgentError` if `name` is already registered. On a
+  duplicate, the existing registration is left untouched — the rejected
+  call has no side effect.
 - `get(name)` returns the registered Agent, or raises `UnknownAgentError`
   if `name` was never registered.
 - Membership can be checked with `name in registry` (`__contains__`).
@@ -102,9 +106,11 @@ class Orchestrator:
 
 It deliberately does not modify the request, inspect `request.instruction`
 for routing, wrap the response, catch or translate Agent exceptions,
-retry, or combine results from multiple Agents. An exception raised by
-`Agent.handle()` — including `UnknownAgentError` from an unregistered
-name — propagates to the caller unchanged.
+retry, or combine results from multiple Agents. Two distinct failure
+paths propagate to the caller unchanged, neither caught, translated, nor
+retried: `UnknownAgentError`, raised by `AgentRegistry.get()` when
+`agent_name` isn't registered (the Agent is never called in that case),
+and any exception the Agent itself raises from `handle()`.
 
 ## Why explicit-name routing
 
@@ -153,6 +159,21 @@ does not attempt to reach an index for it, so this two-step sequence is
 reproducible without a `file://` dependency or a private package index.
 The Orchestrator CI workflow (`.github/workflows/orchestrator.yml`)
 installs in this same order.
+
+**This is a temporary monorepo convention, not a long-term dependency
+standard.** Because the dependency is declared by plain package name with
+no index behind it, install order is load-bearing: running `pip install
+-e "services/orchestrator[test]"` in an environment that does not already
+have `agent-contracts` installed would have pip search the configured
+index (PyPI by default) for `local-agent-concierge-agent-contracts` and
+fail, since that name is not published anywhere. This works today only
+because every install path that matters — this doc, and the CI workflow —
+installs `agent-contracts` first, into the same environment, before
+`services/orchestrator`. Revisit this (a private package index, a lock
+file, or Dockerfile-controlled build order) when the Orchestrator is
+containerized (`docs/roadmap.md` Milestone 7's "Add a Dockerfile for the
+Orchestrator" task), rather than assuming this two-step sequence is the
+permanent answer.
 
 ## Current boundaries
 
@@ -221,10 +242,12 @@ This slice resolves none of the open questions already logged in
 `services/orchestrator/tests/`:
 
 - `test_registry.py` — registering then retrieving an Agent, `register()`
-  rejecting non-string/blank names, a duplicate name raising
-  `DuplicateAgentError` while leaving the original registration in place,
-  `get()` raising `UnknownAgentError` for an unregistered name, and
-  membership checks via `in`.
+  rejecting non-string/blank names and names with leading or trailing
+  whitespace (and confirming a padded name is never silently treated as
+  equivalent to, nor coexists as a distinct key alongside, its trimmed
+  form), a duplicate name raising `DuplicateAgentError` while leaving the
+  original registration in place, `get()` raising `UnknownAgentError` for
+  an unregistered name, and membership checks via `in`.
 - `test_orchestrator.py` — successful dispatch returning the exact
   `AgentResponse` instance the Agent produced, the exact `AgentRequest`
   instance being passed through to `Agent.handle()`, explicit-name
