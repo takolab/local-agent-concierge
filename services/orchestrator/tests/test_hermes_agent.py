@@ -30,6 +30,7 @@ class _StubHermesServer(HTTPServer):
         super().__init__(server_address, _StubHermesRequestHandler)
         self.status_code = 200
         self.response_body = b'{"output_text": "default stub response"}'
+        self.extra_response_headers: dict[str, str] = {}
         self.last_request: dict[str, Any] | None = None
 
 
@@ -52,6 +53,8 @@ class _StubHermesRequestHandler(BaseHTTPRequestHandler):
 
         self.send_response(self.server.status_code)
         self.send_header("Content-Type", "application/json")
+        for header_name, header_value in self.server.extra_response_headers.items():
+            self.send_header(header_name, header_value)
         self.end_headers()
         self.wfile.write(self.server.response_body)
 
@@ -175,6 +178,46 @@ def test_http_error_status_raises_runtime_error(stub_hermes):
 
     with pytest.raises(RuntimeError, match="HTTP 500"):
         agent.handle(_sample_request())
+
+
+def test_redirect_response_raises_and_does_not_forward_credentials(stub_hermes):
+    # A second stub server stands in for a redirect target. If HermesAgent
+    # ever followed the redirect (urllib's default behavior), this server
+    # would receive a request -- and the Authorization header along with
+    # it, since urllib's default redirect handling does not strip it even
+    # across hosts. Confirmed empirically against unpatched code before
+    # this fix: the redirect was followed, POST silently became GET, and
+    # the bearer credential was forwarded to the redirect target.
+    redirect_target = _StubHermesServer(("127.0.0.1", 0))
+    redirect_target_thread = threading.Thread(
+        target=redirect_target.serve_forever, daemon=True
+    )
+    redirect_target_thread.start()
+
+    try:
+        redirect_target_url = (
+            f"http://127.0.0.1:{redirect_target.server_address[1]}/v1/responses"
+        )
+        stub_hermes.status_code = 302
+        stub_hermes.response_body = b""
+        stub_hermes.extra_response_headers = {"Location": redirect_target_url}
+
+        agent = HermesAgent(
+            base_url=f"http://127.0.0.1:{stub_hermes.server_address[1]}",
+            api_key=API_KEY,
+        )
+
+        with pytest.raises(RuntimeError, match="HTTP 302"):
+            agent.handle(_sample_request())
+
+        assert redirect_target.last_request is None, (
+            "the redirect target must never be contacted -- if it is, "
+            "the Authorization credential was forwarded to it"
+        )
+    finally:
+        redirect_target.shutdown()
+        redirect_target.server_close()
+        redirect_target_thread.join(timeout=5)
 
 
 def test_connection_error_raises_runtime_error():

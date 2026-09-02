@@ -32,6 +32,25 @@ HERMES_AGENT_NAME = "hermes"
 DEFAULT_TIMEOUT_SECONDS = 300.0
 
 
+class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Raise (as HTTPError) instead of automatically following a 3xx.
+
+    urllib's default HTTPRedirectHandler follows 301/302/303 (silently
+    converting POST to GET) and carries all non-content headers -- Auth-
+    orization included -- onto the redirect target, even across hosts.
+    Reused unchanged from stdlib apart from this: an Agent's declared
+    contract is 2xx-maps / non-2xx-raises, and this adapter's caller-
+    supplied bearer credential must never be sent anywhere but the
+    configured Hermes base_url.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
+
+
+_NO_REDIRECT_OPENER = urllib.request.build_opener(_NoRedirectHandler)
+
+
 class HermesAgent:
     """Dispatches an AgentRequest to a real Hermes Agent's /v1/responses API.
 
@@ -53,8 +72,9 @@ class HermesAgent:
         """Call Hermes Agent and map its response to an AgentResponse.
 
         Raises RuntimeError (not caught here) if Hermes is unreachable,
-        returns a non-2xx status, or returns a body this adapter cannot
-        extract output text from. This intentionally mirrors
+        returns a non-2xx status (redirects included -- never followed,
+        see _NoRedirectHandler above), or returns a body this adapter
+        cannot extract output text from. This intentionally mirrors
         Orchestrator.dispatch()'s existing behavior of letting an Agent's
         exception propagate uncaught -- the HTTP layer's existing generic
         500 handling (http_server.py) already covers it without needing a
@@ -85,7 +105,7 @@ class HermesAgent:
         )
 
         try:
-            with urllib.request.urlopen(
+            with _NO_REDIRECT_OPENER.open(
                 http_request, timeout=self._timeout_seconds
             ) as response:
                 response_body = response.read()

@@ -515,6 +515,29 @@ container startup — the Orchestrator container does not need Hermes Agent
 to be reachable to start or to pass its own liveness-only health check.
 This is a deliberate scope boundary for this slice, not an oversight.
 
+**Why redirects are never followed.** `urllib.request`'s default
+`HTTPRedirectHandler` follows 3xx responses automatically — for 301/302/303
+it silently converts the request from `POST` to `GET`, and it forwards
+every request header except `Content-Length`/`Content-Type` to the
+redirect target, with **no same-origin check**: `Authorization` is carried
+over even to a completely different host. Confirmed empirically (a
+throwaway local two-server script, not just read from the urllib source):
+unpatched `urlopen()` usage in this exact request shape followed a 302 to
+a second server and delivered the `Bearer` credential to it. `HermesAgent`
+therefore builds its own `urllib.request.OpenerDirector` via
+`build_opener(_NoRedirectHandler)` — a small `HTTPRedirectHandler`
+subclass whose `redirect_request` raises `HTTPError` instead of building a
+followable request — so any 3xx from the configured Hermes base URL is
+treated exactly like a 4xx/5xx (`handle()` raises, the target named in
+`Location` is never contacted, and the bearer credential is therefore
+never sent anywhere but `base_url` itself). `test_hermes_agent.py`'s
+`test_redirect_response_raises_and_does_not_forward_credentials` proves
+this against a second stub server standing in for the redirect target,
+confirming it never receives a request. Found by this repo's Independent
+AI Review on this slice's own PR, and verified independently (the
+throwaway before/after scripts above) before being fixed — not a
+hypothetical hardening measure.
+
 **Why raise instead of a new `status` value.** On any failure — a non-2xx
 HTTP status, a connection/timeout error, a non-JSON or non-object response
 body, or a response with no extractable output text — `HermesAgent.handle()`
@@ -639,11 +662,14 @@ This slice resolves none of the open questions already logged in
   direct `output_text`, successful dispatch extracting text from
   `output[].content[]` when `output_text` is absent, the exact request
   shape `HermesAgent` sends (path, `Authorization: Bearer`, JSON body
-  fields), a non-2xx Hermes status raising `RuntimeError`, a connection
-  error (nothing listening on the target port) raising `RuntimeError`, a
-  non-JSON response body raising `RuntimeError`, a JSON-but-non-object
-  response body raising `RuntimeError`, and a response with no
-  extractable output text raising `RuntimeError`.
+  fields), a non-2xx Hermes status raising `RuntimeError`, a 3xx redirect
+  response raising `RuntimeError` *and* a second stub server standing in
+  for the redirect target confirming it never receives a request (see
+  "Why redirects are never followed" above), a connection error (nothing
+  listening on the target port) raising `RuntimeError`, a non-JSON
+  response body raising `RuntimeError`, a JSON-but-non-object response
+  body raising `RuntimeError`, and a response with no extractable output
+  text raising `RuntimeError`.
 - `test_http_server.py` (extended in Slice 3) — adds
   `test_dispatch_to_unreachable_hermes_agent_returns_500_without_leaking_internal_details`,
   registering a real `HermesAgent` (not the abstract `ExplodingAgent`
