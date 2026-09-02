@@ -10,6 +10,7 @@ boundary, not just direct Python-level calls into Orchestrator.dispatch().
 from __future__ import annotations
 
 import json
+import socket
 import threading
 import urllib.error
 import urllib.request
@@ -20,6 +21,7 @@ import pytest
 from agent_contracts.agent_request import AgentRequest
 from agent_contracts.agent_response import AgentResponse, agent_response_to_dict
 
+from orchestrator.hermes_agent import HermesAgent
 from orchestrator.http_server import create_server
 from orchestrator.orchestrator import Orchestrator
 from orchestrator.registry import AgentRegistry
@@ -217,6 +219,45 @@ def test_dispatch_agent_exception_returns_500_without_leaking_internal_details(
 
     # The server must still be responsive after an Agent-raised exception --
     # one bad dispatch must not crash or hang the runtime process.
+    with urllib.request.urlopen(f"{base_url}/health") as response:
+        assert response.status == 200
+
+
+def test_dispatch_to_unreachable_hermes_agent_returns_500_without_leaking_internal_details(
+    running_server,
+):
+    # A real HermesAgent (not the abstract ExplodingAgent stub above),
+    # pointed at a host nothing is listening on, exercises the same
+    # generic-500 path through an actual network failure -- confirming
+    # HermesAgent's own exception message (which could otherwise mention
+    # the configured Hermes base URL) does not leak either, and that one
+    # failed real dispatch does not crash or hang the runtime process.
+    base_url, registry, _ = running_server
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    unreachable_port = sock.getsockname()[1]
+    sock.close()
+    unreachable_hermes_url = f"http://127.0.0.1:{unreachable_port}"
+
+    registry.register(
+        "hermes-unreachable",
+        HermesAgent(base_url=unreachable_hermes_url, api_key="test-key"),
+    )
+
+    status, body = _post_json(
+        f"{base_url}/dispatch",
+        {"agent_name": "hermes-unreachable", "request": _sample_request_data()},
+    )
+
+    serialized_body = json.dumps(body)
+
+    assert status == 500
+    assert body["error"] == "internal_error"
+    assert unreachable_hermes_url not in serialized_body
+    assert "Traceback" not in serialized_body
+    assert "RuntimeError" not in serialized_body
+
     with urllib.request.urlopen(f"{base_url}/health") as response:
         assert response.status == 200
 

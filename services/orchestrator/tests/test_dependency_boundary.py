@@ -14,6 +14,7 @@ import pytest
 import orchestrator.__main__ as main_module
 import orchestrator.agent as agent_module
 import orchestrator.dev_agents as dev_agents_module
+import orchestrator.hermes_agent as hermes_agent_module
 import orchestrator.http_server as http_server_module
 import orchestrator.orchestrator as orchestrator_module
 import orchestrator.registry as registry_module
@@ -36,6 +37,7 @@ def test_pyproject_declares_exactly_the_agent_contracts_dependency():
         orchestrator_module,
         http_server_module,
         dev_agents_module,
+        hermes_agent_module,
         main_module,
     ],
     ids=[
@@ -44,6 +46,7 @@ def test_pyproject_declares_exactly_the_agent_contracts_dependency():
         "orchestrator",
         "http_server",
         "dev_agents",
+        "hermes_agent",
         "__main__",
     ],
 )

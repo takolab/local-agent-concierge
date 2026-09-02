@@ -20,8 +20,19 @@ real HTTP requests crossing the container boundary — not just in-process
 Python calls. It deliberately does not connect to Hermes Agent or the
 Slack Gateway. See "Runtime HTTP Boundary" below.
 
-Neither slice implements request classification, automatic agent
-selection, Hermes Agent or Slack Gateway integration, or any of the other
+**Slice 3** registers the first real, non-synthetic Agent: `HermesAgent`,
+which dispatches to the actual, running Hermes Agent service over its
+existing `/v1/responses` HTTP API — the same API
+`apps/slack-gateway/src/slack_gateway/hermes_client.py`'s `HermesClient`
+already calls. It is registered alongside, not instead of, the still
+-unchanged `dev-echo` `EchoAgent`. It deliberately does not connect to the
+Slack Gateway, and does not implement classification or agent selection —
+the caller still names the target Agent explicitly. See "HermesAgent
+(Slice 3)" below. Slice 1 and Slice 2's dispatch/registry/HTTP-boundary
+mechanism is unchanged by Slice 3.
+
+None of the three slices implement request classification, automatic
+agent selection, Slack Gateway integration, or any of the other
 Milestone 7 tasks — see "Deliberately not implemented yet" below and
 `docs/roadmap.md` Milestone 7 for what comes next.
 
@@ -427,15 +438,120 @@ development.
   provisional, not a stable or versioned contract.
 - No authentication or authorization on the HTTP endpoint.
 - `AgentRequest.permissions` is not enforced anywhere in this path.
-- No connection to Hermes Agent or the Slack Gateway.
-- The only registered Agent is the synthetic, non-production `EchoAgent`
-  ("Synthetic Agent" above); there is no production Agent registration
-  mechanism.
+- No connection to the Slack Gateway (as of Slice 3, `HermesAgent` does
+  connect to Hermes Agent — see "HermesAgent (Slice 3)" below).
+- As of Slice 3, two Agents are registered — `dev-echo` (synthetic) and
+  `hermes` (real) — both still hardcoded in `__main__.build_orchestrator()`;
+  there is no production Agent registration mechanism (config file,
+  discovery, or otherwise).
 - No request classification or automatic Agent selection — `agent_name`
   is still supplied explicitly by the caller, exactly as in Slice 1.
-- No trace context propagation into or out of the HTTP layer.
-- `orchestrator`'s Docker Compose service is not depended on by any other
-  service, and does not itself depend on or call any other service.
+- No trace context propagation into or out of the HTTP layer, including
+  `HermesAgent`'s outgoing call to Hermes Agent.
+- `orchestrator`'s Docker Compose service is still not depended on by any
+  other service, and (at the Compose-topology level) does not `depends_on`
+  any other service either — but as of Slice 3 it does call another
+  service (Hermes Agent) at the application level, lazily, inside
+  `HermesAgent.handle()`. See "HermesAgent (Slice 3)" for why this is not
+  expressed as a Compose `depends_on`.
+
+## HermesAgent (Slice 3)
+
+`services/orchestrator/src/orchestrator/hermes_agent.py` defines
+`HermesAgent`, registered by `orchestrator.__main__` under the name
+`"hermes"` (`HERMES_AGENT_NAME`), alongside the unchanged `dev-echo`
+`EchoAgent` — this slice adds a second registration, it does not replace
+the first. `HermesAgent.handle(request)` satisfies the `Agent` Protocol by
+calling the real, running Hermes Agent service's existing `/v1/responses`
+HTTP API and mapping its output into an `AgentResponse`:
+
+```text
+AgentRequest -> POST <base_url>/v1/responses -> Hermes Agent -> Ollama
+             -> Hermes response JSON -> output-text extraction
+             -> AgentResponse(status="completed", summary=...)
+```
+
+**Request mapping.** `AgentRequest.instruction` becomes Hermes's `input`;
+`AgentRequest.conversation_id` becomes Hermes's `conversation`; the request
+also sends `"model": "hermes-agent"` and `"store": true`. This is the same
+request shape `apps/slack-gateway/src/slack_gateway/hermes_client.py`'s
+`HermesClient.create_response` already sends — `HermesAgent` is a second,
+independent implementation of the same call, not a shared dependency
+(`services/orchestrator` and `apps/slack-gateway` still share no code or
+package; see "Why no shared client" below).
+
+**Response mapping.** `HermesAgent` extracts output text the same way
+`HermesClient` does: prefer a direct `output_text` string field, otherwise
+concatenate `output[].content[].text` entries where `type == "message"` /
+`type == "output_text"`. A successful call always returns
+`AgentResponse(status="completed", summary=<extracted text>)` — no new
+`status` value is introduced (see "Why raise instead of a new status
+value" below).
+
+**Configuration.** `HermesAgent` takes `base_url` and `api_key` as plain
+constructor arguments — it does not read environment variables itself.
+`orchestrator.__main__.build_orchestrator()` reads
+`HERMES_API_BASE_URL` and `HERMES_API_SERVER_KEY` (via a small
+`_require_env` helper that raises `RuntimeError` with a clear message if
+either is unset or blank) and passes them in. These reuse the exact
+variable names `apps/slack-gateway` already requires for the same
+purpose — `docker-compose.yml`'s `orchestrator` service sets
+`HERMES_API_BASE_URL` to the same literal `http://hermes-agent:8642`
+`slack-gateway` uses, and `HERMES_API_SERVER_KEY` to the same
+`${HERMES_API_SERVER_KEY:?...}` required-secret reference already used by
+both `hermes-agent` and `slack-gateway` — no new `.env` entry is needed.
+
+**Why no `depends_on: hermes-agent` in `docker-compose.yml`.** `hermes-agent`
+itself `depends_on` `ollama` and `google-calendar-mcp` with
+`condition: service_healthy`. Adding `depends_on: hermes-agent` to
+`orchestrator` would transitively require that whole GPU-backed chain to
+start (and become healthy) every time `orchestrator` starts — including in
+CI's runtime smoke test (`.github/workflows/pytest.yml`), which starts
+`orchestrator` in isolation and cannot satisfy that chain (no GPU, no
+pre-pulled Ollama model, and its `--wait-timeout 60` is sized only for the
+lightweight `orchestrator` container itself). Because `HermesAgent` only
+calls Hermes Agent lazily, inside `handle()` — never at construction or at
+container startup — the Orchestrator container does not need Hermes Agent
+to be reachable to start or to pass its own liveness-only health check.
+This is a deliberate scope boundary for this slice, not an oversight.
+
+**Why raise instead of a new `status` value.** On any failure — a non-2xx
+HTTP status, a connection/timeout error, a non-JSON or non-object response
+body, or a response with no extractable output text — `HermesAgent.handle()`
+raises `RuntimeError` rather than returning an
+`AgentResponse(status="error", ...)` or similar. This reuses
+`Orchestrator.dispatch()`'s existing behavior of letting an Agent's
+exception propagate uncaught, and `http_server.py`'s existing generic
+`500 internal_error` handling (see "No leaked internal detail" above) —
+both already fully cover this without any change. Introducing a new
+`status` value here would prematurely resolve open design question 4
+under `docs/agent-contracts/domain-model.md` ("`status` vocabulary"),
+which this slice deliberately leaves open, exactly as Slice 1 and Slice 2
+did.
+
+**Why standard library `urllib` instead of a new HTTP client dependency.**
+Mirrors `http_server.py`'s own "why the standard library instead of a
+framework" rationale for the same reason: `services/orchestrator` has
+declared exactly one runtime dependency (`agent-contracts`) since Slice 1,
+enforced by `test_dependency_boundary.py`. `HermesAgent` needs only a
+single POST request with a JSON body, a bearer token header, and a
+timeout — all directly expressible with `urllib.request` — so this slice
+keeps that one-dependency boundary intact rather than adding `httpx` (or
+another client library) for one call site. This is a choice sized for
+*this* adapter, not a standing rule against ever adding an HTTP client
+dependency to this package.
+
+**Why no shared client with `apps/slack-gateway`.** `HermesAgent`'s
+`_extract_output_text` is ported from, not imported from,
+`HermesClient._extract_output_text` — the two are separate services with
+no shared local package today (confirmed: no app or package in this repo
+declares a dependency on a sibling app/package, only on `packages/`
+libraries), and creating one for roughly 20 lines of extraction logic
+would be a new cross-service architectural dependency this slice does not
+introduce. `HermesAgent` also does not inject OpenTelemetry trace context
+into its outgoing request the way `HermesClient` does — the Orchestrator
+has no tracing instrumentation of its own yet at all (tracked under
+Milestone 9), so there is no active local span to inject from.
 
 ## Deliberately not implemented yet
 
@@ -446,7 +562,6 @@ Out of scope for Slice 2, per its stated boundaries and
   described in "Runtime HTTP Boundary" above.
 - Transport authentication or authorization.
 - Slack Gateway integration.
-- Hermes Agent integration.
 - Request classification.
 - Automatic agent selection.
 - Permission enforcement.
@@ -454,9 +569,16 @@ Out of scope for Slice 2, per its stated boundaries and
 - Approval workflow.
 - Multi-agent delegation.
 - Result aggregation.
-- Trace propagation.
-- Production Agent registration/discovery (only the hardcoded
-  development `EchoAgent` is registered — see "Synthetic Agent" above).
+- Trace propagation — including into or out of `HermesAgent`'s outgoing
+  call to Hermes Agent (see "HermesAgent (Slice 3)" above).
+- Production Agent registration/discovery — as of Slice 3, both
+  `EchoAgent` ("Synthetic Agent" above) and `HermesAgent` ("HermesAgent
+  (Slice 3)" above) are hardcoded in `__main__.build_orchestrator()`;
+  there is still no configuration file, discovery mechanism, or
+  environment-variable-driven registration *list*.
+- Retries, timeouts tuning, circuit breaking, or any other resilience
+  behavior beyond `HermesAgent`'s single request with a fixed default
+  timeout and a plain raised exception on failure.
 
 Also out of scope: persistence, dynamic loading, configuration-file-based
 registration, network registration, and any change to
@@ -509,11 +631,33 @@ This slice resolves none of the open questions already logged in
   the exception's message, its type name, or `"Traceback"`, followed by a
   `GET /health` check confirming the server is still responsive; and an
   unknown path returning `404`.
+- `test_hermes_agent.py` (Slice 3) — runs a minimal stub HTTP server
+  (standard library only, same background-thread idiom as
+  `test_http_server.py`'s `running_server` fixture) standing in for
+  Hermes Agent's `/v1/responses` endpoint, so these tests need no live
+  Ollama or Hermes Agent container: successful dispatch extracting a
+  direct `output_text`, successful dispatch extracting text from
+  `output[].content[]` when `output_text` is absent, the exact request
+  shape `HermesAgent` sends (path, `Authorization: Bearer`, JSON body
+  fields), a non-2xx Hermes status raising `RuntimeError`, a connection
+  error (nothing listening on the target port) raising `RuntimeError`, a
+  non-JSON response body raising `RuntimeError`, a JSON-but-non-object
+  response body raising `RuntimeError`, and a response with no
+  extractable output text raising `RuntimeError`.
+- `test_http_server.py` (extended in Slice 3) — adds
+  `test_dispatch_to_unreachable_hermes_agent_returns_500_without_leaking_internal_details`,
+  registering a real `HermesAgent` (not the abstract `ExplodingAgent`
+  stub) pointed at a host nothing is listening on, confirming the same
+  generic-500-without-leaked-detail guarantee holds for a real network
+  failure — including that the configured Hermes base URL itself does not
+  leak — and that the server is still responsive afterward.
 - `test_dependency_boundary.py` — `pyproject.toml` declares exactly the
   one `local-agent-concierge-agent-contracts` dependency, and (as of
-  Slice 2) `agent.py` / `registry.py` / `orchestrator.py` / `http_server.py`
-  / `dev_agents.py` / `__main__.py` all import only from the standard
-  library, `agent_contracts`, or `orchestrator`'s own modules.
+  Slice 3) `agent.py` / `registry.py` / `orchestrator.py` / `http_server.py`
+  / `dev_agents.py` / `hermes_agent.py` / `__main__.py` all import only
+  from the standard library, `agent_contracts`, or `orchestrator`'s own
+  modules — confirming `HermesAgent`'s use of `urllib` did not introduce a
+  new declared dependency.
 - `stub_agents.py` — not a test module itself; the `RecordingAgent` /
   `ExplodingAgent` stub Agents shared by `test_orchestrator.py` and (as of
   Slice 2) `test_http_server.py`. Both exist only under `tests/` — not to
