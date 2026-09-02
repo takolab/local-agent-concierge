@@ -45,12 +45,29 @@ class _StubHermesRequestHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             parsed_body = None
 
+        self._record_request(parsed_body)
+        self._respond()
+
+    def do_GET(self) -> None:
+        # urllib's default (unpatched) redirect handling converts a POST
+        # to a GET when following a 301/302/303 -- this stub must record
+        # GET requests too, or a regression that reintroduces
+        # redirect-following in HermesAgent could go undetected by a
+        # last_request-based "was the redirect target ever contacted"
+        # assertion (do_POST alone would never see it). Found by review
+        # on this exact test.
+        self._record_request(body=None)
+        self._respond()
+
+    def _record_request(self, body: Any) -> None:
         self.server.last_request = {
+            "method": self.command,
             "path": self.path,
             "headers": dict(self.headers.items()),
-            "body": parsed_body,
+            "body": body,
         }
 
+    def _respond(self) -> None:
         self.send_response(self.server.status_code)
         self.send_header("Content-Type", "application/json")
         for header_name, header_value in self.server.extra_response_headers.items():
