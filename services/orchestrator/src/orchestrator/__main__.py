@@ -1,23 +1,27 @@
 """Orchestrator runtime entrypoint.
 
-Builds an AgentRegistry containing only the development/smoke-test
-EchoAgent (see orchestrator.dev_agents), constructs an Orchestrator
-around it, and serves the HTTP runtime boundary defined in
-orchestrator.http_server until terminated.
+Builds an AgentRegistry containing the development/smoke-test EchoAgent
+(see orchestrator.dev_agents) and a real HermesAgent (see
+orchestrator.hermes_agent), constructs an Orchestrator around it, and
+serves the HTTP runtime boundary defined in orchestrator.http_server until
+terminated.
 
-This does not implement production Agent registration/discovery, or any
-connection to Hermes Agent or the Slack Gateway -- see
-docs/orchestrator/domain-model.md for the current runtime boundaries.
+This does not implement production Agent registration/discovery (both
+Agents are still hardcoded here), request classification, or any
+connection to the Slack Gateway -- see docs/orchestrator/domain-model.md
+for the current runtime boundaries.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import threading
 from types import FrameType
 
 from orchestrator.dev_agents import DEV_ECHO_AGENT_NAME, EchoAgent
+from orchestrator.hermes_agent import HERMES_AGENT_NAME, HermesAgent
 from orchestrator.http_server import DEFAULT_HOST, DEFAULT_PORT, create_server
 from orchestrator.orchestrator import Orchestrator
 from orchestrator.registry import AgentRegistry
@@ -25,9 +29,23 @@ from orchestrator.registry import AgentRegistry
 logger = logging.getLogger("orchestrator")
 
 
+def _require_env(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(f"{name} environment variable must be set")
+    return value
+
+
 def build_orchestrator() -> Orchestrator:
     registry = AgentRegistry()
     registry.register(DEV_ECHO_AGENT_NAME, EchoAgent())
+    registry.register(
+        HERMES_AGENT_NAME,
+        HermesAgent(
+            base_url=_require_env("HERMES_API_BASE_URL"),
+            api_key=_require_env("HERMES_API_SERVER_KEY"),
+        ),
+    )
     return Orchestrator(registry)
 
 
@@ -40,10 +58,11 @@ def main() -> None:
     server = create_server(build_orchestrator(), DEFAULT_HOST, DEFAULT_PORT)
 
     logger.info(
-        "Starting Orchestrator HTTP runtime on %s:%d (registered agents: %s)",
+        "Starting Orchestrator HTTP runtime on %s:%d (registered agents: %s, %s)",
         DEFAULT_HOST,
         DEFAULT_PORT,
         DEV_ECHO_AGENT_NAME,
+        HERMES_AGENT_NAME,
     )
 
     serve_thread = threading.Thread(target=server.serve_forever, daemon=True)

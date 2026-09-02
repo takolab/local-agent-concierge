@@ -715,7 +715,7 @@ The Orchestrator will allow new agents and frameworks to be added without coupli
 * [ ] Implement agent registration
 * [ ] Implement request classification
 * [ ] Implement agent selection
-* [ ] Forward requests to Hermes Agent
+* [x] Forward requests to Hermes Agent
 * [ ] Support custom Agent implementations
 * [ ] Support task delegation
 * [ ] Support multiple-agent workflows

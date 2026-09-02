@@ -150,10 +150,18 @@ services:
 
     restart: unless-stopped
 
-    # Not yet depended on by, or calling, any other service: this slice
-    # only proves the HTTP -> Orchestrator.dispatch() -> HTTP boundary
-    # works against a synthetic development Agent. See
-    # docs/orchestrator/domain-model.md.
+    # Deliberately no `depends_on: hermes-agent` here: hermes-agent itself
+    # depends_on ollama and google-calendar-mcp (condition: service_healthy),
+    # so that would pull the whole GPU-backed model stack into every
+    # `docker compose up orchestrator` -- including CI's runtime smoke test,
+    # which cannot satisfy it. HermesAgent (src/orchestrator/hermes_agent.py)
+    # only calls Hermes Agent lazily, inside handle(), so the Orchestrator
+    # container itself does not need Hermes to be up to start or pass its
+    # own health check. See docs/orchestrator/domain-model.md.
+    environment:
+      HERMES_API_BASE_URL: "http://hermes-agent:8642"
+      HERMES_API_SERVER_KEY: "${HERMES_API_SERVER_KEY:?HERMES_API_SERVER_KEY must be set in .env}"
+
     ports:
       - "127.0.0.1:8700:8700"
 
