@@ -1,0 +1,77 @@
+# Root .dockerignore
+#
+# Only the `orchestrator` / `orchestrator-test` Compose services build from
+# the repository root (services/orchestrator/Dockerfile COPYs
+# packages/agent-contracts and services/orchestrator explicitly). Every
+# other service (hermes-agent, slack-gateway, google-calendar-mcp) builds
+# from its own subdirectory context and is unaffected by this file.
+#
+# Every pattern below uses a **/ prefix, except .git/ (inherently root-only
+# -- this repo has no submodules). Unlike .gitignore, a bare `name` or
+# `name/` pattern in .dockerignore matches ONLY at the context root, not at
+# any depth -- confirmed empirically, including against a real case in this
+# repo: packages/approvals/.venv sits one level below root, and a bare
+# `.venv/` pattern does not exclude it from the build context.
+
+# Git metadata
+.git/
+
+# Environment variables
+**/.env
+**/.env.*
+!**/.env.example
+
+# Secrets and credentials
+**/credentials.json
+**/client_secret*.json
+**/token.json
+**/*.pem
+**/*.key
+
+# Python virtual environments
+**/.venv/
+**/venv/
+
+# Python bytecode, build output, and package caches
+**/__pycache__/
+**/*.py[cod]
+**/build/
+**/*.egg-info/
+
+# Test caches and coverage artifacts
+**/.pytest_cache/
+**/.hypothesis/
+**/.coverage
+**/.coverage.*
+**/htmlcov/
+**/coverage.xml
+
+# Node.js
+**/node_modules/
+**/dist/
+
+# Local databases and application data
+**/data/
+**/memory/
+**/postgres-data/
+**/*.db
+**/*.sqlite
+**/*.sqlite3
+
+# Ollama models
+**/models/
+**/ollama-data/
+
+# Logs and traces
+**/logs/
+**/traces/
+**/exports/
+
+# Editor / IDE / OS artifacts
+**/.vscode/
+**/.idea/
+**/.DS_Store
+**/Thumbs.db
+
+# Claude Code local session state
+**/.claude/
