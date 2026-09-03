@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "local-agent-concierge-review-loop"
+version = "0.1.0"
+description = "Read-only verification of a pull request's exact head SHA and its GitHub Actions CI state"
+requires-python = ">=3.12"
+dependencies = [
+    "PyYAML>=6,<7",
+]
+
+[project.scripts]
+review-loop = "review_loop.cli:main"
+
+[project.optional-dependencies]
+test = [
+    "pytest>=9,<10",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.setuptools.packages.find]
+where = ["src"]

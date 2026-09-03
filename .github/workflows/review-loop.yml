@@ -1,0 +1,40 @@
+name: Review loop runner tests
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - "tools/review-loop/**"
+      - ".github/workflows/review-loop.yml"
+
+  push:
+    branches:
+      - master
+    paths:
+      - "tools/review-loop/**"
+      - ".github/workflows/review-loop.yml"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install the review loop runner test dependencies
+        run: pip install -e "tools/review-loop[test]"
+
+      - name: Run review loop runner tests
+        run: python -m pytest tools/review-loop/tests
