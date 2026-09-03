@@ -31,7 +31,19 @@ the caller still names the target Agent explicitly. See "HermesAgent
 (Slice 3)" below. Slice 1 and Slice 2's dispatch/registry/HTTP-boundary
 mechanism is unchanged by Slice 3.
 
-None of the three slices implement request classification, automatic
+**Slice 4** adds correlation logging to the HTTP boundary's existing
+`POST /dispatch` handling: every dispatch — success, unknown-agent, or an
+Agent-raised exception — now emits a server-side log line carrying
+`agent_name` and the dispatched `AgentRequest`'s `task_id`,
+`conversation_id`, and `trace_id`. This is plain stdlib `logging`, not
+OpenTelemetry trace propagation (still tracked under Milestone 9, still
+not implemented anywhere in this package) — see "Dispatch Correlation
+Logging (Slice 4)" below for why these are different things and why that
+distinction matters here. Slices 1-3's dispatch/registry/HTTP-boundary/
+`HermesAgent` mechanism is unchanged by Slice 4; only `http_server.py`'s
+`_handle_dispatch` gained log calls.
+
+None of these four slices implement request classification, automatic
 agent selection, Slack Gateway integration, or any of the other
 Milestone 7 tasks — see "Deliberately not implemented yet" below and
 `docs/roadmap.md` Milestone 7 for what comes next.
@@ -576,6 +588,116 @@ into its outgoing request the way `HermesClient` does — the Orchestrator
 has no tracing instrumentation of its own yet at all (tracked under
 Milestone 9), so there is no active local span to inject from.
 
+## Dispatch Correlation Logging (Slice 4)
+
+Before this slice, a real dispatch failure — most importantly, a real
+`HermesAgent` call failing because Hermes Agent or Ollama is unreachable —
+produced a full stack trace in the Orchestrator's server logs with no way
+to tell which caller, task, or conversation it belonged to:
+`http_server.py`'s exception handling logged `self.command`/`self.path`
+only, and an unknown-agent dispatch logged nothing at all. This directly
+addresses `docs/roadmap.md` Milestone 7's "Preserve trace and conversation
+identifiers" task — the one remaining unchecked item small and safe enough
+for its own slice; see the Slice 4 design proposal delivered in the
+session that produced this slice for the full comparison against the
+alternatives considered and rejected for now (configurable Hermes
+timeout, gating `dev-echo` behind an opt-in, and a live-stack integration
+check that CI cannot run).
+
+**What changed.** `http_server.py`'s `_handle_dispatch` now logs one
+INFO-level line per outcome, always via `%r`-formatted named fields —
+never the `AgentRequest`/`AgentResponse` object itself:
+
+- Success: `agent_name`, `task_id`, `conversation_id`, `trace_id`, and the
+  resulting `AgentResponse.status`.
+- Unknown agent (404): `agent_name`, `task_id`, `conversation_id`,
+  `trace_id` — this path logged nothing at all before this slice.
+- An Agent-raised exception (500): the same four request-side fields,
+  via `logger.exception(...)` so the existing full traceback is still
+  captured too — this is now caught inside `_handle_dispatch` itself,
+  specifically so the log call has access to `agent_name`/`agent_request`,
+  rather than falling through to `do_POST`'s outer generic
+  `_handle_unexpected_error` (which only ever sees
+  `self.command`/`self.path`). The HTTP response for this case is
+  unchanged: the same `500 internal_error` body, constructed with the same
+  status/error/detail values as before — only the server-side log line is
+  richer.
+
+**Why this lives in `http_server.py`, not in `Orchestrator.dispatch()`.**
+`orchestrator.py`'s own docstring says `dispatch` "does exactly three
+things" (look up the Agent, call it, return its response) — deliberately
+minimal, per Slice 1's design. Adding logging there would be a fourth
+thing, and would tie every future transport (not just this HTTP boundary)
+to this specific logging behavior. `http_server.py` is already documented
+as "a thin transport adapter" over the unchanged `dispatch()` call, and
+access logging is an ordinary, expected responsibility for a transport
+adapter to carry. `Orchestrator.dispatch()`, `AgentRegistry`, the `Agent`
+Protocol, and `HermesAgent` itself are all unchanged by this slice.
+
+**Why this is not OpenTelemetry / trace propagation.** `AgentRequest.trace_id`
+is logged exactly as received — as an opaque, caller-supplied string (or
+`None`) — the same way `docs/agent-contracts/domain-model.md`'s open
+design question 1 already describes it: "whether `trace_id` is only a
+logical correlation identifier, or is expected to correspond to the
+active OpenTelemetry trace ID" is still unresolved, and this slice does
+not resolve it. No `opentelemetry` package is imported anywhere in
+`services/orchestrator` (`test_dependency_boundary.py`'s "exactly one
+dependency" assertion is unchanged by this slice — plain stdlib `logging`
+needs no new dependency). In particular, this slice does **not** make
+`HermesAgent`'s outgoing call to Hermes Agent carry a W3C `traceparent`
+the way `apps/slack-gateway`'s `HermesClient` already does for its own
+direct Hermes call — matching an incoming `traceparent` into a real,
+active local span requires the Orchestrator to have its own OpenTelemetry
+instrumentation first, which it still does not (tracked under Milestone
+9, as "Trace propagation" already was in "Deliberately not implemented
+yet" before this slice, and still is). Wiring the Slack Gateway to call
+the Orchestrator instead of Hermes Agent directly is a separate, larger,
+not-yet-safe decision for exactly this reason: doing so today, before
+Milestone 9's Orchestrator tracing exists, would silently drop the
+already-verified Milestone 5 distributed trace
+(`concierge.request` → `hermes.request` → `/v1/responses`), since
+`HermesAgent` has no span to inject a `traceparent` from.
+
+**What is logged, and what is deliberately never logged.** Only
+`agent_name`, `task_id`, `conversation_id`, `trace_id`, and (on success)
+`AgentResponse.status` are logged — plain opaque identifiers, matching the
+redaction discipline `docs/observability/collector-redaction.md` already
+established for OpenTelemetry span attributes elsewhere in this repo,
+applied here to plain log lines instead. `AgentRequest.instruction` (free
+text a user wrote) and `AgentResponse.summary` (a real Hermes model
+response) are never logged, and neither is any `Authorization`/API-key
+value — `http_server.py` never has access to `HermesAgent`'s configured
+`api_key` in the first place, so there is no code path here that could log
+it. `test_http_server.py`'s `test_dispatch_logging_never_contains_instruction_text`
+and `test_dispatch_logging_never_contains_hermes_api_key` assert this
+directly, using a distinctive per-test sentinel value rather than a
+generic placeholder. Both were confirmed to be real, load-bearing checks
+during implementation, not vacuously-passing assertions: temporarily
+logging the whole `AgentRequest`/`AgentResponse` objects instead of their
+named fields (a plausible naive mistake, since both are otherwise
+convenient to log directly) made the instruction-leak test fail exactly
+as expected, via the object's default dataclass `repr()` — the same
+"does this test actually detect the bug it claims to detect" check this
+repo's Independent AI Review already applied to the Slice 3 redirect
+regression test.
+
+### Current limitations, extended by Slice 4
+
+The "Current limitations" and "Deliberately not implemented yet" lists
+below are otherwise unchanged by this slice. Two additions:
+
+- Correlation logging exists only for the `POST /dispatch` HTTP path
+  (`http_server.py`). `GET /health` is unchanged (still liveness-only, no
+  logging added). Nothing outside `services/orchestrator` reads these
+  logs programmatically — this is server-log-only, human/`docker compose
+  logs`-oriented output, not a new API or contract.
+- `AgentRequest.trace_id` is now visible in the Orchestrator's own logs
+  when a caller supplies one, but nothing in this repository populates it
+  yet in practice (the Slack Gateway does not call the Orchestrator at
+  all — see "Current limitations" above), so this closes the roadmap
+  checkbox without yet having a real end-to-end producer to observe it
+  from.
+
 ## Deliberately not implemented yet
 
 Out of scope for Slice 2, per its stated boundaries and
@@ -677,13 +799,26 @@ This slice resolves none of the open questions already logged in
   generic-500-without-leaked-detail guarantee holds for a real network
   failure — including that the configured Hermes base URL itself does not
   leak — and that the server is still responsive afterward.
+- `test_http_server.py` (extended in Slice 4) — six new tests using
+  pytest's built-in `caplog` fixture (no new dependency), against the same
+  real `OrchestratorHTTPServer` the rest of this file already drives:
+  correlation identifiers appearing in the logged output for a successful
+  dispatch (including the resulting `AgentResponse.status`), for a
+  dispatch with `trace_id=None` (asserting its absence is logged
+  explicitly as `trace_id=None`, not silently omitted), for an
+  unknown-agent dispatch, and for an Agent-raised exception; plus two
+  negative assertions — a distinctive `instruction` sentinel and a
+  distinctive `HermesAgent` `api_key` (via the same
+  real-`HermesAgent`-at-an-unreachable-port idiom as the test above) never
+  appearing anywhere in the captured log output.
 - `test_dependency_boundary.py` — `pyproject.toml` declares exactly the
   one `local-agent-concierge-agent-contracts` dependency, and (as of
   Slice 3) `agent.py` / `registry.py` / `orchestrator.py` / `http_server.py`
   / `dev_agents.py` / `hermes_agent.py` / `__main__.py` all import only
   from the standard library, `agent_contracts`, or `orchestrator`'s own
   modules — confirming `HermesAgent`'s use of `urllib` did not introduce a
-  new declared dependency.
+  new declared dependency. Unchanged by Slice 4: `logging`/`caplog` are
+  standard library / pytest built-ins, not a new declared dependency.
 - `stub_agents.py` — not a test module itself; the `RecordingAgent` /
   `ExplodingAgent` stub Agents shared by `test_orchestrator.py` and (as of
   Slice 2) `test_http_server.py`. Both exist only under `tests/` — not to

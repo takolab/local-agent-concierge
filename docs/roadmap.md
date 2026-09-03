@@ -720,7 +720,7 @@ The Orchestrator will allow new agents and frameworks to be added without coupli
 * [ ] Support task delegation
 * [ ] Support multiple-agent workflows
 * [ ] Combine results from multiple agents
-* [ ] Preserve trace and conversation identifiers
+* [x] Preserve trace and conversation identifiers
 * [ ] Add routing tests
 * [ ] Document the Agent contract
 

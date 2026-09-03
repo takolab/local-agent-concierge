@@ -149,13 +149,51 @@ class OrchestratorRequestHandler(BaseHTTPRequestHandler):
                 agent_name, agent_request
             )
         except UnknownAgentError:
+            logger.info(
+                "dispatch rejected: unknown agent "
+                "agent_name=%r task_id=%r conversation_id=%r trace_id=%r",
+                agent_name,
+                agent_request.task_id,
+                agent_request.conversation_id,
+                agent_request.trace_id,
+            )
             self._send_error(
                 HTTPStatus.NOT_FOUND,
                 "unknown_agent",
                 f"No agent is registered under {agent_name!r}.",
             )
             return
+        except Exception:
+            # Caught here (rather than left to fall through to do_POST's
+            # outer except Exception) specifically so the log line can carry
+            # the correlation identifiers already parsed above -- the outer
+            # handler only ever sees self.command/self.path, not these.
+            # The response itself stays identical to that outer handler's:
+            # generic, bounded, never the exception's message or traceback.
+            logger.exception(
+                "dispatch failed "
+                "agent_name=%r task_id=%r conversation_id=%r trace_id=%r",
+                agent_name,
+                agent_request.task_id,
+                agent_request.conversation_id,
+                agent_request.trace_id,
+            )
+            self._send_error(
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "An unexpected error occurred while dispatching the request.",
+            )
+            return
 
+        logger.info(
+            "dispatch succeeded "
+            "agent_name=%r task_id=%r conversation_id=%r trace_id=%r status=%r",
+            agent_name,
+            agent_request.task_id,
+            agent_request.conversation_id,
+            agent_request.trace_id,
+            agent_response.status,
+        )
         self._send_json(HTTPStatus.OK, agent_response_to_dict(agent_response))
 
     def _read_body(self) -> bytes | None:
