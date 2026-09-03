@@ -10,6 +10,7 @@ boundary, not just direct Python-level calls into Orchestrator.dispatch().
 from __future__ import annotations
 
 import json
+import logging
 import socket
 import threading
 import urllib.error
@@ -260,6 +261,156 @@ def test_dispatch_to_unreachable_hermes_agent_returns_500_without_leaking_intern
 
     with urllib.request.urlopen(f"{base_url}/health") as response:
         assert response.status == 200
+
+
+def test_dispatch_success_logs_correlation_identifiers(running_server, caplog):
+    base_url, _, recording_agent = running_server
+
+    caplog.set_level(logging.INFO, logger="orchestrator.http")
+
+    request_data = _sample_request_data(
+        task_id="corr-task-success-1",
+        conversation_id="corr-conversation-success-1",
+        trace_id="corr-trace-success-1",
+    )
+
+    status, _ = _post_json(
+        f"{base_url}/dispatch",
+        {"agent_name": KNOWN_AGENT_NAME, "request": request_data},
+    )
+
+    assert status == 200
+    assert "corr-task-success-1" in caplog.text
+    assert "corr-conversation-success-1" in caplog.text
+    assert "corr-trace-success-1" in caplog.text
+    assert recording_agent.response.status in caplog.text
+
+
+def test_dispatch_success_with_no_trace_id_logs_it_explicitly(running_server, caplog):
+    base_url, _, _ = running_server
+
+    caplog.set_level(logging.INFO, logger="orchestrator.http")
+
+    request_data = _sample_request_data(task_id="corr-task-no-trace", trace_id=None)
+
+    status, _ = _post_json(
+        f"{base_url}/dispatch",
+        {"agent_name": KNOWN_AGENT_NAME, "request": request_data},
+    )
+
+    assert status == 200
+    assert "corr-task-no-trace" in caplog.text
+    # trace_id's absence must be represented explicitly, not omitted --
+    # repr(None) renders as the bare word None (no quotes), so this also
+    # confirms %r formatting is being used rather than silently dropping
+    # a None field.
+    assert "trace_id=None" in caplog.text
+
+
+def test_dispatch_unknown_agent_logs_correlation_identifiers(running_server, caplog):
+    base_url, _, _ = running_server
+
+    caplog.set_level(logging.INFO, logger="orchestrator.http")
+
+    request_data = _sample_request_data(
+        task_id="corr-task-unknown-agent",
+        conversation_id="corr-conversation-unknown-agent",
+        trace_id="corr-trace-unknown-agent",
+    )
+
+    status, _ = _post_json(
+        f"{base_url}/dispatch",
+        {"agent_name": "does-not-exist", "request": request_data},
+    )
+
+    assert status == 404
+    assert "corr-task-unknown-agent" in caplog.text
+    assert "corr-conversation-unknown-agent" in caplog.text
+    assert "corr-trace-unknown-agent" in caplog.text
+    assert "does-not-exist" in caplog.text
+
+
+def test_dispatch_agent_exception_logs_correlation_identifiers(running_server, caplog):
+    base_url, registry, _ = running_server
+
+    caplog.set_level(logging.INFO, logger="orchestrator.http")
+
+    registry.register("exploding-with-context", ExplodingAgent(RuntimeError("boom")))
+
+    request_data = _sample_request_data(
+        task_id="corr-task-exception",
+        conversation_id="corr-conversation-exception",
+        trace_id="corr-trace-exception",
+    )
+
+    status, _ = _post_json(
+        f"{base_url}/dispatch",
+        {"agent_name": "exploding-with-context", "request": request_data},
+    )
+
+    assert status == 500
+    assert "corr-task-exception" in caplog.text
+    assert "corr-conversation-exception" in caplog.text
+    assert "corr-trace-exception" in caplog.text
+
+
+def test_dispatch_logging_never_contains_instruction_text(running_server, caplog):
+    base_url, _, _ = running_server
+
+    caplog.set_level(logging.INFO, logger="orchestrator.http")
+
+    sentinel = "SENTINEL-INSTRUCTION-do-not-log-me-8f2a"
+    request_data = _sample_request_data(instruction=sentinel)
+
+    status, _ = _post_json(
+        f"{base_url}/dispatch",
+        {"agent_name": KNOWN_AGENT_NAME, "request": request_data},
+    )
+
+    assert status == 200
+    assert sentinel not in caplog.text
+
+
+def test_dispatch_logging_never_contains_hermes_api_key(running_server, caplog):
+    # Exercises the real HermesAgent exception path (same idiom as
+    # test_dispatch_to_unreachable_hermes_agent_returns_500_without_leaking_internal_details
+    # above) with a distinctive api_key, confirming the correlation logging
+    # added in this slice never captures it end to end.
+    base_url, registry, _ = running_server
+
+    caplog.set_level(logging.INFO, logger="orchestrator.http")
+
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    unreachable_port = sock.getsockname()[1]
+    sock.close()
+
+    secret_api_key = "SENTINEL-API-KEY-do-not-log-me-3c91"
+    registry.register(
+        "hermes-unreachable-logging",
+        HermesAgent(
+            base_url=f"http://127.0.0.1:{unreachable_port}",
+            api_key=secret_api_key,
+        ),
+    )
+
+    request_data = _sample_request_data(
+        task_id="corr-task-hermes-failure",
+        conversation_id="corr-conversation-hermes-failure",
+    )
+
+    status, _ = _post_json(
+        f"{base_url}/dispatch",
+        {"agent_name": "hermes-unreachable-logging", "request": request_data},
+    )
+
+    assert status == 500
+    assert secret_api_key not in caplog.text
+    # The correlation identifiers ARE expected here -- this failure path is
+    # exactly the real-world case (Hermes/Ollama unreachable) this slice
+    # exists to make diagnosable.
+    assert "corr-task-hermes-failure" in caplog.text
+    assert "corr-conversation-hermes-failure" in caplog.text
 
 
 def test_unknown_path_returns_404(running_server):
