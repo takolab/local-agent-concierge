@@ -77,11 +77,12 @@ def test_patterns_using_unmodelled_syntax_are_undecidable(pattern):
 def test_a_globstar_outside_a_trailing_position_is_undecidable(pattern, changed):
     """The second review round's finding, generalised.
 
-    GitHub documents ``**`` only trailing (``docs/**``) or leading without a
-    slash (``**.js``). Whether ``**/`` can span zero directories -- the
-    ``docs/**/*.md`` vs ``docs/README.md`` case -- is not settled by any
-    documented example, so no confident answer exists. Returning NO_MATCH here
-    would explain away a workflow that should have run.
+    GitHub does match these forms: ``docs/**/*.md`` matches ``docs/README.md``
+    with zero intervening directories, and ``**/README.md`` matches a
+    root-level ``README.md``. This slice models only the narrower subset the
+    repository uses, so the richer shapes are reported undecidable rather than
+    given a confident NO_MATCH that would explain away a workflow which should
+    have run.
     """
     assert evaluate(_paths(pattern), (changed,)) is FilterOutcome.UNDECIDABLE
 

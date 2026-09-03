@@ -114,9 +114,13 @@ are decided:
 
 Everything else is undecidable: `**` in any interior or leading position
 (`docs/**/*.md`, `**/README.md`, `**.js`), and `?`, `+`, `[]` or a leading `!`
-anywhere. GitHub documents `**` only trailing (`docs/**`) and leading without a
-slash (`**.js`), so whether `**/` can span zero directories is not something
-this runner can claim to know.
+anywhere. GitHub does support those richer forms — its documented example for
+`docs/**/*.md` lists `docs/README.md`, with zero intervening directories, and
+`**/README.md` matches a root-level `README.md`. This slice deliberately models
+only the narrower subset the repository actually uses: more matcher surface is
+more to get wrong, and a wrong miss is the expensive direction. Extending the
+subset is a deliberate later change, made against fixtures drawn from those
+documented examples.
 
 A filter is consulted **only when its workflow produced no run**, so an
 undecidable pattern costs nothing whenever the evidence exists anyway. Every
@@ -124,7 +128,13 @@ path filter currently in this repository falls inside the decidable set.
 
 ### Branch filters
 
-`branches` and `branches-ignore` are matched by **literal equality only**.
+`branches` and `branches-ignore` together are not valid GitHub configuration
+for one event, so a workflow specifying both is `UNKNOWN` — evaluating either
+key would otherwise yield a confident `NOT_EXPECTED` and excuse a missing run.
+The same already holds for `paths` with `paths-ignore`.
+
+Otherwise `branches` and `branches-ignore` are matched by **literal equality
+only**.
 GitHub's branch globs are not Python's: its `*` does not span `/` — which is
 why `releases/**` exists as a separate documented form — and `!` negates in
 order. `fnmatch` disagrees on both, and it would report `release/*` as matching

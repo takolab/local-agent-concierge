@@ -15,11 +15,17 @@ examples are decided:
 * no ``**`` at all -- ``*`` matches within one path segment
 * a literal prefix followed by a trailing ``/**`` (``services/orchestrator/**``)
 
-Everything else is undecidable, including ``**`` in any interior position such
-as ``docs/**/*.md``. GitHub documents ``**`` only in trailing (``docs/**``) and
-leading (``**.js``) positions, and readings differ on whether ``**/`` can span
-zero directories, so no confident answer is available. ``?``, ``+``, ``[]`` and
-a leading ``!`` are likewise undecidable.
+Everything else is undecidable, including ``**`` in any interior or leading
+position such as ``docs/**/*.md``. GitHub does document these richer forms --
+``docs/**/*.md`` matches ``docs/README.md`` with zero intervening directories,
+and ``**/README.md`` matches a root-level ``README.md`` -- but this first slice
+deliberately models only the narrower subset this repository actually uses.
+Modelling more would mean more matcher surface to get wrong, and a wrong
+``NO_MATCH`` is the expensive direction. ``?``, ``+``, ``[]`` and a leading
+``!`` are likewise undecidable.
+
+Extending the subset later is a deliberate change, made against fixtures drawn
+from GitHub's documented examples rather than from a reading of its syntax.
 """
 
 from __future__ import annotations

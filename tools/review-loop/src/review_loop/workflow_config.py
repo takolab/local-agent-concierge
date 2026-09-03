@@ -112,6 +112,13 @@ def classify_trigger(source: str, path: str, base_ref: str) -> WorkflowDefinitio
     if not isinstance(pull_request, dict):
         return WorkflowDefinition(path=path, name=name, expectation=TriggerExpectation.UNKNOWN)
 
+    # GitHub does not allow both keys for one event. Evaluating either of them
+    # on an invalid configuration would produce a confident NOT_EXPECTED, which
+    # silently excuses a missing run -- the same reason ``paths`` and
+    # ``paths-ignore`` together are treated as unreadable.
+    if "branches" in pull_request and "branches-ignore" in pull_request:
+        return WorkflowDefinition(path=path, name=name, expectation=TriggerExpectation.UNKNOWN)
+
     if "branches-ignore" in pull_request:
         ignored = _branch_matches(pull_request["branches-ignore"], base_ref)
         if ignored is None:

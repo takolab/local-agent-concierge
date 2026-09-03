@@ -348,8 +348,9 @@ def test_the_reported_globstar_case_cannot_explain_away_a_missing_workflow():
     """End-to-end guard for the second review round's finding.
 
     A workflow filtered on ``docs/**/*.md`` produced no run while the diff
-    touches ``docs/README.md``. Whether GitHub would have triggered it is not
-    settled, so the absence must not be reported as explained.
+    touches ``docs/README.md`` -- a file GitHub's own documented example for
+    that pattern lists as a match. This slice does not model the pattern, so
+    the absence must be reported as unexplained rather than excused.
     """
     files = {
         BASELINE_PATH: DEFAULT_WORKFLOW_FILES[BASELINE_PATH],
@@ -373,6 +374,28 @@ def test_an_undecidable_branch_filter_blocks_even_with_a_green_baseline():
         BASELINE_PATH: DEFAULT_WORKFLOW_FILES[BASELINE_PATH],
         FILTERED_PATH: DEFAULT_WORKFLOW_FILES[FILTERED_PATH].replace(
             "      - master", "      - release/*"
+        ),
+    }
+    evaluation = _evaluate(
+        [BASELINE_SUCCESS], definitions=classify_workflow_files(files, "master")
+    )
+
+    assert evaluation.verdict is Verdict.AMBIGUOUS
+    assert any("could not be interpreted" in reason for reason in evaluation.reasons)
+
+
+def test_an_invalid_branch_filter_combination_cannot_excuse_a_missing_workflow():
+    """End-to-end guard for the third review round's finding.
+
+    A workflow configured with both ``branches`` and ``branches-ignore`` is not
+    valid GitHub configuration. Its absence must not be silently accepted on
+    the strength of a green baseline.
+    """
+    files = {
+        BASELINE_PATH: DEFAULT_WORKFLOW_FILES[BASELINE_PATH],
+        FILTERED_PATH: DEFAULT_WORKFLOW_FILES[FILTERED_PATH].replace(
+            "    branches:\n      - master\n",
+            "    branches:\n      - master\n    branches-ignore:\n      - master\n",
         ),
     }
     evaluation = _evaluate(
