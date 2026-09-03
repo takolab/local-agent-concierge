@@ -69,6 +69,13 @@ DEFAULT_WORKFLOW_FILES = {
 }
 
 
+#: The base branch tip. ``pull_request`` runs merge the head onto this.
+BASE_TIP = "6a2f7cfe8cc8cb4af22b7824d1c70e6fce389bb8"
+ADVANCED_BASE_TIP = "7dc3c2e1ca1977eed14e143457e6b037824af95b"
+
+DEFAULT_CHANGED_FILES = ("services/orchestrator/src/orchestrator/http_server.py",)
+
+
 def pull_request_payload(
     number: int = 27,
     head_sha: str = FULL_SHA,
@@ -97,7 +104,20 @@ def run_payload(
     run_attempt: int = 1,
     event: str = "pull_request",
     created_at: str = "2026-09-03T07:49:59Z",
+    pr_number: int | None = 27,
+    merge_base: str | None = BASE_TIP,
 ) -> dict:
+    """Build a run payload.
+
+    ``pull_requests`` mirrors the live API: it is populated while the pull
+    request is open and empty once it closes.
+    """
+    associations = []
+    if pr_number is not None:
+        association = {"number": pr_number, "head": {"sha": head_sha}}
+        if merge_base is not None:
+            association["base"] = {"sha": merge_base, "ref": "master"}
+        associations.append(association)
     return {
         "id": run_id,
         "workflow_id": workflow_id,
@@ -109,6 +129,7 @@ def run_payload(
         "run_attempt": run_attempt,
         "event": event,
         "created_at": created_at,
+        "pull_requests": associations,
     }
 
 
@@ -121,6 +142,8 @@ class FakeGitHubClient:
         pull_requests: list[dict] | None = None,
         runs: list[dict] | None = None,
         workflow_files: dict[str, str] | None = None,
+        changed_files: tuple[str, ...] = DEFAULT_CHANGED_FILES,
+        base_tip: str = BASE_TIP,
         error: Exception | None = None,
     ) -> None:
         self._pull_requests = list(pull_requests or [pull_request_payload()])
@@ -128,6 +151,8 @@ class FakeGitHubClient:
         self._workflow_files = (
             dict(DEFAULT_WORKFLOW_FILES) if workflow_files is None else dict(workflow_files)
         )
+        self._changed_files = tuple(changed_files)
+        self._base_tip = base_tip
         self._error = error
         self.calls: list[tuple[str, object]] = []
 
@@ -157,6 +182,16 @@ class FakeGitHubClient:
         self.calls.append(("list_workflow_files", ref))
         self._maybe_fail()
         return dict(self._workflow_files)
+
+    def list_pull_request_files(self, number: int) -> tuple[str, ...]:
+        self.calls.append(("list_pull_request_files", number))
+        self._maybe_fail()
+        return self._changed_files
+
+    def get_branch_tip(self, branch: str) -> str:
+        self.calls.append(("get_branch_tip", branch))
+        self._maybe_fail()
+        return self._base_tip
 
 
 class FailingGitHubClient(FakeGitHubClient):

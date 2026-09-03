@@ -8,6 +8,7 @@ import sys
 from typing import Sequence, TextIO
 
 from .github_client import GitHubApiError, GitHubClient, detect_repository
+from .evaluate import AUTHORITATIVE_EVENT
 from .model import EXIT_CODES, EXIT_USAGE, CiEvaluation, TriggerExpectation, Verdict, short_sha
 from .runner import verify_pull_request
 
@@ -17,7 +18,7 @@ exit codes:
   10  PENDING       CI for the exact head is still running
   11  FAILED        CI for the exact head completed with a failing conclusion
   12  AMBIGUOUS     CI state could not be determined safely; do not start a review
-  13  STALE_TARGET  the head moved while it was being verified
+  13  STALE_TARGET  the head, or the base its CI was merged onto, moved
   20  API_ERROR     GitHub could not be queried
   2   usage error
 
@@ -75,6 +76,21 @@ def render_text(evaluation: CiEvaluation, stream: TextIO) -> None:
     )
     print(f"Head stable:          {'Yes' if stable else 'No'}", file=stream)
 
+    # A pull_request run tests the head merged onto the base, so the base is
+    # part of what was verified even though it is not what gets reviewed.
+    merge_base = evaluation.ci_merge_base_sha
+    base_tip = evaluation.base_tip_at_verification
+    print(
+        f"CI merge base:        {merge_base or '(not established)'}",
+        file=stream,
+    )
+    base_stable = merge_base is not None and base_tip is not None and merge_base == base_tip
+    print(
+        f"Merge base current:   {'Yes' if base_stable else 'No'}"
+        + (f" (base is now {short_sha(base_tip)})" if base_tip and not base_stable else ""),
+        file=stream,
+    )
+
     baseline = sorted(
         path
         for path, expectation in expectations.items()
@@ -93,10 +109,12 @@ def render_text(evaluation: CiEvaluation, stream: TextIO) -> None:
             if outcome.superseded_run_ids
             else ""
         )
+        evidence = "" if run.event == AUTHORITATIVE_EVENT else " (not evidence: tested the head tree)"
         print(
             f"  {outcome.workflow_path} [{expectations.get(outcome.workflow_path, 'UNCONFIGURED')}]"
             f" name={outcome.workflow_name!r} run={run.run_id} attempt={run.run_attempt}"
-            f" event={run.event} status={run.status} conclusion={conclusion}{superseded}",
+            f" event={run.event} status={run.status} conclusion={conclusion}"
+            f"{superseded}{evidence}",
             file=stream,
         )
 
@@ -123,8 +141,11 @@ def render_json(evaluation: CiEvaluation, stream: TextIO) -> None:
             "base_ref": target.base_ref,
             "head_ref": target.head_ref,
             "state": target.state,
+            "changed_files": list(target.changed_files),
         },
         "head_sha_at_verification": evaluation.head_sha_at_verification,
+        "ci_merge_base_sha": evaluation.ci_merge_base_sha,
+        "base_tip_at_verification": evaluation.base_tip_at_verification,
         "workflow_definitions": [
             {"path": d.path, "name": d.name, "expectation": d.expectation.value}
             for d in evaluation.definitions
@@ -142,6 +163,9 @@ def render_json(evaluation: CiEvaluation, stream: TextIO) -> None:
                 "conclusion": o.run.conclusion,
                 "head_sha": o.run.head_sha,
                 "superseded_run_ids": list(o.superseded_run_ids),
+                "is_evidence": o.run.event == AUTHORITATIVE_EVENT,
+                "pull_request_numbers": list(o.run.pull_request_numbers),
+                "merge_base_shas": list(o.run.merge_base_shas),
             }
             for o in evaluation.outcomes
         ],

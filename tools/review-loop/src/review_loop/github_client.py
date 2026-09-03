@@ -87,11 +87,45 @@ class GitHubClient:
         """
         sha = require_full_sha(head_sha, label="head_sha query parameter")
         payload = self._get(
-            f"repos/{self.repo}/actions/runs?head_sha={sha}&per_page=100&exclude_pull_requests=true"
+            f"repos/{self.repo}/actions/runs?head_sha={sha}&per_page=100"
         )
         if not isinstance(payload, dict) or not isinstance(payload.get("workflow_runs"), list):
             raise GitHubApiError(f"unexpected workflow runs payload for {sha}")
         return payload["workflow_runs"]
+
+    def list_pull_request_files(self, number: int) -> tuple[str, ...]:
+        """List the paths a pull request changes, for path-filter decisions."""
+        paths: list[str] = []
+        page = 1
+        while True:
+            payload = self._get(
+                f"repos/{self.repo}/pulls/{int(number)}/files?per_page=100&page={page}"
+            )
+            if not isinstance(payload, list):
+                raise GitHubApiError(f"unexpected file listing for pull request #{number}")
+            for entry in payload:
+                filename = entry.get("filename")
+                if not isinstance(filename, str):
+                    raise GitHubApiError(
+                        f"unexpected file entry for pull request #{number}"
+                    )
+                paths.append(filename)
+            if len(payload) < 100:
+                return tuple(paths)
+            page += 1
+            if page > 30:
+                # 3000 paths is GitHub's own ceiling for this endpoint.
+                raise GitHubApiError(
+                    f"pull request #{number} changes more files than can be listed"
+                )
+
+    def get_branch_tip(self, branch: str) -> str:
+        """Return the current tip of a branch, to detect merge-context drift."""
+        payload = self._get(f"repos/{self.repo}/git/ref/heads/{branch}")
+        sha = (payload or {}).get("object", {}).get("sha") if isinstance(payload, dict) else None
+        if not isinstance(sha, str):
+            raise GitHubApiError(f"could not read the tip of branch {branch!r}")
+        return sha
 
     def list_workflow_files(self, ref: str) -> dict[str, str]:
         """Return ``{path: yaml text}`` for ``.github/workflows`` at ``ref``.

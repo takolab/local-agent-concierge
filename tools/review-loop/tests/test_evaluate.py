@@ -9,6 +9,8 @@ from review_loop.runner import build_target
 from review_loop.workflow_config import classify_workflow_files
 
 from fakes import (
+    ADVANCED_BASE_TIP,
+    BASE_TIP,
     BASELINE_PATH,
     DEFAULT_WORKFLOW_FILES,
     FILTERED_PATH,
@@ -19,7 +21,22 @@ from fakes import (
     run_payload,
 )
 
-TARGET = build_target(pull_request_payload(number=27, head_sha=FULL_SHA), 27)
+#: A diff that matches none of the configured path filters, so only the
+#: unfiltered baseline workflow is expected to run.
+DIFF_MISSING_EVERY_FILTER = ("README.md",)
+
+#: A diff that matches the orchestrator workflow's ``services/orchestrator/**``
+#: filter, so that workflow is expected to run too.
+DIFF_TOUCHING_ORCHESTRATOR = ("services/orchestrator/src/orchestrator/http_server.py",)
+
+
+def _target(changed_files=DIFF_MISSING_EVERY_FILTER, state="open"):
+    return build_target(
+        pull_request_payload(number=27, head_sha=FULL_SHA, state=state), 27, changed_files
+    )
+
+
+TARGET = _target()
 DEFINITIONS = classify_workflow_files(DEFAULT_WORKFLOW_FILES, "master")
 
 BASELINE_SUCCESS = run_payload(run_id=1, path=BASELINE_PATH, conclusion="success")
@@ -28,12 +45,20 @@ FILTERED_SUCCESS = run_payload(
 )
 
 
-def _evaluate(run_payloads, *, definitions=DEFINITIONS, head_after=FULL_SHA, target=TARGET):
+def _evaluate(
+    run_payloads,
+    *,
+    definitions=DEFINITIONS,
+    head_after=FULL_SHA,
+    target=TARGET,
+    base_tip=BASE_TIP,
+):
     return evaluate(
         target=target,
         runs=parse_runs(list(run_payloads)),
         definitions=definitions,
         head_sha_at_verification=head_after,
+        base_tip_at_verification=base_tip,
     )
 
 
@@ -43,7 +68,12 @@ def test_baseline_alone_succeeding_is_ready():
 
 
 def test_baseline_plus_a_filtered_workflow_succeeding_is_ready():
-    assert _evaluate([BASELINE_SUCCESS, FILTERED_SUCCESS]).verdict is Verdict.READY
+    evaluation = _evaluate(
+        [BASELINE_SUCCESS, FILTERED_SUCCESS],
+        target=_target(DIFF_TOUCHING_ORCHESTRATOR),
+    )
+
+    assert evaluation.verdict is Verdict.READY
 
 
 def test_the_expected_number_of_workflows_is_not_fixed():
@@ -53,7 +83,9 @@ def test_the_expected_number_of_workflows_is_not_fixed():
     configuration, so no count is ever asserted.
     """
     one = _evaluate([BASELINE_SUCCESS])
-    two = _evaluate([BASELINE_SUCCESS, FILTERED_SUCCESS])
+    two = _evaluate(
+        [BASELINE_SUCCESS, FILTERED_SUCCESS], target=_target(DIFF_TOUCHING_ORCHESTRATOR)
+    )
 
     assert one.verdict is two.verdict is Verdict.READY
     assert len(one.outcomes) == 1
@@ -70,18 +102,55 @@ def test_no_runs_at_all_is_ambiguous_not_ready():
 
 def test_a_missing_baseline_run_is_ambiguous_even_when_every_observed_run_passed():
     """A green filtered workflow is not evidence that the commit was built."""
-    evaluation = _evaluate([FILTERED_SUCCESS])
+    evaluation = _evaluate([FILTERED_SUCCESS], target=_target(DIFF_TOUCHING_ORCHESTRATOR))
 
     assert evaluation.verdict is Verdict.AMBIGUOUS
-    assert any("baseline workflows have no run" in reason for reason in evaluation.reasons)
+    assert any("always runs for a pull request" in reason for reason in evaluation.reasons)
 
 
-def test_a_missing_filtered_workflow_is_not_held_against_the_commit():
+def test_a_filtered_workflow_the_diff_misses_may_be_absent():
     evaluation = _evaluate([BASELINE_SUCCESS])
 
     observed = {o.workflow_path for o in evaluation.outcomes}
     assert SECOND_FILTERED_PATH not in observed
     assert evaluation.verdict is Verdict.READY
+
+
+def test_a_filtered_workflow_the_diff_should_have_triggered_may_not_be_absent():
+    """The core of the first review finding.
+
+    A filter existing is not the same claim as this diff missing it. With a
+    diff under ``services/orchestrator/**`` the orchestrator workflow must have
+    run, so its absence cannot be waved through on a green baseline.
+    """
+    evaluation = _evaluate([BASELINE_SUCCESS], target=_target(DIFF_TOUCHING_ORCHESTRATOR))
+
+    assert evaluation.verdict is Verdict.AMBIGUOUS
+    assert any("matches its filter" in reason for reason in evaluation.reasons)
+
+
+def test_an_undecidable_path_filter_blocks_only_when_the_run_is_absent():
+    """An uninterpretable filter is fine as long as evidence exists anyway."""
+    unsupported = {
+        BASELINE_PATH: DEFAULT_WORKFLOW_FILES[BASELINE_PATH],
+        FILTERED_PATH: DEFAULT_WORKFLOW_FILES[FILTERED_PATH].replace(
+            '"services/orchestrator/**"', '"services/orchestrator/**[abc]"'
+        ),
+    }
+    definitions = classify_workflow_files(unsupported, "master")
+
+    absent = _evaluate([BASELINE_SUCCESS], definitions=definitions)
+    present = _evaluate([BASELINE_SUCCESS, FILTERED_SUCCESS], definitions=definitions)
+
+    assert absent.verdict is Verdict.AMBIGUOUS
+    assert any("could not be evaluated" in reason for reason in absent.reasons)
+    assert present.verdict is Verdict.READY
+
+
+def test_a_diff_that_is_unknown_makes_every_filtered_absence_unexplained():
+    evaluation = _evaluate([BASELINE_SUCCESS], target=_target(changed_files=()))
+
+    assert evaluation.verdict is Verdict.AMBIGUOUS
 
 
 @pytest.mark.parametrize("status", ["queued", "requested", "waiting", "in_progress", "pending"])
@@ -104,7 +173,8 @@ def test_a_pending_filtered_workflow_blocks_a_green_baseline():
                 status="in_progress",
                 conclusion=None,
             ),
-        ]
+        ],
+        target=_target(DIFF_TOUCHING_ORCHESTRATOR),
     )
 
     assert evaluation.verdict is Verdict.PENDING
@@ -179,7 +249,11 @@ def test_an_older_successful_run_does_not_mask_a_newer_failed_one():
 
 
 def test_a_moved_head_is_stale_regardless_of_how_green_the_old_commit_was():
-    evaluation = _evaluate([BASELINE_SUCCESS, FILTERED_SUCCESS], head_after=OTHER_SHA)
+    evaluation = _evaluate(
+        [BASELINE_SUCCESS, FILTERED_SUCCESS],
+        head_after=OTHER_SHA,
+        target=_target(DIFF_TOUCHING_ORCHESTRATOR),
+    )
 
     assert evaluation.verdict is Verdict.STALE_TARGET
     assert evaluation.outcomes == ()
@@ -249,7 +323,8 @@ def test_ambiguity_outranks_a_green_result():
                 path=FILTERED_PATH,
                 conclusion="mystery",
             ),
-        ]
+        ],
+        target=_target(DIFF_TOUCHING_ORCHESTRATOR),
     )
 
     assert evaluation.verdict is Verdict.AMBIGUOUS

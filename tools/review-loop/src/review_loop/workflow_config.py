@@ -6,8 +6,10 @@ workflow ever be explained by the pull request's diff?
 
 * no ``paths``/``paths-ignore`` filter -> no, absence is unexplainable
   (:data:`~review_loop.model.TriggerExpectation.REQUIRED`)
-* a path filter is present -> yes, absence may be legitimate
-  (:data:`~review_loop.model.TriggerExpectation.CONDITIONAL`)
+* a path filter is present -> only if the pull request's own diff misses the
+  filter (:data:`~review_loop.model.TriggerExpectation.CONDITIONAL`). The
+  filter patterns are carried on the definition so that the evaluator can
+  decide that against the actual diff; see :mod:`review_loop.path_filter`.
 
 Anything the parser does not confidently understand becomes ``UNKNOWN``, which
 the evaluator treats as ambiguous rather than as absence.
@@ -19,7 +21,7 @@ from fnmatch import fnmatch
 
 import yaml
 
-from .model import TriggerExpectation, WorkflowDefinition
+from .model import PathFilter, TriggerExpectation, WorkflowDefinition
 
 _PATH_FILTER_KEYS = ("paths", "paths-ignore")
 
@@ -123,12 +125,31 @@ def classify_trigger(source: str, path: str, base_ref: str) -> WorkflowDefinitio
                 path=path, name=name, expectation=TriggerExpectation.NOT_EXPECTED
             )
 
-    if any(key in pull_request for key in _PATH_FILTER_KEYS):
+    present = [key for key in _PATH_FILTER_KEYS if key in pull_request]
+    if present:
         return WorkflowDefinition(
-            path=path, name=name, expectation=TriggerExpectation.CONDITIONAL
+            path=path,
+            name=name,
+            expectation=TriggerExpectation.CONDITIONAL,
+            path_filter=_path_filter(pull_request, present),
         )
 
     return WorkflowDefinition(path=path, name=name, expectation=TriggerExpectation.REQUIRED)
+
+
+def _path_filter(pull_request: dict, present: list[str]) -> PathFilter:
+    """Extract the filter patterns, or mark them unreadable.
+
+    Both keys together is not valid GitHub configuration for one event, so it
+    is treated as unreadable rather than guessed at.
+    """
+    if len(present) != 1:
+        return PathFilter(mode="unreadable")
+    key = present[0]
+    patterns = pull_request[key]
+    if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
+        return PathFilter(mode="unreadable")
+    return PathFilter(mode=key, patterns=tuple(patterns))
 
 
 def classify_workflow_files(

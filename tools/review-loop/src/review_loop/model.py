@@ -69,6 +69,7 @@ class PullRequestTarget:
     base_ref: str
     head_ref: str
     state: str
+    changed_files: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         require_full_sha(self.head_sha, label="pull request head sha")
@@ -81,6 +82,12 @@ class WorkflowRun:
     ``workflow_path`` is the identity we group on. The job/check display name
     is deliberately absent: this repository runs three different workflows
     whose only job is named ``test``, so display names collide.
+
+    ``pull_request_numbers`` and ``merge_base_shas`` come from the run's
+    ``pull_requests`` array. For a ``pull_request`` event they say which pull
+    request the run belongs to and which base commit it was merged onto, which
+    is what the run actually tested. GitHub empties that array once a pull
+    request closes, so it is available only while the pull request is open.
     """
 
     run_id: int
@@ -93,6 +100,8 @@ class WorkflowRun:
     run_attempt: int
     event: str
     created_at: str
+    pull_request_numbers: tuple[int, ...] = ()
+    merge_base_shas: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         require_full_sha(self.head_sha, label="workflow run head sha")
@@ -113,12 +122,26 @@ class TriggerExpectation(Enum):
 
 
 @dataclass(frozen=True)
+class PathFilter:
+    """A workflow's ``paths`` or ``paths-ignore`` list.
+
+    ``mode`` is ``"paths"``, ``"paths-ignore"``, or ``"unreadable"`` when the
+    filter is present but could not be interpreted (including the case where
+    both keys appear, which GitHub does not allow for one event).
+    """
+
+    mode: str
+    patterns: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class WorkflowDefinition:
     """A workflow file as configured at the exact head SHA under review."""
 
     path: str
     name: str
     expectation: TriggerExpectation
+    path_filter: PathFilter | None = None
 
 
 @dataclass(frozen=True)
@@ -141,6 +164,11 @@ class CiEvaluation:
     outcomes: tuple[WorkflowOutcome, ...] = ()
     definitions: tuple[WorkflowDefinition, ...] = field(default=())
     head_sha_at_verification: str | None = None
+    #: The base commit the observed pull_request runs were merged onto, i.e.
+    #: what CI actually tested. ``None`` when it could not be established.
+    ci_merge_base_sha: str | None = None
+    #: The base branch tip re-read after evidence was collected.
+    base_tip_at_verification: str | None = None
 
     @property
     def exit_code(self) -> int:

@@ -17,21 +17,25 @@ state is actually known.
 
 ```bash
 pip install -e "tools/review-loop[test]"
-review-loop --pr 27 --dry-run
+review-loop --pr 28 --dry-run
 ```
 
 ```text
-PR:                   #27 (feat/orchestrator-dispatch-correlation-logging -> master)
-Head SHA:             3b514700c1c2c257a39a7037f1a21ca5b9064106  [3b51470]
+PR:                   #28 (feat/review-loop-pr-head-ci-verification -> master)
+Head SHA:             a0794113e82591dbee912da0826a004ba91e166f  [a079411]
 Head stable:          Yes
+CI merge base:        6a2f7cfe8cc8cb4af22b7824d1c70e6fce389bb8
+Merge base current:   Yes
 Baseline workflows:   .github/workflows/pytest.yml
 Observed workflows:
-  .github/workflows/orchestrator.yml [CONDITIONAL] name='Orchestrator tests' run=33730139664 attempt=1 event=pull_request status=completed conclusion=success
-  .github/workflows/pytest.yml [REQUIRED] name='Python tests' run=33730139593 attempt=1 event=pull_request status=completed conclusion=success
+  .github/workflows/pytest.yml [REQUIRED] name='Python tests' run=33797660279 attempt=1 event=pull_request status=completed conclusion=success
+  .github/workflows/review-loop.yml [CONDITIONAL] name='Review loop runner tests' run=33797660398 attempt=1 event=pull_request status=completed conclusion=success
 CI verdict:           READY
 Reason:
-  - .github/workflows/orchestrator.yml (run 33730139664 attempt 1) succeeded
-  - .github/workflows/pytest.yml (run 33730139593 attempt 1) succeeded
+  - .github/workflows/pytest.yml (run 33797660279 attempt 1) succeeded
+  - .github/workflows/review-loop.yml (run 33797660398 attempt 1) succeeded
+  - .github/workflows/agent-contracts.yml did not run: this diff misses its path filter
+  - .github/workflows/orchestrator.yml did not run: this diff misses its path filter
 GitHub write performed: No
 ```
 
@@ -46,11 +50,11 @@ later grows a mode that does write.
 
 | Verdict | Exit | Meaning |
 | --- | --- | --- |
-| `READY` | 0 | The head resolved, did not move during verification, the baseline workflow ran for that exact commit, and every observed workflow completed successfully. |
+| `READY` | 0 | The pull request is open, its head resolved and did not move, the base its CI merged onto is still the base branch tip, the baseline workflow produced a `pull_request` run for that exact commit, every workflow that should have run did, and all of them succeeded. |
 | `PENDING` | 10 | A relevant run for the exact head is `queued`, `requested`, `waiting`, `in_progress` or `pending`. |
 | `FAILED` | 11 | A relevant run completed with `failure`, `timed_out`, `startup_failure`, `cancelled`, `action_required` or `stale`. |
 | `AMBIGUOUS` | 12 | CI state could not be determined safely — see below. |
-| `STALE_TARGET` | 13 | The head SHA changed between selecting the target and verifying it. |
+| `STALE_TARGET` | 13 | The head moved during verification, or the base its CI merged onto is no longer the base branch tip. |
 | `API_ERROR` | 20 | GitHub could not be queried. |
 | — | 2 | CLI usage error. |
 
@@ -60,10 +64,13 @@ value, so an automation can also branch on *why* it is not ready.
 
 The runner fails closed: anything it cannot explain becomes `AMBIGUOUS` rather
 than collapsing into `READY`. `AMBIGUOUS` covers a missing baseline run, a
-workflow whose `pull_request` trigger could not be interpreted, a run for a
-workflow absent from the configuration at that commit, one workflow path
-reported under several workflow ids, an unrecognised status or conclusion, and
-runs returned for a commit other than the one queried.
+path-filtered workflow that the diff should have triggered but which produced
+no run, a workflow whose `pull_request` trigger or path filter could not be
+interpreted, a run for a workflow absent from the configuration at that commit,
+one workflow path reported under several workflow ids, a run that belongs to a
+different pull request or carries no association at all, runs that merged onto
+different bases, an unrecognised status or conclusion, runs returned for a
+commit other than the one queried, and a pull request that is not open.
 
 ### How workflows are identified
 
@@ -83,8 +90,12 @@ starts. Each is classified as:
   least one such baseline workflow must exist *and* have produced a run for the
   exact head, or the verdict is `AMBIGUOUS`. A green path-filtered workflow on
   its own is not evidence that the commit was built.
-* **`CONDITIONAL`** — path-filtered. Its absence may be legitimate, so absence
-  is not held against the commit.
+* **`CONDITIONAL`** — path-filtered. Its absence is checked against this pull
+  request's own changed files: if the diff matches the filter the run must
+  exist, if the diff misses it the absence is explained, and if the filter
+  cannot be interpreted the absence is unexplained. "A filter exists" is not
+  the same claim as "this diff misses it", and only the second excuses a
+  missing run.
 * **`NOT_EXPECTED`** — no `pull_request` trigger for this base branch.
 * **`UNKNOWN`** — the trigger block could not be interpreted → `AMBIGUOUS`.
 
@@ -92,9 +103,40 @@ No workflow count is ever assumed. Path filters make the number of runs vary
 between pull requests: at the time of writing, PRs #26 and #27 each produced
 two runs out of three configured workflows.
 
-The runner does **not** re-implement GitHub's path-filter matching. It only
-decides whether a filter exists, which is enough to know whether an absence
-needs explaining.
+The runner interprets only the safe part of GitHub's filter-pattern syntax:
+literals, `/`, `*` (which does not cross `/`) and `**` (which does). `?`, `+`,
+`[]` and a leading `!` carry meanings that differ from ordinary globbing, so
+any pattern using them is reported as undecidable and, if the run is also
+absent, the verdict is `AMBIGUOUS`. A filter is only ever consulted when its
+workflow produced no run, so an uninterpretable pattern costs nothing as long
+as the evidence exists anyway.
+
+### What a `pull_request` run actually tested
+
+With a plain `actions/checkout`, a `pull_request` run does not build the head
+commit. It builds `refs/pull/N/merge` — the head merged onto the base at that
+moment. This is directly observable: run `33797660398` on PR #28 reports head
+`a0794113…`, while its own checkout log says
+`HEAD is now at 73d15f6 Merge a0794113… into 6a2f7cfe…`.
+
+Three consequences are handled rather than assumed away:
+
+* **Only `pull_request` runs are evidence.** A `push` or `workflow_dispatch`
+  run on the same commit built the head tree, which is a different tree. Such
+  runs are displayed but can neither satisfy the baseline requirement nor
+  override a `pull_request` run.
+* **Runs must belong to this pull request.** A run's `pull_requests` array is
+  checked against the target number; sharing a head SHA is not enough.
+* **The merge context can go stale while the head does not.** The base branch
+  tip is re-read after evidence is collected. If CI merged onto a base that is
+  no longer the tip, the validated merge no longer exists and the verdict is
+  `STALE_TARGET`.
+
+GitHub empties a run's `pull_requests` array once the pull request closes, so
+the merge context cannot be established for a merged pull request. A closed
+pull request is not a review target anyway, so it reports `AMBIGUOUS`. Merged
+pull requests remain useful for exercising retrieval, full-SHA handling and
+normalization, but they will not report `READY`.
 
 ### Reruns and re-triggers
 
@@ -128,11 +170,12 @@ readability and are never used as an identity.
 
 ### Stale targets
 
-The head is read twice: once to choose the target, and once after the runs and
-workflow configuration have been collected. If it moved in between, the
-evidence describes a commit that is no longer the review target, and the
-verdict is `STALE_TARGET`. A green result for a superseded commit is never
-reported as `READY`.
+Both ends of the tested merge are re-read after the evidence has been
+collected. If the **head** moved, the evidence describes a commit that is no
+longer the review target. If the **base** moved, the head is still the review
+target but the merge CI validated no longer exists. Either one yields
+`STALE_TARGET`; a green result for a superseded commit or a superseded merge is
+never reported as `READY`.
 
 ## GitHub authentication and the read-only guarantee
 

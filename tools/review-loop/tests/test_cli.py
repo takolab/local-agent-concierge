@@ -33,6 +33,11 @@ def _run(client, argv=("--pr", "27", "--dry-run")):
     return code, stream.getvalue()
 
 
+#: A diff matching none of the configured path filters, so only the unfiltered
+#: baseline workflow is expected to run.
+DIFF_MISSING_EVERY_FILTER = ("README.md",)
+
+
 def _green_client(**kwargs):
     return FakeGitHubClient(
         pull_requests=[pull_request_payload(number=27, head_sha=FULL_SHA)],
@@ -69,6 +74,7 @@ def test_a_head_that_moves_during_verification_exits_stale_target():
             pull_request_payload(head_sha=OTHER_SHA),
         ],
         runs=[run_payload(run_id=1, path=BASELINE_PATH, conclusion="success")],
+        changed_files=DIFF_MISSING_EVERY_FILTER,
     )
 
     code, output = _run(client)
@@ -95,7 +101,9 @@ def test_a_head_that_moves_during_verification_exits_stale_target():
 )
 def test_non_ready_states_exit_with_their_own_codes(runs, expected_verdict):
     client = FakeGitHubClient(
-        pull_requests=[pull_request_payload(head_sha=FULL_SHA)], runs=runs
+        pull_requests=[pull_request_payload(head_sha=FULL_SHA)],
+        runs=runs,
+        changed_files=DIFF_MISSING_EVERY_FILTER,
     )
 
     code, output = _run(client)
@@ -152,6 +160,8 @@ def test_a_dry_run_calls_only_read_endpoints():
         "get_pull_request",
         "list_workflow_runs_for_sha",
         "list_workflow_files",
+        "list_pull_request_files",
+        "get_branch_tip",
     }
 
 

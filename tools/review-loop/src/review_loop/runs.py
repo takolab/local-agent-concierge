@@ -10,9 +10,16 @@ they need different tie-breakers:
   new ``run_id``. The most recently created run wins, so an older successful
   run never hides a newer failed or still-running one.
 
-Workflows are grouped by workflow file path. Job and check display names are
-never used: this repository's three workflows all expose a single job named
-``test``, so display names cannot tell them apart.
+Workflows are grouped by workflow file path *and event*. Grouping by path
+alone would let a ``push`` run supersede a ``pull_request`` run of the same
+workflow on the same commit, and those two test different trees: with a plain
+``actions/checkout``, a ``pull_request`` run builds ``refs/pull/N/merge`` --
+the head merged onto the base -- while a ``push`` run builds the head tree
+itself.
+
+Job and check display names are never used: this repository's three workflows
+all expose a single job named ``test``, so display names cannot tell them
+apart.
 """
 
 from __future__ import annotations
@@ -52,12 +59,44 @@ def parse_run(payload: dict) -> WorkflowRun:
             run_attempt=int(payload["run_attempt"]),
             event=str(payload.get("event", "")),
             created_at=str(payload.get("created_at", "")),
+            pull_request_numbers=_pull_request_numbers(payload),
+            merge_base_shas=_merge_base_shas(payload),
         )
     except (RunParseError, NotAFullShaError):
         # An abbreviated or malformed SHA is its own, more specific failure.
         raise
     except (TypeError, ValueError) as exc:
         raise RunParseError(f"workflow run payload could not be parsed: {exc}") from exc
+
+
+def _pull_request_associations(payload: dict) -> list[dict]:
+    associations = payload.get("pull_requests")
+    if associations is None:
+        return []
+    if not isinstance(associations, list):
+        raise RunParseError("workflow run pull_requests is not a list")
+    for association in associations:
+        if not isinstance(association, dict):
+            raise RunParseError("workflow run pull_requests entry is not an object")
+    return associations
+
+
+def _pull_request_numbers(payload: dict) -> tuple[int, ...]:
+    numbers = []
+    for association in _pull_request_associations(payload):
+        number = association.get("number")
+        if number is not None:
+            numbers.append(int(number))
+    return tuple(sorted(set(numbers)))
+
+
+def _merge_base_shas(payload: dict) -> tuple[str, ...]:
+    shas = []
+    for association in _pull_request_associations(payload):
+        base = association.get("base")
+        if isinstance(base, dict) and base.get("sha") is not None:
+            shas.append(require_full_sha(base["sha"], label="run pull_requests base sha"))
+    return tuple(sorted(set(shas)))
 
 
 def parse_runs(payloads: list[dict]) -> tuple[WorkflowRun, ...]:
@@ -74,24 +113,27 @@ def _latest_attempt_per_run_id(runs: list[WorkflowRun]) -> list[WorkflowRun]:
 
 
 def normalize(runs: tuple[WorkflowRun, ...]) -> tuple[WorkflowOutcome, ...]:
-    """Select the authoritative run for each workflow path.
+    """Select the authoritative run for each (workflow path, event) pair.
 
     Raises :class:`WorkflowIdentityCollision` if one path maps to several
     workflow ids, because the runs could then no longer be attributed to a
     single workflow with confidence.
     """
-    grouped: dict[str, list[WorkflowRun]] = {}
+    by_path: dict[str, set[int]] = {}
     for run in runs:
-        grouped.setdefault(run.workflow_path, []).append(run)
-
-    outcomes: list[WorkflowOutcome] = []
-    for path, group in sorted(grouped.items()):
-        workflow_ids = {run.workflow_id for run in group}
+        by_path.setdefault(run.workflow_path, set()).add(run.workflow_id)
+    for path, workflow_ids in sorted(by_path.items()):
         if len(workflow_ids) > 1:
             raise WorkflowIdentityCollision(
                 f"workflow path {path!r} maps to multiple workflow ids {sorted(workflow_ids)}"
             )
 
+    grouped: dict[tuple[str, str], list[WorkflowRun]] = {}
+    for run in runs:
+        grouped.setdefault((run.workflow_path, run.event), []).append(run)
+
+    outcomes: list[WorkflowOutcome] = []
+    for (path, _event), group in sorted(grouped.items()):
         candidates = _latest_attempt_per_run_id(group)
         winner = max(candidates, key=lambda run: (run.created_at, run.run_id))
         superseded = tuple(
