@@ -342,3 +342,42 @@ def _code(verdict):
     from review_loop.model import EXIT_CODES
 
     return EXIT_CODES[verdict]
+
+
+def test_the_reported_globstar_case_cannot_explain_away_a_missing_workflow():
+    """End-to-end guard for the second review round's finding.
+
+    A workflow filtered on ``docs/**/*.md`` produced no run while the diff
+    touches ``docs/README.md``. Whether GitHub would have triggered it is not
+    settled, so the absence must not be reported as explained.
+    """
+    files = {
+        BASELINE_PATH: DEFAULT_WORKFLOW_FILES[BASELINE_PATH],
+        FILTERED_PATH: DEFAULT_WORKFLOW_FILES[FILTERED_PATH].replace(
+            '"services/orchestrator/**"', '"docs/**/*.md"'
+        ),
+    }
+    evaluation = _evaluate(
+        [BASELINE_SUCCESS],
+        definitions=classify_workflow_files(files, "master"),
+        target=_target(("docs/README.md",)),
+    )
+
+    assert evaluation.verdict is Verdict.AMBIGUOUS
+    assert any("could not be evaluated" in reason for reason in evaluation.reasons)
+
+
+def test_an_undecidable_branch_filter_blocks_even_with_a_green_baseline():
+    """A wrong NOT_EXPECTED would excuse a missing run, so it is never guessed."""
+    files = {
+        BASELINE_PATH: DEFAULT_WORKFLOW_FILES[BASELINE_PATH],
+        FILTERED_PATH: DEFAULT_WORKFLOW_FILES[FILTERED_PATH].replace(
+            "      - master", "      - release/*"
+        ),
+    }
+    evaluation = _evaluate(
+        [BASELINE_SUCCESS], definitions=classify_workflow_files(files, "master")
+    )
+
+    assert evaluation.verdict is Verdict.AMBIGUOUS
+    assert any("could not be interpreted" in reason for reason in evaluation.reasons)

@@ -17,8 +17,6 @@ the evaluator treats as ambiguous rather than as absence.
 
 from __future__ import annotations
 
-from fnmatch import fnmatch
-
 import yaml
 
 from .model import PathFilter, TriggerExpectation, WorkflowDefinition
@@ -46,11 +44,22 @@ class _Missing:
 _MISSING = _Missing()
 
 
+#: Branch patterns are matched by literal equality only. GitHub's branch glob
+#: syntax is not Python's: its ``*`` does not span ``/`` (which is why
+#: ``releases/**`` exists as a separate documented form), and it supports
+#: ordered negation with ``!``. ``fnmatch`` disagrees on both, and a wrong
+#: "this workflow does not apply to this branch" silently excuses a missing
+#: run. Anything beyond a literal is therefore undecidable.
+_BRANCH_PATTERN_METACHARACTERS = frozenset("*?[]!+")
+
+
 def _branch_matches(patterns: object, base_ref: str) -> bool | None:
     """Return whether ``base_ref`` matches, or ``None`` if undecidable."""
     if not isinstance(patterns, list) or not all(isinstance(p, str) for p in patterns):
         return None
-    return any(fnmatch(base_ref, pattern) for pattern in patterns)
+    if any(set(pattern) & _BRANCH_PATTERN_METACHARACTERS for pattern in patterns):
+        return None
+    return any(pattern == base_ref for pattern in patterns)
 
 
 def classify_trigger(source: str, path: str, base_ref: str) -> WorkflowDefinition:

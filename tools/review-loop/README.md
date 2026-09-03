@@ -103,13 +103,35 @@ No workflow count is ever assumed. Path filters make the number of runs vary
 between pull requests: at the time of writing, PRs #26 and #27 each produced
 two runs out of three configured workflows.
 
-The runner interprets only the safe part of GitHub's filter-pattern syntax:
-literals, `/`, `*` (which does not cross `/`) and `**` (which does). `?`, `+`,
-`[]` and a leading `!` carry meanings that differ from ordinary globbing, so
-any pattern using them is reported as undecidable and, if the run is also
-absent, the verdict is `AMBIGUOUS`. A filter is only ever consulted when its
-workflow produced no run, so an uninterpretable pattern costs nothing as long
-as the evidence exists anyway.
+The matcher's invariant is not "support GitHub's glob syntax". It is **never
+report a miss unless GitHub would certainly agree**, because a false miss
+explains away a workflow that should have run — which is precisely how a false
+`READY` is produced. Only shapes settled by GitHub's own documented examples
+are decided:
+
+* patterns with no `**` — `*` matches within one path segment
+* a literal prefix with a trailing `/**`, such as `services/orchestrator/**`
+
+Everything else is undecidable: `**` in any interior or leading position
+(`docs/**/*.md`, `**/README.md`, `**.js`), and `?`, `+`, `[]` or a leading `!`
+anywhere. GitHub documents `**` only trailing (`docs/**`) and leading without a
+slash (`**.js`), so whether `**/` can span zero directories is not something
+this runner can claim to know.
+
+A filter is consulted **only when its workflow produced no run**, so an
+undecidable pattern costs nothing whenever the evidence exists anyway. Every
+path filter currently in this repository falls inside the decidable set.
+
+### Branch filters
+
+`branches` and `branches-ignore` are matched by **literal equality only**.
+GitHub's branch globs are not Python's: its `*` does not span `/` — which is
+why `releases/**` exists as a separate documented form — and `!` negates in
+order. `fnmatch` disagrees on both, and it would report `release/*` as matching
+`release/1.0/hotfix`. A wrong "this workflow does not apply to this branch"
+silently excuses a missing run, so any pattern containing `*`, `?`, `[]`, `!`
+or `+` makes the workflow `UNKNOWN`, and therefore `AMBIGUOUS`. This
+repository uses `branches: [master]` throughout.
 
 ### What a `pull_request` run actually tested
 

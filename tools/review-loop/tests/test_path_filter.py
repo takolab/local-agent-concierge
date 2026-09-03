@@ -55,9 +55,58 @@ def test_patterns_using_unmodelled_syntax_are_undecidable(pattern):
     assert evaluate(_paths(pattern), CHANGED) is FilterOutcome.UNDECIDABLE
 
 
-def test_a_decidable_match_wins_over_an_unmodelled_sibling_pattern():
+@pytest.mark.parametrize(
+    "pattern, changed",
+    [
+        ("docs/**/*.md", "docs/README.md"),
+        ("docs/**/*.md", "docs/observability/x.md"),
+        ("**/README.md", "README.md"),
+        ("**.js", "app.js"),
+        ("services/**/tests/**", "services/orchestrator/tests/a.py"),
+        ("*/**", "docs/x.md"),
+    ],
+    ids=[
+        "interior-globstar-zero-directories",
+        "interior-globstar-one-directory",
+        "leading-globstar-at-root",
+        "leading-globstar-no-slash",
+        "two-globstars",
+        "wildcard-prefix",
+    ],
+)
+def test_a_globstar_outside_a_trailing_position_is_undecidable(pattern, changed):
+    """The second review round's finding, generalised.
+
+    GitHub documents ``**`` only trailing (``docs/**``) or leading without a
+    slash (``**.js``). Whether ``**/`` can span zero directories -- the
+    ``docs/**/*.md`` vs ``docs/README.md`` case -- is not settled by any
+    documented example, so no confident answer exists. Returning NO_MATCH here
+    would explain away a workflow that should have run.
+    """
+    assert evaluate(_paths(pattern), (changed,)) is FilterOutcome.UNDECIDABLE
+
+
+def test_the_repositorys_own_filter_shapes_stay_decidable():
+    """Conservatism must not cost the patterns actually in use here."""
+    for pattern in (
+        "services/orchestrator/**",
+        "packages/agent-contracts/**",
+        "tools/review-loop/**",
+    ):
+        assert evaluate(_paths(pattern), ("tools/review-loop/src/x.py",)) in {
+            FilterOutcome.MATCHES,
+            FilterOutcome.NO_MATCH,
+        }
+    assert (
+        evaluate(_paths(".github/workflows/review-loop.yml"), ("README.md",))
+        is FilterOutcome.NO_MATCH
+    )
+
+
+@pytest.mark.parametrize("sibling", ["docs/[ab].md", "docs/**/*.md"])
+def test_a_decidable_match_wins_over_an_unmodelled_sibling_pattern(sibling):
     """If something already matches, the undecidable pattern changes nothing."""
-    outcome = evaluate(_paths("services/orchestrator/**", "docs/[ab].md"), CHANGED)
+    outcome = evaluate(_paths("services/orchestrator/**", sibling), CHANGED)
 
     assert outcome is FilterOutcome.MATCHES
 

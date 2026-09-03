@@ -85,41 +85,61 @@ def test_trigger_shapes_are_classified_or_flagged_unknown(trigger, expected):
     assert classify_trigger(source, BASELINE_PATH, "master").expectation is expected
 
 
-def test_a_workflow_targeting_another_base_branch_is_not_expected():
-    source = """\
-name: Release
-on:
-  pull_request:
-    branches: [release/*]
-jobs:
-  test:
-    runs-on: ubuntu-latest
-"""
+def _branch_source(key: str, patterns: str) -> str:
+    return (
+        f"name: Example\non:\n  pull_request:\n    {key}: {patterns}\n"
+        "jobs:\n  test:\n    runs-on: ubuntu-latest\n"
+    )
+
+
+def test_a_workflow_targeting_another_base_branch_by_literal_name_is_not_expected():
+    source = _branch_source("branches", "[release]")
 
     assert (
         classify_trigger(source, BASELINE_PATH, "master").expectation
         is TriggerExpectation.NOT_EXPECTED
     )
     assert (
-        classify_trigger(source, BASELINE_PATH, "release/1.0").expectation
+        classify_trigger(source, BASELINE_PATH, "release").expectation
         is TriggerExpectation.REQUIRED
     )
 
 
 def test_a_branches_ignore_match_removes_the_workflow_from_expectation():
-    source = """\
-name: Example
-on:
-  pull_request:
-    branches-ignore: [master]
-jobs:
-  test:
-    runs-on: ubuntu-latest
-"""
+    source = _branch_source("branches-ignore", "[master]")
 
     assert (
         classify_trigger(source, BASELINE_PATH, "master").expectation
         is TriggerExpectation.NOT_EXPECTED
+    )
+
+
+@pytest.mark.parametrize(
+    "pattern", ["release/*", "releases/**", "feature/?", "release/[12]", "!master", "v+"]
+)
+@pytest.mark.parametrize("key", ["branches", "branches-ignore"])
+def test_a_branch_pattern_beyond_a_literal_name_is_unknown(key, pattern):
+    """GitHub's branch globs are not Python's, so none of these are decided.
+
+    Its ``*`` does not span ``/`` -- which is why ``releases/**`` exists as a
+    separate documented form -- and ``!`` negates in order. ``fnmatch`` gets
+    both wrong, and a wrong NOT_EXPECTED silently excuses a missing run.
+    """
+    source = _branch_source(key, f'["{pattern}"]')
+
+    assert (
+        classify_trigger(source, BASELINE_PATH, "master").expectation
+        is TriggerExpectation.UNKNOWN
+    )
+
+
+def test_a_nested_branch_is_not_quietly_matched_by_a_single_star():
+    """The concrete case: ``release/*`` must not be read as spanning ``/``."""
+    source = _branch_source("branches-ignore", '["release/*"]')
+
+    assert (
+        classify_trigger(source, BASELINE_PATH, "release/1.0/hotfix").expectation
+        is TriggerExpectation.UNKNOWN
     )
 
 

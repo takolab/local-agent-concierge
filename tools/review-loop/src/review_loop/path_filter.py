@@ -4,11 +4,22 @@ This answers one question and refuses the rest: *given these changed files,
 must this workflow have run?* It is only ever consulted when a path-filtered
 workflow produced no run, because a run that exists needs no explaining.
 
-GitHub's filter-pattern syntax includes `?`, `+`, `[]` and leading `!` with
-semantics that differ from ordinary globbing. Rather than re-implement them,
-any pattern using them is reported as undecidable, and the caller fails closed.
-Only literals, `/`, `*` (which does not cross `/`) and `**` (which does) are
-interpreted.
+The invariant is narrower than "support GitHub's glob syntax": it is *never
+report NO_MATCH unless GitHub would certainly agree*. A false ``NO_MATCH``
+explains away a workflow that should have run, which is exactly how a false
+``READY`` gets produced.
+
+So only pattern shapes whose meaning is settled by GitHub's own documented
+examples are decided:
+
+* no ``**`` at all -- ``*`` matches within one path segment
+* a literal prefix followed by a trailing ``/**`` (``services/orchestrator/**``)
+
+Everything else is undecidable, including ``**`` in any interior position such
+as ``docs/**/*.md``. GitHub documents ``**`` only in trailing (``docs/**``) and
+leading (``**.js``) positions, and readings differ on whether ``**/`` can span
+zero directories, so no confident answer is available. ``?``, ``+``, ``[]`` and
+a leading ``!`` are likewise undecidable.
 """
 
 from __future__ import annotations
@@ -30,28 +41,38 @@ class FilterOutcome(Enum):
     UNDECIDABLE = "UNDECIDABLE"
 
 
-def _to_regex(pattern: str) -> re.Pattern[str]:
-    parts: list[str] = []
-    index = 0
-    while index < len(pattern):
-        if pattern.startswith("**", index):
-            parts.append(".*")
-            index += 2
-        elif pattern[index] == "*":
-            parts.append("[^/]*")
-            index += 1
-        else:
-            parts.append(re.escape(pattern[index]))
-            index += 1
+#: The one ``**`` shape with a settled meaning: everything beneath a literal
+#: directory prefix, as in ``services/orchestrator/**``.
+_TRAILING_GLOBSTAR = "/**"
+
+
+def _to_regex(pattern: str) -> re.Pattern[str] | None:
+    """Compile a pattern, or return ``None`` if its meaning is not settled."""
+    if pattern.endswith(_TRAILING_GLOBSTAR):
+        prefix = pattern[: -len(_TRAILING_GLOBSTAR)]
+        if "*" in prefix:
+            return None
+        return re.compile(r"\A" + re.escape(prefix + "/") + r".*\Z")
+
+    if "**" in pattern:
+        # Interior or leading ``**``: not covered by any documented example.
+        return None
+
+    parts = ["[^/]*" if character == "*" else re.escape(character) for character in pattern]
     return re.compile(r"\A" + "".join(parts) + r"\Z")
 
 
 def _supported(pattern: str) -> bool:
-    return isinstance(pattern, str) and not (set(pattern) & UNSUPPORTED_PATTERN_CHARACTERS)
+    if not isinstance(pattern, str):
+        return False
+    if set(pattern) & UNSUPPORTED_PATTERN_CHARACTERS:
+        return False
+    return _to_regex(pattern) is not None
 
 
 def _matches_any(patterns: list[str], changed_file: str) -> bool:
-    return any(_to_regex(pattern).match(changed_file) for pattern in patterns)
+    compiled = (_to_regex(pattern) for pattern in patterns)
+    return any(regex.match(changed_file) for regex in compiled if regex is not None)
 
 
 def evaluate(path_filter: PathFilter | None, changed_files: tuple[str, ...]) -> FilterOutcome:
