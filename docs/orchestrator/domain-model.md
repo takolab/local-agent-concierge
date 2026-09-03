@@ -595,14 +595,16 @@ Before this slice, a real dispatch failure — most importantly, a real
 produced a full stack trace in the Orchestrator's server logs with no way
 to tell which caller, task, or conversation it belonged to:
 `http_server.py`'s exception handling logged `self.command`/`self.path`
-only, and an unknown-agent dispatch logged nothing at all. This directly
-addresses `docs/roadmap.md` Milestone 7's "Preserve trace and conversation
+only, and an unknown-agent dispatch logged nothing at all. This is a step
+toward `docs/roadmap.md` Milestone 7's "Preserve trace and conversation
 identifiers" task — the one remaining unchecked item small and safe enough
-for its own slice; see the Slice 4 design proposal delivered in the
-session that produced this slice for the full comparison against the
-alternatives considered and rejected for now (configurable Hermes
-timeout, gating `dev-echo` behind an opt-in, and a live-stack integration
-check that CI cannot run).
+for its own slice — but delivers *dispatch correlation logging*
+specifically, not a complete end-to-end guarantee; see "Current
+limitations, extended by Slice 4" below for exactly what remains open, and
+the Slice 4 design proposal delivered in the session that produced this
+slice for the full comparison against the alternatives considered and
+rejected for now (configurable Hermes timeout, gating `dev-echo` behind an
+opt-in, and a live-stack integration check that CI cannot run).
 
 **What changed.** `http_server.py`'s `_handle_dispatch` now logs one
 INFO-level line per outcome, always via `%r`-formatted named fields —
@@ -658,18 +660,20 @@ already-verified Milestone 5 distributed trace
 (`concierge.request` → `hermes.request` → `/v1/responses`), since
 `HermesAgent` has no span to inject a `traceparent` from.
 
-**What is logged, and what is deliberately never logged.** Only
-`agent_name`, `task_id`, `conversation_id`, `trace_id`, and (on success)
-`AgentResponse.status` are logged — plain opaque identifiers, matching the
-redaction discipline `docs/observability/collector-redaction.md` already
-established for OpenTelemetry span attributes elsewhere in this repo,
-applied here to plain log lines instead. `AgentRequest.instruction` (free
-text a user wrote) and `AgentResponse.summary` (a real Hermes model
-response) are never logged, and neither is any `Authorization`/API-key
-value — `http_server.py` never has access to `HermesAgent`'s configured
-`api_key` in the first place, so there is no code path here that could log
-it. `test_http_server.py`'s `test_dispatch_logging_never_contains_instruction_text`
-and `test_dispatch_logging_never_contains_hermes_api_key` assert this
+**What is logged, and what is deliberately never logged.** The new
+*structured correlation log calls* this slice adds — the three described
+above — pass only `agent_name`, `task_id`, `conversation_id`, `trace_id`,
+and (on success) `AgentResponse.status`: plain opaque identifiers, matching
+the redaction discipline `docs/observability/collector-redaction.md`
+already established for OpenTelemetry span attributes elsewhere in this
+repo, applied here to plain log lines instead. `AgentRequest.instruction`
+(free text a user wrote) and `AgentResponse.summary` (a real Hermes model
+response) are never passed to these calls, and neither is any
+`Authorization`/API-key value — `http_server.py` never has access to
+`HermesAgent`'s configured `api_key` in the first place, so there is no
+code path here that could log it this way. `test_http_server.py`'s
+`test_dispatch_logging_never_contains_instruction_text` and
+`test_dispatch_logging_never_contains_hermes_api_key` assert this
 directly, using a distinctive per-test sentinel value rather than a
 generic placeholder. Both were confirmed to be real, load-bearing checks
 during implementation, not vacuously-passing assertions: temporarily
@@ -681,10 +685,32 @@ as expected, via the object's default dataclass `repr()` — the same
 repo's Independent AI Review already applied to the Slice 3 redirect
 regression test.
 
+**This is narrower than an "instruction never appears in server logs"
+guarantee.** The exception path's `logger.exception(...)` call (both the
+one added by this slice and the pre-existing one in
+`_handle_unexpected_error`, unchanged) still records the raised
+exception's own message and full traceback. If a future Agent
+implementation raised an exception whose message embedded request content
+— e.g. `raise ValueError(f"invalid instruction: {request.instruction}")`
+— that text would still reach the server logs via that traceback,
+confirmed directly (a throwaway script raising an exception with a
+distinctive message through `logger.exception` showed that message text
+in the captured output). This is not a new risk introduced by this slice
+— the same `logger.exception` behavior, with the same property, already
+existed on the previously-unchanged `_handle_unexpected_error` path before
+this slice — and no currently-registered Agent (`EchoAgent`, `HermesAgent`)
+does this today. A true "never appears anywhere in server logs" guarantee
+for `instruction` would require a separate exception-message redaction
+design with its own failure-path regression tests; this slice's structured
+correlation logging does not attempt to provide that, and the tests named
+above only cover the paths they exercise (a successful dispatch, and a
+`HermesAgent` connection failure), not every possible Agent exception.
+Found by this repo's Independent AI Review on this slice's own PR.
+
 ### Current limitations, extended by Slice 4
 
 The "Current limitations" and "Deliberately not implemented yet" lists
-below are otherwise unchanged by this slice. Two additions:
+below are otherwise unchanged by this slice. Additions:
 
 - Correlation logging exists only for the `POST /dispatch` HTTP path
   (`http_server.py`). `GET /health` is unchanged (still liveness-only, no
@@ -694,9 +720,23 @@ below are otherwise unchanged by this slice. Two additions:
 - `AgentRequest.trace_id` is now visible in the Orchestrator's own logs
   when a caller supplies one, but nothing in this repository populates it
   yet in practice (the Slack Gateway does not call the Orchestrator at
-  all — see "Current limitations" above), so this closes the roadmap
-  checkbox without yet having a real end-to-end producer to observe it
-  from.
+  all).
+- **This slice delivers dispatch correlation logging specifically, not a
+  complete "preserve trace and conversation identifiers" guarantee.**
+  `conversation_id`/`trace_id` were already fields on `AgentRequest`
+  (Slice 1) and were already passed through `Orchestrator.dispatch()`
+  unmodified before this slice existed — in that narrow sense they were
+  already "preserved" inside the HTTP boundary. What was actually missing,
+  and what this slice adds, is *visibility*: making dispatch outcomes
+  observable via correlation identifiers in the server's own logs.
+  End-to-end preservation is still incomplete in at least two ways this
+  slice does not address: `HermesAgent` forwards `conversation_id` to
+  Hermes but not `trace_id` (see "HermesAgent (Slice 3)" above), and there
+  is still no real caller that populates `trace_id` in practice (Slack
+  Gateway integration remains unimplemented). `docs/roadmap.md`'s
+  "Preserve trace and conversation identifiers" checkbox is therefore left
+  unchecked by this slice, rather than claimed complete. Found by this
+  repo's Independent AI Review on this slice's own PR.
 
 ## Deliberately not implemented yet
 

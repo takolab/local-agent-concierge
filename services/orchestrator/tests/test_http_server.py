@@ -312,7 +312,11 @@ def test_dispatch_unknown_agent_logs_correlation_identifiers(running_server, cap
 
     caplog.set_level(logging.INFO, logger="orchestrator.http")
 
-    request_data = _sample_request_data(task_id="corr-task-unknown-agent")
+    request_data = _sample_request_data(
+        task_id="corr-task-unknown-agent",
+        conversation_id="corr-conversation-unknown-agent",
+        trace_id="corr-trace-unknown-agent",
+    )
 
     status, _ = _post_json(
         f"{base_url}/dispatch",
@@ -321,6 +325,8 @@ def test_dispatch_unknown_agent_logs_correlation_identifiers(running_server, cap
 
     assert status == 404
     assert "corr-task-unknown-agent" in caplog.text
+    assert "corr-conversation-unknown-agent" in caplog.text
+    assert "corr-trace-unknown-agent" in caplog.text
     assert "does-not-exist" in caplog.text
 
 
