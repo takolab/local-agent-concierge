@@ -607,8 +607,10 @@ rejected for now (configurable Hermes timeout, gating `dev-echo` behind an
 opt-in, and a live-stack integration check that CI cannot run).
 
 **What changed.** `http_server.py`'s `_handle_dispatch` now logs one
-INFO-level line per outcome, always via `%r`-formatted named fields —
-never the `AgentRequest`/`AgentResponse` object itself:
+correlation line per outcome — INFO for success and unknown-agent, ERROR
+(via `logger.exception`, with traceback) for an Agent-raised exception —
+always via `%r`-formatted named fields, never the
+`AgentRequest`/`AgentResponse` object itself:
 
 - Success: `agent_name`, `task_id`, `conversation_id`, `trace_id`, and the
   resulting `AgentResponse.status`.
