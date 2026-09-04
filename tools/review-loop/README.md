@@ -687,7 +687,9 @@ That live trial has now happened, on PR #30, and is recorded in
 [`docs/delegated-development/review-loop-live-experiment-1.md`](../../docs/delegated-development/review-loop-live-experiment-1.md).
 It concluded that the flow does replace starting a review by hand, and named
 the unbound reviewer working directory as the one thing to fix first — which
-is what "Where the reviewer runs" above now does.
+is what "Where the reviewer runs" above now does. That fix was then validated
+live, against a pull request in a different repository, in
+[`docs/delegated-development/review-loop-live-experiment-2.md`](../../docs/delegated-development/review-loop-live-experiment-2.md).
 
 The next slice is **Structured Findings → Coding Agent routing + Bounded Fix
 Response**.
