@@ -15,7 +15,6 @@ import os
 import sys
 from typing import Sequence, TextIO
 
-from . import comment_format
 from .github_client import GitHubApiError, GitHubClient, detect_repository
 from .github_comments import IssueCommentReader, IssueCommentWriter
 from .model import EXIT_CODES, EXIT_USAGE, Verdict, short_sha
@@ -365,7 +364,3 @@ def review_main(
     else:
         render_text(result, out, reviewer_label=reviewer_label)
     return result.exit_code
-
-
-#: Re-exported so a caller can build the identity a record would carry.
-record_identity = comment_format.RecordIdentity
