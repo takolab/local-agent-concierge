@@ -1040,9 +1040,11 @@ for the latest.
 
 Supporting local tooling for that workflow lives under `tools/`, outside the
 containerized runtime. The first entry is
-[`tools/review-loop`](../tools/review-loop/README.md), a read-only command that
-resolves a pull request's exact head SHA and verifies whether that commit's
-GitHub Actions CI allows a review to start.
+[`tools/review-loop`](../tools/review-loop/README.md), which resolves a pull
+request's exact head SHA, verifies whether that commit's GitHub Actions CI
+allows a review to start, and — with `review-loop review` — runs one
+Independent AI Review turn against that exact state, recording the validated
+verdict as a single pull request comment.
 
 ## Branch Naming
 

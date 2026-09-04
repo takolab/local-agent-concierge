@@ -6,6 +6,9 @@ No test in this suite performs network access or requires credentials.
 from __future__ import annotations
 
 from review_loop.github_client import GitHubApiError
+from review_loop.github_comments import ExistingComment
+from review_loop.reviewer_process import ReviewerRun
+from review_loop.verdict import VERDICT_BEGIN, VERDICT_END
 
 FULL_SHA = "3b514700c1c2c257a39a7037f1a21ca5b9064106"
 OTHER_SHA = "36f33930b6f15137b160b4b05da1fd6359e0a035"
@@ -197,3 +200,109 @@ class FakeGitHubClient:
 class FailingGitHubClient(FakeGitHubClient):
     def __init__(self, message: str = "gh api failed (exit 1): HTTP 502") -> None:
         super().__init__(error=GitHubApiError(message))
+
+
+# --- review turn fakes ------------------------------------------------------
+
+
+def verdict_text(
+    *,
+    head_sha: str = FULL_SHA,
+    round_number: int | str = 1,
+    recommendation: str = "changes_requested",
+    findings: tuple[dict, ...] | None = None,
+    resolved: str | None = None,
+    escalation_reason: str | None = None,
+    preamble: str = "Here is what I found.\n",
+) -> str:
+    """Build reviewer output in the Structured Verdict contract."""
+    if findings is None:
+        findings = (
+            {
+                "Finding ID": "F1",
+                "Severity": "Major",
+                "Location": "services/orchestrator/src/orchestrator/http_server.py:42",
+                "Problem": "The dispatch handler swallows the agent error.",
+                "Evidence": "test_dispatch_error asserts only the status code.",
+                "Required outcome": "The error is surfaced and a test proves it.",
+            },
+        )
+
+    lines = [
+        f"Round: {round_number}",
+        f"Reviewed head SHA: {head_sha}",
+        f"Recommendation: {recommendation}",
+    ]
+    if resolved is not None:
+        lines.append(f"Resolved: {resolved}")
+    if escalation_reason is not None:
+        lines.append(f"Escalation reason: {escalation_reason}")
+    for finding in findings:
+        lines.extend(f"{label}: {value}" for label, value in finding.items())
+
+    return preamble + "\n".join([VERDICT_BEGIN, *lines, VERDICT_END]) + "\n"
+
+
+class FakeReviewer:
+    """A reviewer that returns a canned run and records what it was asked."""
+
+    def __init__(self, run: ReviewerRun | None = None) -> None:
+        self.run = run if run is not None else ReviewerRun(stdout=verdict_text())
+        self.prompts: list[str] = []
+
+    def invoke(self, prompt: str) -> ReviewerRun:
+        self.prompts.append(prompt)
+        return self.run
+
+    @property
+    def invoked(self) -> bool:
+        return bool(self.prompts)
+
+
+#: The login the runner is told it would comment as, in tests.
+AUTOMATION_LOGIN = "takolab"
+
+
+class FakeCommentReader:
+    """Issue comments already on the pull request.
+
+    An entry is either a body (attributed to :data:`AUTOMATION_LOGIN`) or an
+    ``(author, body)`` pair, so a test can put the same marker under a
+    different author.
+    """
+
+    def __init__(
+        self,
+        bodies: list[str | tuple[str, str]] | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.bodies = list(bodies or [])
+        self.error = error
+        self.calls = 0
+
+    def list_comments(self, number: int):
+        self.calls += 1
+        if self.error is not None:
+            raise self.error
+        comments = []
+        for index, entry in enumerate(self.bodies):
+            author, body = entry if isinstance(entry, tuple) else (AUTOMATION_LOGIN, entry)
+            comments.append(
+                ExistingComment(comment_id=1000 + index, author=author, body=body)
+            )
+        return tuple(comments)
+
+
+class FakeCommentWriter:
+    """Records every comment it is asked to create."""
+
+    def __init__(self, error: Exception | None = None, comment_id: int = 5555) -> None:
+        self.error = error
+        self.comment_id = comment_id
+        self.posted: list[tuple[int, str]] = []
+
+    def create_comment(self, number: int, body: str) -> int:
+        self.posted.append((number, body))
+        if self.error is not None:
+            raise self.error
+        return self.comment_id

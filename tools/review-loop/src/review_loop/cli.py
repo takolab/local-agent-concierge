@@ -1,4 +1,16 @@
-"""Command line front end: ``review-loop --pr <number> --dry-run``."""
+"""Command line front end.
+
+Two commands, one entry point:
+
+* ``review-loop --pr <number> --dry-run`` -- verification only, read-only,
+  unchanged from the shape PR #28 shipped.
+* ``review-loop review --pr <number> --reviewer-command ...`` -- one
+  Independent Review turn, which is the only path that can write to GitHub.
+
+The subcommand is dispatched by name rather than by an argparse subparser so
+that the bare ``--pr`` form keeps working exactly as before, including its
+help text and its exit codes.
+"""
 
 from __future__ import annotations
 
@@ -22,8 +34,10 @@ exit codes:
   20  API_ERROR     GitHub could not be queried
   2   usage error
 
-Only exit code 0 means a review may be started. This runner never writes to
+Only exit code 0 means a review may be started. This command never writes to
 GitHub: it issues read-only GET requests through the authenticated `gh` CLI.
+
+To run the review itself, see `review-loop review --help`.
 """
 
 
@@ -174,7 +188,38 @@ def render_json(evaluation: CiEvaluation, stream: TextIO) -> None:
     stream.write("\n")
 
 
+#: The verification command's name for the review turn, dispatched before
+#: argparse sees the arguments.
+REVIEW_COMMAND = "review"
+
+
 def main(
+    argv: Sequence[str] | None = None,
+    *,
+    client: GitHubClient | None = None,
+    stream: TextIO | None = None,
+    reader=None,
+    writer=None,
+    reviewer=None,
+    expected_author: str | None = None,
+) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == REVIEW_COMMAND:
+        from .review_cli import review_main
+
+        return review_main(
+            arguments[1:],
+            client=client,
+            reader=reader,
+            writer=writer,
+            reviewer=reviewer,
+            expected_author=expected_author,
+            stream=stream,
+        )
+    return verify_main(arguments, client=client, stream=stream)
+
+
+def verify_main(
     argv: Sequence[str] | None = None,
     *,
     client: GitHubClient | None = None,
