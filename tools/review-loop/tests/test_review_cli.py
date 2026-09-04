@@ -8,8 +8,9 @@ import pytest
 from review_loop import cli
 from review_loop.github_client import GitHubApiError
 from review_loop.model import EXIT_CODES, EXIT_USAGE, Verdict
-from review_loop.review_cli import build_review_parser
+from review_loop.review_cli import _workspace, build_review_parser
 from review_loop.reviewer_process import ReviewerRun
+from review_loop.reviewer_workspace import ExistingWorkspace, PreparedWorkspace
 from review_loop.verdict import REVIEW_EXIT_CODES, ReviewOutcome
 
 from fakes import (
@@ -355,3 +356,104 @@ def test_an_unresolvable_account_stops_the_review_rather_than_guessing(monkeypat
     assert not reviewer.invoked
     assert writer.posted == []
     assert "GitHub write performed: No" in stream.getvalue()
+
+
+# --- the reviewer's working directory ---------------------------------------
+
+
+def _args(*extra):
+    return build_review_parser().parse_args(
+        ["--pr", "27", "--reviewer-command", "x", *extra]
+    )
+
+
+def test_a_worktree_at_the_target_is_prepared_by_default():
+    """The operator cannot pre-make one: the target SHA is not known yet."""
+    workspace = _workspace(_args())
+
+    assert isinstance(workspace, PreparedWorkspace)
+    assert workspace.number == 27
+    assert workspace.remote == "origin"
+
+
+def test_reviewer_cwd_selects_a_workspace_that_is_verified_instead():
+    workspace = _workspace(_args("--reviewer-cwd", "/somewhere/checked-out"))
+
+    assert isinstance(workspace, ExistingWorkspace)
+    assert workspace.path == "/somewhere/checked-out"
+
+
+def test_the_remote_and_repository_root_are_configurable():
+    workspace = _workspace(
+        _args("--git-remote", "upstream", "--repo-root", "/srv/mirror")
+    )
+
+    assert isinstance(workspace, PreparedWorkspace)
+    assert workspace.remote == "upstream"
+    assert workspace.repo_root == "/srv/mirror"
+
+
+def test_an_unusable_workspace_stops_before_the_reviewer_command_runs(tmp_path):
+    """End to end, with a real subprocess reviewer that is never reached.
+
+    The command names a binary that does not exist, so if the workspace check
+    ran late -- or not at all -- this would fail as REVIEWER_FAILED (30). It
+    exits 35 instead, which is only reachable without starting the reviewer.
+    """
+    not_a_checkout = tmp_path / "empty"
+    not_a_checkout.mkdir()
+    stream = io.StringIO()
+
+    code = cli.main(
+        [
+            *BASE_ARGV,
+            "--reviewer-command",
+            "/nonexistent/reviewer-binary",
+            "--reviewer-cwd",
+            str(not_a_checkout),
+        ],
+        client=_green_client(),
+        reader=FakeCommentReader(),
+        writer=FakeCommentWriter(),
+        expected_author=AUTOMATION_LOGIN,
+        stream=stream,
+    )
+    output = stream.getvalue()
+
+    assert code == REVIEW_EXIT_CODES[ReviewOutcome.REVIEWER_WORKSPACE_INVALID]
+    assert code == 35
+    assert "REVIEWER_WORKSPACE_INVALID" in output
+    assert "Reviewer invoked:     No" in output
+    assert "not a git work tree" in output
+
+
+def test_the_report_names_the_workspace_the_reviewer_would_use(tmp_path):
+    not_a_checkout = tmp_path / "empty"
+    not_a_checkout.mkdir()
+    stream = io.StringIO()
+
+    cli.main(
+        [
+            *BASE_ARGV,
+            "--reviewer-command",
+            "/nonexistent/reviewer-binary",
+            "--reviewer-cwd",
+            str(not_a_checkout),
+        ],
+        client=_green_client(),
+        reader=FakeCommentReader(),
+        writer=FakeCommentWriter(),
+        expected_author=AUTOMATION_LOGIN,
+        stream=stream,
+    )
+
+    assert "Reviewer workspace:   " in stream.getvalue()
+    assert str(not_a_checkout) in stream.getvalue()
+
+
+def test_the_help_explains_that_the_workspace_is_bound_to_the_target():
+    text = build_review_parser().format_help()
+
+    assert "clean checkout of the review target" in text
+    assert "git worktree at the target SHA" in text
+    assert "verified" in text

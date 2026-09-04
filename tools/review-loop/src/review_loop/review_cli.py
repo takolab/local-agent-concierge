@@ -31,6 +31,12 @@ from .reviewer_process import (
     build_env,
     split_command,
 )
+from .reviewer_workspace import (
+    DEFAULT_REMOTE,
+    ExistingWorkspace,
+    PreparedWorkspace,
+    WorkspaceBoundReviewer,
+)
 from .verdict import REVIEW_EXIT_CODES, ReviewOutcome, Severity
 
 _EPILOG = f"""\
@@ -42,6 +48,9 @@ exit codes:
   20  API_ERROR               GitHub could not be queried
   30  REVIEWER_FAILED         the reviewer process failed, timed out, or
                               produced nothing
+  35  REVIEWER_WORKSPACE_INVALID  the reviewer's working directory is not a
+                              clean checkout of the review target; no
+                              reviewer was started
   31  REVIEW_MALFORMED        the reviewer's output is not a valid verdict
   32  REVIEW_SHA_MISMATCH     the verdict describes another commit
   33  TARGET_STALE            the pull request moved while the reviewer ran
@@ -57,6 +66,15 @@ The reviewer command is run with no shell: it is tokenised into an argument
 vector, receives the review prompt on stdin, and answers on stdout. Its
 environment is an allowlist ({', '.join(DEFAULT_ENV_ALLOWLIST)}) plus anything
 named with --reviewer-env.
+
+It also runs in a working directory that is the commit under review. By
+default the runner fetches the pull request's head ref, creates a detached
+git worktree at the target SHA, runs the reviewer there and removes it
+afterwards. --reviewer-cwd replaces that with a directory you control, which
+is then verified: a different commit or a dirty tree stops the run before the
+reviewer starts, because a reviewer reading another tree would echo the
+target SHA back from the prompt and produce a well-formed record of a commit
+nobody read.
 
 The only write this command itself performs is creating one pull request
 comment. The reviewer you configure is a trusted, read-only wrapper of your
@@ -110,7 +128,27 @@ def build_review_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--reviewer-cwd",
         default=None,
-        help="working directory for the reviewer (default: the current directory)",
+        help=(
+            "run the reviewer in this directory instead of a worktree the runner "
+            "prepares. It must be a clean checkout of the exact review target, and "
+            "is verified before the reviewer starts"
+        ),
+    )
+    parser.add_argument(
+        "--git-remote",
+        default=DEFAULT_REMOTE,
+        help=(
+            "remote to fetch the pull request's head ref from when preparing the "
+            f"reviewer's worktree (default: {DEFAULT_REMOTE})"
+        ),
+    )
+    parser.add_argument(
+        "--repo-root",
+        default=None,
+        help=(
+            "repository the reviewer's worktree is prepared from "
+            "(default: the current directory)"
+        ),
     )
     parser.add_argument(
         "--dry-run",
@@ -134,6 +172,23 @@ def build_review_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _workspace(args):
+    """Choose how the reviewer's working directory is bound to the target.
+
+    Preparing one is the default because the operator cannot reasonably do it
+    themselves: the target SHA is not known until verification has run, so a
+    directory chosen in advance is a directory chosen before anyone knows
+    which commit is under review.
+    """
+    if args.reviewer_cwd is not None:
+        return ExistingWorkspace(args.reviewer_cwd)
+    return PreparedWorkspace(
+        args.repo_root or os.getcwd(),
+        args.pr,
+        remote=args.git_remote,
+    )
+
+
 def _verdict_summary(result: ReviewResult) -> str:
     verdict = result.verdict
     if verdict is None:
@@ -147,7 +202,13 @@ def _verdict_summary(result: ReviewResult) -> str:
     )
 
 
-def render_text(result: ReviewResult, stream: TextIO, *, reviewer_label: str) -> None:
+def render_text(
+    result: ReviewResult,
+    stream: TextIO,
+    *,
+    reviewer_label: str,
+    workspace_label: str | None = None,
+) -> None:
     target = result.target
     # A run that stops before the target is captured -- an unready pull
     # request, most often -- still knows which commit it was looking at, and
@@ -181,6 +242,8 @@ def render_text(result: ReviewResult, stream: TextIO, *, reviewer_label: str) ->
         file=stream,
     )
     print(f"Reviewer:             {reviewer_label}", file=stream)
+    if workspace_label is not None:
+        print(f"Reviewer workspace:   {workspace_label}", file=stream)
     print(
         f"Reviewer invoked:     {'Yes' if result.reviewer_invoked else 'No'}", file=stream
     )
@@ -333,11 +396,13 @@ def review_main(
             print(f"error: {exc}", file=out)
             return EXIT_USAGE
         reviewer_label = " ".join(argv_command)
-        reviewer = SubprocessReviewer(
-            argv_command,
-            timeout=args.reviewer_timeout,
-            env=build_env(dict(os.environ), tuple(args.reviewer_env)),
-            cwd=args.reviewer_cwd,
+        reviewer = WorkspaceBoundReviewer(
+            SubprocessReviewer(
+                argv_command,
+                timeout=args.reviewer_timeout,
+                env=build_env(dict(os.environ), tuple(args.reviewer_env)),
+            ),
+            _workspace(args),
         )
 
     try:
@@ -376,5 +441,14 @@ def review_main(
     if args.json:
         render_json(result, out)
     else:
-        render_text(result, out, reviewer_label=reviewer_label)
+        render_text(
+            result,
+            out,
+            reviewer_label=reviewer_label,
+            workspace_label=(
+                reviewer.describe_workspace()
+                if hasattr(reviewer, "describe_workspace")
+                else None
+            ),
+        )
     return result.exit_code
