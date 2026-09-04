@@ -16,7 +16,7 @@ from review_loop.reviewer_process import (
     build_env,
     split_command,
 )
-from review_loop.verdict import VERDICT_BEGIN, VERDICT_END
+from review_loop.verdict import VERDICT_BEGIN
 from review_loop.verdict_parser import parse
 
 from fakes import FULL_SHA, verdict_text

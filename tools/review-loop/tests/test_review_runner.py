@@ -468,3 +468,52 @@ def test_a_write_capable_run_without_a_writer_is_a_programming_error():
             writer=None,
             dry_run=False,
         )
+
+
+def test_a_re_run_against_a_new_merge_base_is_stale_even_though_it_is_ready():
+    """The case the verification layer alone cannot catch.
+
+    The head never moves, the base advances, CI re-runs green against the new
+    merge, and verification reports READY a second time -- for a merge context
+    the reviewer never saw.
+    """
+
+    class RebasedCiClient(FakeGitHubClient):
+        def list_workflow_runs_for_sha(self, head_sha: str):
+            runs = super().list_workflow_runs_for_sha(head_sha)
+            first = sum(1 for c in self.calls if c[0] == "list_workflow_runs_for_sha") == 1
+            if first:
+                return runs
+            return [
+                run_payload(
+                    run_id=run["id"] + 100,
+                    workflow_id=run["workflow_id"],
+                    path=run["path"],
+                    conclusion="success",
+                    merge_base=ADVANCED_BASE_TIP,
+                    created_at="2026-09-03T09:00:00Z",
+                )
+                for run in runs
+            ]
+
+        def get_branch_tip(self, branch: str) -> str:
+            tip = super().get_branch_tip(branch)
+            first = sum(1 for c in self.calls if c[0] == "get_branch_tip") == 1
+            return tip if first else ADVANCED_BASE_TIP
+
+    client = RebasedCiClient(
+        pull_requests=[pull_request_payload(number=PR, head_sha=FULL_SHA)],
+        runs=[
+            run_payload(run_id=1, path=BASELINE_PATH, conclusion="success"),
+            run_payload(
+                run_id=2, workflow_id=347481064, path=FILTERED_PATH, conclusion="success"
+            ),
+        ],
+    )
+
+    result, _, writer = _run(client=client)
+
+    assert result.post_evaluation.verdict is Verdict.READY
+    assert result.outcome is ReviewOutcome.TARGET_STALE
+    assert "merged onto" in result.reasons[0]
+    assert writer.posted == []
