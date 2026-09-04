@@ -465,13 +465,28 @@ block cannot end up in the record. A review with nothing to report says
 
 ### Identity and idempotency
 
-A record is identified by its **hidden marker**, never by its heading.
-`## Independent AI Review` is a convention this repository's humans already
-use by hand — PRs #26, #27 and #28 all carry one written by a person — so
-treating the heading as proof of an automation record would let a human
-comment suppress a real review. The marker carries identity only: repository,
-pull request, exact head SHA, **the base commit CI merged that head onto**,
-round, role. No secret, no prompt, no duplicate of the verdict.
+A record is identified by its **hidden marker together with the comment's
+author**, never by its heading. `## Independent AI Review` is a convention
+this repository's humans already use by hand — PRs #26, #27 and #28 all carry
+one written by a person — so treating the heading as proof of an automation
+record would let a human comment suppress a real review. The marker carries
+identity only: repository, pull request, exact head SHA, **the base commit CI
+merged that head onto**, round, role. No secret, no prompt, no duplicate of
+the verdict.
+
+The author half matters because the marker is public and deterministic —
+anyone who can comment on the pull request can reproduce it. A marker on its
+own says *which* review a record would be, not *who* wrote it, so accepting
+one from any author would let a copied string make this command report
+`COMMENT_ALREADY_EXISTS` and exit `0` for a review that was never produced,
+without even starting a reviewer. The runner resolves the account it would
+post as (`gh api user`) and accepts a marker only from that account; a
+matching marker under anyone else's name is ignored and the review proceeds
+normally. If that account cannot be resolved, the run stops rather than
+guessing.
+
+This is a provenance check, not a signature. It does not defend against the
+account itself — that is the same-identity residual risk below.
 
 Identity is deliberately *not* "one review per pull request". A new head, a new
 integration base, or a later round is a different record, so a future
@@ -539,8 +554,12 @@ inline script. CI needs no agent credentials.
   comments.
 * **One GitHub identity for every role.** The reviewer record is posted under
   the same account that authors the pull requests, so the role is a convention
-  rather than an access-controlled fact. Accepted deliberately at this
-  project's scale; a human merge decision remains the backstop.
+  rather than an access-controlled fact. The duplicate check verifies that a
+  record came from that account, which separates this automation's records
+  from everyone else's comments — but nothing separates the roles *within*
+  that one account, so it cannot tell a genuine record from one the account
+  wrote by hand. Accepted deliberately at this project's scale; a human merge
+  decision remains the backstop.
 * **The reviewer is trusted, in two ways.** It is trusted to have actually
   reviewed — this runner validates the *shape* and *binding* of a verdict, not
   its truth, so a reviewer that invents findings or claims to have read a

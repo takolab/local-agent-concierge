@@ -8,11 +8,19 @@ reaches GitHub: whatever prose, reasoning or instruction-shaped text it wrote
 around its verdict block is dropped, so the recorded comment contains exactly
 the fields the contract admits and nothing a reviewer could smuggle past it.
 
-**Identity** is the machine marker, not the heading. ``## Independent AI
-Review`` is a convention this repository's humans already use by hand -- PR
-#26, #27 and #28 all carry one written by a person. Treating the heading as
-proof of an automation record would let a human comment suppress a real
-review; treating the marker as proof cannot, because nothing else writes it.
+**Identity** is the machine marker plus the author, and never the heading.
+``## Independent AI Review`` is a convention this repository's humans already
+use by hand -- PR #26, #27 and #28 all carry one written by a person -- so
+treating the heading as proof of an automation record would let a human
+comment suppress a real review.
+
+The marker alone is not proof either. It is a public, deterministic string
+that anyone who can comment is able to reproduce; it identifies *which*
+review a record would be, not *who* wrote it. The runner therefore accepts a
+marker as a record only from the account it would post as -- see
+:func:`review_loop.review_runner._existing_record`. That is a provenance
+check, not a signature: it does not defend against the account itself, which
+is the same-identity residual risk this project accepts deliberately.
 """
 
 from __future__ import annotations

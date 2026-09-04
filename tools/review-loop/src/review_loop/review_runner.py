@@ -76,16 +76,33 @@ class ReviewResult:
         return REVIEW_EXIT_CODES[self.outcome]
 
 
-def _existing_record(reader, number: int, identity) -> int | None:
+def _existing_record(
+    reader, number: int, identity, expected_author: str
+) -> int | None:
     """Return the id of a comment already recording this identity, if any.
 
-    Identity comes from the machine marker alone. A human comment under the
-    same heading -- which is how every review in this repository has been
-    written so far -- is not an automation record and must not suppress one.
+    A record is a matching marker **written by the account this runner would
+    post as**. Neither half is sufficient on its own.
+
+    The heading is not identity: ``## Independent AI Review`` is how every
+    review in this repository has been written by hand, so a human comment
+    must not suppress a real review.
+
+    The marker is not provenance either. Its format is public and
+    deterministic, so anyone who can comment on the pull request can reproduce
+    it -- and a marker copied into someone else's comment would otherwise make
+    this runner report a validated review that was never produced, without
+    even starting a reviewer. Checking the author is not a signature and does
+    not defend against the account itself; it distinguishes this automation's
+    own record from everyone else's text, which is the distinction the
+    duplicate check actually needs.
     """
     for comment in reader.list_comments(number):
-        if comment_format.body_records(comment.body, identity):
-            return comment.comment_id
+        if not comment_format.body_records(comment.body, identity):
+            continue
+        if comment.author.casefold() != expected_author.casefold():
+            continue
+        return comment.comment_id
     return None
 
 
@@ -96,6 +113,7 @@ def run_review(
     reviewer,
     repo: str,
     number: int,
+    expected_author: str,
     writer=None,
     dry_run: bool = False,
 ) -> ReviewResult:
@@ -136,7 +154,7 @@ def run_review(
     # 2. Cheap early exit: if this exact review is already recorded, running a
     #    reviewer would only produce a result we are not allowed to post.
     try:
-        already = _existing_record(reader, number, identity)
+        already = _existing_record(reader, number, identity, expected_author)
     except GitHubApiError as exc:
         return ReviewResult(
             outcome=ReviewOutcome.API_ERROR,
@@ -279,7 +297,7 @@ def run_review(
     # 6. Last duplicate check before the write. This is the one that catches a
     #    retry whose previous POST succeeded but whose response was lost.
     try:
-        already = _existing_record(reader, number, identity)
+        already = _existing_record(reader, number, identity, expected_author)
     except GitHubApiError as exc:
         return ReviewResult(
             outcome=ReviewOutcome.API_ERROR,

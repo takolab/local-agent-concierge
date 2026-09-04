@@ -69,6 +69,25 @@ def _run_gh(argv: list[str], *, stdin: str | None, timeout: float) -> Any:
         raise GitHubApiError("gh api returned a non-JSON body") from exc
 
 
+def resolve_comment_author(timeout: float = 60.0) -> str:
+    """Return the login this invocation would create comments as.
+
+    The duplicate check needs it. A marker is a public, deterministic string,
+    so on its own it proves only that *someone* wrote one; combined with the
+    author it distinguishes a record this automation wrote from a marker
+    anyone else copied into a comment.
+    """
+    payload = _run_gh(
+        ["gh", "api", "--method", _READ_METHOD, "user"], stdin=None, timeout=timeout
+    )
+    login = payload.get("login") if isinstance(payload, dict) else None
+    if not isinstance(login, str) or not login:
+        raise GitHubApiError(
+            "could not determine which account this runner would comment as"
+        )
+    return login
+
+
 class IssueCommentReader:
     """Read a pull request's comments. Issues ``GET`` and nothing else."""
 

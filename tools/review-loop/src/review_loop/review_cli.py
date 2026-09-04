@@ -16,7 +16,11 @@ import sys
 from typing import Sequence, TextIO
 
 from .github_client import GitHubApiError, GitHubClient, detect_repository
-from .github_comments import IssueCommentReader, IssueCommentWriter
+from .github_comments import (
+    IssueCommentReader,
+    IssueCommentWriter,
+    resolve_comment_author,
+)
 from .model import EXIT_CODES, EXIT_USAGE, Verdict, short_sha
 from .review_runner import ReviewResult, run_review
 from .reviewer_process import (
@@ -296,6 +300,7 @@ def review_main(
     reader=None,
     writer=None,
     reviewer=None,
+    expected_author: str | None = None,
     stream: TextIO | None = None,
 ) -> int:
     parser = build_review_parser()
@@ -342,6 +347,11 @@ def review_main(
         # write even if a later change got the branching wrong.
         if not args.dry_run and writer is None:
             writer = IssueCommentWriter(repo)
+        # Resolved even for a dry run: without it the duplicate check cannot
+        # tell this automation's own record from a marker anyone copied, and a
+        # dry run that reported the wrong answer would be worse than useless.
+        if expected_author is None:
+            expected_author = resolve_comment_author()
     except (GitHubApiError, ValueError) as exc:
         return _failure(str(exc), out, args.json)
 
@@ -352,6 +362,7 @@ def review_main(
         reviewer=reviewer,
         repo=repo,
         number=args.pr,
+        expected_author=expected_author,
         dry_run=args.dry_run,
     )
 

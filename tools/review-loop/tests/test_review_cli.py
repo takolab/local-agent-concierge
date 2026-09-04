@@ -13,6 +13,7 @@ from review_loop.reviewer_process import ReviewerRun
 from review_loop.verdict import REVIEW_EXIT_CODES, ReviewOutcome
 
 from fakes import (
+    AUTOMATION_LOGIN,
     BASE_TIP,
     BASELINE_PATH,
     FILTERED_PATH,
@@ -50,6 +51,8 @@ def _run(argv, *, client=None, reviewer=None, reader=None, writer=None):
         reviewer=reviewer if reviewer is not None else FakeReviewer(),
         reader=reader if reader is not None else FakeCommentReader(),
         writer=writer if writer is not None else FakeCommentWriter(),
+        # Injected so no test resolves the account from a live GitHub.
+        expected_author=AUTOMATION_LOGIN,
         stream=stream,
     )
     return code, stream.getvalue()
@@ -187,8 +190,14 @@ def test_an_already_recorded_review_exits_zero_without_writing():
 def test_a_reviewer_command_is_required_when_none_is_injected():
     stream = io.StringIO()
 
-    code = cli.main(["review", "--pr", "27", "--repo", REPO], client=_green_client(),
-                    reader=FakeCommentReader(), writer=FakeCommentWriter(), stream=stream)
+    code = cli.main(
+        ["review", "--pr", "27", "--repo", REPO],
+        client=_green_client(),
+        reader=FakeCommentReader(),
+        writer=FakeCommentWriter(),
+        expected_author=AUTOMATION_LOGIN,
+        stream=stream,
+    )
 
     assert code == EXIT_USAGE
     assert "--reviewer-command is required" in stream.getvalue()
@@ -202,6 +211,7 @@ def test_an_unparseable_reviewer_command_is_a_usage_error():
         client=_green_client(),
         reader=FakeCommentReader(),
         writer=FakeCommentWriter(),
+        expected_author=AUTOMATION_LOGIN,
         stream=stream,
     )
 
@@ -276,3 +286,72 @@ def test_an_unready_pull_request_still_reports_which_commit_it_looked_at():
 
     assert f"Head SHA:             {FULL_SHA}" in output
     assert "(not resolved)" not in output
+
+
+def test_the_account_the_runner_would_comment_as_is_resolved_when_not_injected(monkeypatch):
+    from review_loop import review_cli
+
+    calls = []
+    monkeypatch.setattr(
+        review_cli, "resolve_comment_author", lambda: calls.append(1) or AUTOMATION_LOGIN
+    )
+    stream = io.StringIO()
+
+    code = cli.main(
+        list(BASE_ARGV),
+        client=_green_client(),
+        reviewer=FakeReviewer(),
+        reader=FakeCommentReader(),
+        writer=FakeCommentWriter(),
+        stream=stream,
+    )
+
+    assert calls == [1]
+    assert code == 0
+
+
+def test_a_dry_run_also_resolves_it(monkeypatch):
+    """A dry run that could not tell its own record from anyone's is useless."""
+    from review_loop import review_cli
+
+    calls = []
+    monkeypatch.setattr(
+        review_cli, "resolve_comment_author", lambda: calls.append(1) or AUTOMATION_LOGIN
+    )
+
+    cli.main(
+        list(BASE_ARGV) + ["--dry-run"],
+        client=_green_client(),
+        reviewer=FakeReviewer(),
+        reader=FakeCommentReader(),
+        writer=FakeCommentWriter(),
+        stream=io.StringIO(),
+    )
+
+    assert calls == [1]
+
+
+def test_an_unresolvable_account_stops_the_review_rather_than_guessing(monkeypatch):
+    from review_loop import review_cli
+
+    def boom():
+        raise GitHubApiError("gh api user failed (exit 1): HTTP 401")
+
+    monkeypatch.setattr(review_cli, "resolve_comment_author", boom)
+    reviewer = FakeReviewer()
+    writer = FakeCommentWriter()
+    stream = io.StringIO()
+
+    code = cli.main(
+        list(BASE_ARGV),
+        client=_green_client(),
+        reviewer=reviewer,
+        reader=FakeCommentReader(),
+        writer=writer,
+        stream=stream,
+    )
+
+    assert code == REVIEW_EXIT_CODES[ReviewOutcome.API_ERROR]
+    assert not reviewer.invoked
+    assert writer.posted == []
+    assert "GitHub write performed: No" in stream.getvalue()

@@ -259,10 +259,23 @@ class FakeReviewer:
         return bool(self.prompts)
 
 
-class FakeCommentReader:
-    """Issue comments already on the pull request."""
+#: The login the runner is told it would comment as, in tests.
+AUTOMATION_LOGIN = "takolab"
 
-    def __init__(self, bodies: list[str] | None = None, error: Exception | None = None) -> None:
+
+class FakeCommentReader:
+    """Issue comments already on the pull request.
+
+    An entry is either a body (attributed to :data:`AUTOMATION_LOGIN`) or an
+    ``(author, body)`` pair, so a test can put the same marker under a
+    different author.
+    """
+
+    def __init__(
+        self,
+        bodies: list[str | tuple[str, str]] | None = None,
+        error: Exception | None = None,
+    ) -> None:
         self.bodies = list(bodies or [])
         self.error = error
         self.calls = 0
@@ -271,10 +284,13 @@ class FakeCommentReader:
         self.calls += 1
         if self.error is not None:
             raise self.error
-        return tuple(
-            ExistingComment(comment_id=1000 + index, author="takolab", body=body)
-            for index, body in enumerate(self.bodies)
-        )
+        comments = []
+        for index, entry in enumerate(self.bodies):
+            author, body = entry if isinstance(entry, tuple) else (AUTOMATION_LOGIN, entry)
+            comments.append(
+                ExistingComment(comment_id=1000 + index, author=author, body=body)
+            )
+        return tuple(comments)
 
 
 class FakeCommentWriter:

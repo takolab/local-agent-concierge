@@ -201,6 +201,7 @@ def main(
     reader=None,
     writer=None,
     reviewer=None,
+    expected_author: str | None = None,
 ) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
     if arguments and arguments[0] == REVIEW_COMMAND:
@@ -212,6 +213,7 @@ def main(
             reader=reader,
             writer=writer,
             reviewer=reviewer,
+            expected_author=expected_author,
             stream=stream,
         )
     return verify_main(arguments, client=client, stream=stream)

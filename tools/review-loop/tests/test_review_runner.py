@@ -14,6 +14,7 @@ from review_loop.verdict import ReviewOutcome
 
 from fakes import (
     ADVANCED_BASE_TIP,
+    AUTOMATION_LOGIN,
     BASE_TIP,
     BASELINE_PATH,
     FILTERED_PATH,
@@ -66,6 +67,7 @@ def _run(
         reviewer=reviewer,
         repo=REPO,
         number=PR,
+        expected_author=AUTOMATION_LOGIN,
         dry_run=dry_run,
     )
     return result, reviewer, writer
@@ -496,6 +498,7 @@ def test_a_write_capable_run_without_a_writer_is_a_programming_error():
             reviewer=FakeReviewer(),
             repo=REPO,
             number=PR,
+            expected_author=AUTOMATION_LOGIN,
             writer=None,
             dry_run=False,
         )
@@ -547,4 +550,60 @@ def test_a_re_run_against_a_new_merge_base_is_stale_even_though_it_is_ready():
     assert result.post_evaluation.verdict is Verdict.READY
     assert result.outcome is ReviewOutcome.TARGET_STALE
     assert "merged onto" in result.reasons[0]
+    assert writer.posted == []
+
+
+# --- record provenance ------------------------------------------------------
+
+
+def test_a_matching_marker_from_the_expected_author_is_a_duplicate():
+    reader = FakeCommentReader([(AUTOMATION_LOGIN, _recorded_comment())])
+
+    result, reviewer, writer = _run(reader=reader)
+
+    assert result.outcome is ReviewOutcome.COMMENT_ALREADY_EXISTS
+    assert not reviewer.invoked
+    assert writer.posted == []
+
+
+def test_a_matching_marker_from_anyone_else_is_not_a_record():
+    """The marker is public and deterministic, so it is not proof on its own.
+
+    Anyone who can comment can reproduce it. Accepting it from any author
+    would let one copied string report a validated review that was never
+    produced -- without even starting a reviewer.
+    """
+    reader = FakeCommentReader([("someone-else", _recorded_comment())])
+
+    result, reviewer, writer = _run(reader=reader)
+
+    assert reviewer.invoked
+    assert result.outcome is ReviewOutcome.REVIEW_VALID
+    assert len(writer.posted) == 1
+
+
+def test_a_foreign_marker_found_at_the_final_check_does_not_suppress_the_write():
+    """Both duplicate checks apply the same provenance rule."""
+
+    class ForeignMarkerAppearsReader(FakeCommentReader):
+        def list_comments(self, number: int):
+            comments = super().list_comments(number)
+            if self.calls >= 2:
+                self.bodies = [("someone-else", _recorded_comment())]
+                return super().list_comments(number)
+            return comments
+
+    result, reviewer, writer = _run(reader=ForeignMarkerAppearsReader([]))
+
+    assert reviewer.invoked
+    assert result.outcome is ReviewOutcome.REVIEW_VALID
+    assert len(writer.posted) == 1
+
+
+def test_the_author_comparison_ignores_case():
+    reader = FakeCommentReader([(AUTOMATION_LOGIN.upper(), _recorded_comment())])
+
+    result, _, writer = _run(reader=reader)
+
+    assert result.outcome is ReviewOutcome.COMMENT_ALREADY_EXISTS
     assert writer.posted == []
