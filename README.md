@@ -67,11 +67,31 @@ Ollama / Google Calendar / GitHub
 
 * [Architecture](docs/architecture.md)
 * [Roadmap](docs/roadmap.md)
+
+Setup guides:
+
 * [Ollama setup](docs/setup/ollama.md)
 * [Hermes Agent setup](docs/setup/hermes-agent.md)
 * [Slack Gateway setup](docs/setup/slack.md)
 * [Google Calendar setup](docs/setup/google-calendar.md)
 * [Observability setup](docs/setup/observability.md)
+
+Domain models:
+
+* [Agent contracts](docs/agent-contracts/domain-model.md)
+* [Approvals](docs/approval/domain-model.md)
+* [Orchestrator](docs/orchestrator/domain-model.md)
+
+Observability notes:
+
+* [Collector redaction](docs/observability/collector-redaction.md)
+* [Google Calendar MCP telemetry](docs/observability/google-calendar-mcp-telemetry.md)
+* [Hermes trace context](docs/observability/hermes-trace-context.md)
+
+Development workflow:
+
+* [Level 3 delegated development, Experiment #2](docs/delegated-development/level3-experiment-2.md)
+* [Review loop runner](tools/review-loop/README.md)
 
 ## Initial Milestone
 
@@ -113,22 +133,43 @@ local-agent-concierge/
 ├── README.md
 ├── LICENSE
 ├── .gitignore
+├── .dockerignore
 ├── .env.example
 ├── docker-compose.yml
+├── .github/
+│   └── workflows/
 ├── docs/
 │   ├── architecture.md
 │   ├── roadmap.md
+│   ├── agent-contracts/
+│   ├── approval/
+│   ├── delegated-development/
+│   ├── observability/
+│   ├── orchestrator/
 │   └── setup/
-│       ├── ollama.md
-│       ├── hermes-agent.md
-│       ├── slack.md
-│       ├── google-calendar.md
-│       └── observability.md
 ├── apps/
+│   ├── hermes-agent/
 │   └── slack-gateway/
-└── mcp/
-    └── google-calendar/
+├── mcp/
+│   └── google-calendar/
+├── packages/
+│   ├── agent-contracts/
+│   └── approvals/
+├── services/
+│   └── orchestrator/
+├── infra/
+│   └── observability/
+└── tools/
+    └── review-loop/
 ```
+
+The containerized services built from this repository are spread across
+three directories: `apps/` (Hermes Agent, Slack Gateway), `mcp/` (the Google
+Calendar MCP server) and `services/` (the Orchestrator) — one `Dockerfile`
+each. `packages/` holds importable domain packages those services share,
+rather than a service of its own; `infra/` holds infrastructure
+configuration such as the OpenTelemetry Collector's; and `tools/` holds
+local development tooling that runs outside the containerized runtime.
 
 The repository structure will expand as additional agents and services are implemented.
 
