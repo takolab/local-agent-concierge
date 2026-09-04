@@ -298,21 +298,31 @@ reviewer process without either the runner or the operator asking for it.
 target)`. This is the weakest of the three on its own: it is the runner
 asserting that it did what it says it does.
 
-**Evidence 2 — the reviewer cited content that exists only at the target.**
-The verdict located its findings in
+**Evidence 2 — the reviewer cited content introduced by the target
+relative to the integration base.** The verdict located its findings in
 `src/account-deletion/gcs-persistence.ts` at specific line ranges,
 including `114-122`, `273-304` and `373-390`. The operator verified against
 git that this file:
 
-* does not exist at the base commit `53f6658` — `git cat-file -e` reports
-  `fatal: Not a valid object name`
+* does not exist at the integration base `53f6658` — `git cat-file -e`
+  reports `fatal: Not a valid object name`
 * exists at the target head `3bb5a1c`
 * is 423 lines long there
 
 A reviewer that had merely echoed the SHA out of its prompt could not have
-produced line-range citations inside a 423-line file that exists at no
-other commit in the repository. Whatever tree it read, that tree contained
-the target's own content.
+produced line-range citations inside a 423-line file that the base commit
+does not contain. So the tree it read held content this pull request
+introduced, rather than the operator's checkout or the base.
+
+What this does **not** do is uniquely identify the commit that content was
+read from. The same file is present in GitHub's synthetic
+`refs/pull/3/merge` commit, and would be present in any other checkout of
+the branch, so "the reviewer read content introduced by the target" is the
+claim the evidence supports — not "the reviewer read commit `3bb5a1c` and
+no other." Narrowing it to the exact commit is Evidence 3's job, and the
+[limitations](#limitations-of-this-experiment) below record that even the
+three lines together do not establish that the reviewer read *only* that
+tree.
 
 **Evidence 3 — reviewer-side working-directory residue.** The reviewer
 process independently created session-state directories named after its own
@@ -385,12 +395,14 @@ Nothing in the runner promises otherwise, and neither run was invalid.
 
 ## Side effects
 
-The experiment changed nothing other than the single review comment.
-Verified afterwards:
+The experiment changed nothing other than the single review comment. All of
+the following were verified immediately after the retry, and describe the
+state at that moment rather than the pull request's state today — see the
+note at the end of this section:
 
-* PR #3 remained open and unmerged
-* the head SHA did not move — still `3bb5a1ce...`, still 1 commit and 7
-  changed files, base still `main` at `53f66585...`
+* PR #3 was open and unmerged
+* the head SHA did not move across the experiment — still `3bb5a1ce...`,
+  still 1 commit and 7 changed files, base still `main` at `53f66585...`
 * no PR code was changed and no finding was fixed
 * no branch was pushed — `mapgram-backend`'s remote branches were still
   exactly `main` and `codex/gcs-deletion-job-store-v1` at their original
@@ -406,6 +418,16 @@ Verified afterwards:
 
 PR #3 explicitly has no live GCS verification in its scope, and that
 boundary was preserved.
+
+**PR #3 has since advanced, by its own authors and not by this
+experiment.** By 17:17:25Z its head was
+`c5597db68e15ea0b9f89c223e14730280ccc8489` and it carried two commits
+rather than one. That is ordinary development on somebody else's pull
+request, and it is recorded only so the SHAs above are not misread as a
+description of PR #3 today. It has no bearing on the evidence: every result
+here is bound to `3bb5a1ce...`, and the runner's own identity and
+revalidation rules mean a moved head would produce a *new* review record
+rather than silently reusing this one.
 
 ### The GCP boundary
 
@@ -564,7 +586,8 @@ The evidence supports each of the following:
 * cross-repository CI verification succeeded, on a `main` base branch and a
   `ci.yml` workflow, with no repository-specific special-casing
 * the runner itself bound the reviewer's workspace to the exact target SHA
-* the Independent Reviewer demonstrably read target-only content
+* the Independent Reviewer demonstrably read content introduced by the
+  target, from the worktree the runner prepared for it
 * a wrong `--reviewer-cwd` failed closed at exit 35, before reviewer
   invocation and before any write
 * Structured Verdict validation succeeded on the first attempt
