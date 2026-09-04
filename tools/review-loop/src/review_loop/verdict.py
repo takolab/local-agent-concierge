@@ -69,6 +69,10 @@ class ReviewOutcome(Enum):
     TARGET_NOT_READY = "TARGET_NOT_READY"
     #: The reviewer process failed, timed out, or produced nothing usable.
     REVIEWER_FAILED = "REVIEWER_FAILED"
+    #: The reviewer's working directory is not a clean checkout of the target,
+    #: so no reviewer was started. Distinct from REVIEWER_FAILED because
+    #: nothing ran: the fault is in the workspace, not in the reviewer.
+    REVIEWER_WORKSPACE_INVALID = "REVIEWER_WORKSPACE_INVALID"
     #: Output could not be parsed, or failed a semantic rule of the contract.
     REVIEW_MALFORMED = "REVIEW_MALFORMED"
     #: The verdict describes a commit other than the exact review target.
@@ -91,6 +95,7 @@ REVIEW_EXIT_CODES: dict[ReviewOutcome, int] = {
     ReviewOutcome.COMMENT_ALREADY_EXISTS: 0,
     ReviewOutcome.API_ERROR: 20,
     ReviewOutcome.REVIEWER_FAILED: 30,
+    ReviewOutcome.REVIEWER_WORKSPACE_INVALID: 35,
     ReviewOutcome.REVIEW_MALFORMED: 31,
     ReviewOutcome.REVIEW_SHA_MISMATCH: 32,
     ReviewOutcome.TARGET_STALE: 33,

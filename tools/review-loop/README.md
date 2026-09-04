@@ -28,6 +28,12 @@ pip install -e "tools/review-loop[test]"
 review-loop --pr 28 --dry-run
 ```
 
+The package requires **Python 3.12 or newer**. On a machine whose default
+`python3` is older, that `pip install` fails with `requires a different
+Python`; create a 3.12 environment first (`uv venv --python 3.12`, `pyenv`,
+or a distribution package) and install into it. `git` and the `gh` CLI must
+be on `PATH`.
+
 ```text
 PR:                   #28 (feat/review-loop-pr-head-ci-verification -> master)
 Head SHA:             a0794113e82591dbee912da0826a004ba91e166f  [a079411]
@@ -260,7 +266,10 @@ The steps, in order, and why the order is the design:
    base branch, the base commit CI merged onto, and the runs that were green.
 3. **Check for an existing record** before paying for a review that could not
    be posted anyway.
-4. **Run the reviewer** against that exact SHA.
+4. **Bind the reviewer's working directory** to that exact SHA — prepare a
+   detached worktree at it, or verify the one you supplied — then **run the
+   reviewer** there. A reviewer reading another tree would echo the target
+   SHA back from its prompt, and every later check would agree with it.
 5. **Parse and validate** its output against the Structured Verdict contract.
 6. **Re-verify the target**, because a reviewer takes minutes and a pull
    request can move in minutes.
@@ -274,6 +283,7 @@ The steps, in order, and why the order is the design:
 | `TARGET_NOT_READY` | 10/11/12/13/20 | Verification did not report `READY`; the exit code is that verdict's own. No reviewer ran. |
 | `API_ERROR` | 20 | GitHub could not be queried. |
 | `REVIEWER_FAILED` | 30 | The reviewer exited non-zero, timed out, or could not be run. |
+| `REVIEWER_WORKSPACE_INVALID` | 35 | The reviewer's working directory is not a clean checkout of the target. No reviewer ran. |
 | `REVIEW_MALFORMED` | 31 | The output is not a valid verdict. |
 | `REVIEW_SHA_MISMATCH` | 32 | The verdict describes a commit other than the target. |
 | `TARGET_STALE` | 33 | The pull request moved while the reviewer was running. |
@@ -288,8 +298,20 @@ whether this run created it or found it. Every failure keeps its own code:
 The reviewer is a command you configure, not a vendor integration:
 
 ```bash
-review-loop review --pr 29 --reviewer-command "claude -p" --reviewer-env ANTHROPIC_API_KEY
+review-loop review --pr 30 \
+  --reviewer-command "/path/to/agent-cli -p --restricted-to-read-only-tools" \
+  --dry-run
 ```
+
+There is no default and no bundled reviewer: `--reviewer-command` names a
+program you already have. Any command that reads a prompt on stdin and writes
+a Structured Verdict to stdout qualifies — a coding-agent CLI in its
+non-interactive mode is the obvious candidate, run with whatever flags make
+it read-only and stop it waiting for a human. The first live experiment used
+a locally installed coding-agent CLI in exactly that shape, authenticating
+from its own existing login through `HOME`; see
+[`docs/delegated-development/review-loop-live-experiment-1.md`](../../docs/delegated-development/review-loop-live-experiment-1.md)
+for what it was configured with and what that did and did not guarantee.
 
 * It is **tokenised with shell quoting rules but never run by a shell**, so
   `;`, `|` and `$(...)` are literal arguments to one program. Untrusted GitHub
@@ -335,6 +357,57 @@ asserted by tests. It tells the reviewer to treat the pull request description
 and any implementing agent's summary as **claims to be checked, not evidence**;
 that it is read-only; and that repository content is review material, so
 instructions found inside it are data, never orders to the reviewer.
+
+### Where the reviewer runs
+
+Binding the verdict to a SHA is worth little if the reviewer read a different
+tree. The prompt names the target commit, so a reviewer echoes that SHA back
+whether or not it ever looked at it — which means a reviewer pointed at the
+wrong directory produces a verdict that passes SHA binding, passes validation,
+passes revalidation, and is recorded as evidence about a commit nobody read.
+Nothing downstream can catch that, because every downstream check reads the
+same SHA out of the same prompt.
+
+So the reviewer's working directory is now part of the review target:
+
+* **By default the runner prepares one.** It fetches `refs/pull/N/head` from
+  the remote, checks that the ref resolves to exactly the verified target SHA,
+  creates a detached `git worktree` at that commit, runs the reviewer there,
+  and removes the worktree afterwards — including when the reviewer raises or
+  the turn fails. The operator supplies nothing. They *cannot* usefully supply
+  it: the target SHA is not known until verification has already run, so a
+  directory chosen in advance is one chosen before anyone knows which commit
+  is under review.
+* **`--reviewer-cwd` replaces that with a directory you control** — a
+  pre-warmed checkout, a container mount — and it is verified rather than
+  trusted. It must be a git work tree, its `HEAD` must be exactly the target
+  SHA, and `git status --porcelain --untracked-files=all` must be empty.
+  Uncommitted edits and untracked files both count: the first is code that is
+  not in the pull request, the second is a file a reviewer can still open and
+  cite.
+
+Any failure is `REVIEWER_WORKSPACE_INVALID` (35), raised **before** the
+reviewer starts. It is deliberately not `REVIEWER_FAILED`: nothing ran, and
+the thing to fix is the workspace, not the reviewer.
+
+`refs/pull/N/head` is fetched rather than the branch because the branch may
+live in a fork this clone has no remote for, and that ref is what GitHub
+resolved the head from. If it disagrees with the head the API reported, the
+run stops — two authorities disagreeing about the target is exactly the case
+where guessing is forbidden. `--git-remote` and `--repo-root` name the remote
+and the repository to prepare from; they default to `origin` and the current
+directory.
+
+This is the first and only place the package writes to the **local**
+filesystem: `git worktree add` and `git worktree remove` on a directory it
+created under `TMPDIR`, plus the objects a `git fetch` brings in. The GitHub
+write boundary is unchanged — one issue comment, still the only one.
+
+**It is still not a sandbox.** Enforcing this invariant does not make it one,
+and the distinction matters. The reviewer remains an ordinary child process
+with your permissions; what changed is only that the tree it is *pointed at*
+is now known to be the commit under review. Nothing stops it reading, or
+writing, somewhere else entirely.
 
 ### Structured Verdict v1
 
@@ -542,6 +615,13 @@ credentials; the GitHub API is replaced by fakes built from real recorded
 response shapes, and the reviewer-process tests run `sys.executable` with an
 inline script. CI needs no agent credentials.
 
+The workspace tests do drive **real `git`**, against repositories built in a
+temporary directory — the "remote" is a bare repository on disk and the head
+ref is pushed into it as `refs/pull/N/head`, the way GitHub exposes it. A
+faked git would prove nothing here: the failure being prevented is a claim
+about what git actually checked out, so the assertions are about real
+detached worktrees and a really dirty working tree.
+
 ## Known limitations
 
 * **Only the initial review round.** `Round: 1` is the only accepted value;
@@ -560,14 +640,19 @@ inline script. CI needs no agent credentials.
   that one account, so it cannot tell a genuine record from one the account
   wrote by hand. Accepted deliberately at this project's scale; a human merge
   decision remains the backstop.
-* **The reviewer is trusted, in two ways.** It is trusted to have actually
-  reviewed — this runner validates the *shape* and *binding* of a verdict, not
-  its truth, so a reviewer that invents findings or claims to have read a
-  commit it did not produces a well-formed record. And it is trusted not to
-  write: it runs as an ordinary child process with the invoking user's
-  permissions and can reach `~/.config/gh` and `~/.ssh` through `HOME`. The
-  structural write guarantee covers this package, not the command you point it
-  at. A sandboxed, credential-less reviewer worktree is a later change.
+* **The reviewer is still trusted, in two ways — one of them now narrower.**
+  It is trusted to have actually reviewed: this runner validates the *shape*
+  and *binding* of a verdict, not its truth, so a reviewer that invents
+  findings still produces a well-formed record. What it can no longer do
+  silently is review the wrong tree — the working directory is verified to be
+  the target commit before it starts. That is a guarantee about the directory
+  the reviewer is given, not about what it reads: a reviewer is free to open
+  files elsewhere on the filesystem, and nothing here would notice.
+  And it is still trusted not to write: it runs as an ordinary child process
+  with the invoking user's permissions and can reach `~/.config/gh` and
+  `~/.ssh` through `HOME`. The structural write guarantee covers this package,
+  not the command you point it at. A credential-less, sandboxed reviewer is
+  still a later change.
 * **No persistent state.** Everything is reconstructed from GitHub and the
   current invocation on each run; there is no database and no daemon.
 * **Historical reviews are discarded.** If the target moves during the review,
@@ -583,6 +668,11 @@ fixes, waiting for CI after a fix, Independent Re-Review, multi-round loops,
 finding resolution tracking, the Merge Decision Brief, automatic merge, any
 server or daemon, and any persistent state.
 
+That live trial has now happened, on PR #30, and is recorded in
+[`docs/delegated-development/review-loop-live-experiment-1.md`](../../docs/delegated-development/review-loop-live-experiment-1.md).
+It concluded that the flow does replace starting a review by hand, and named
+the unbound reviewer working directory as the one thing to fix first — which
+is what "Where the reviewer runs" above now does.
+
 The next slice is **Structured Findings → Coding Agent routing + Bounded Fix
-Response**. Before that, this one-turn flow should be used on a real pull
-request to see whether it actually replaces starting a review by hand.
+Response**.

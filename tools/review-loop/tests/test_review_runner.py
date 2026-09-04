@@ -10,6 +10,7 @@ from review_loop.github_client import GitHubApiError
 from review_loop.model import EXIT_CODES, Verdict
 from review_loop.review_runner import run_review
 from review_loop.reviewer_process import ReviewerRun
+from review_loop.reviewer_workspace import WorkspaceError
 from review_loop.verdict import ReviewOutcome
 
 from fakes import (
@@ -607,3 +608,66 @@ def test_the_author_comparison_ignores_case():
 
     assert result.outcome is ReviewOutcome.COMMENT_ALREADY_EXISTS
     assert writer.posted == []
+
+
+# ---------------------------------------------------------------------------
+# The reviewer's working directory is part of the review target
+# ---------------------------------------------------------------------------
+
+
+class UnbindableWorkspaceReviewer:
+    """A reviewer whose workspace cannot be bound to the target commit."""
+
+    def __init__(self, message="the working directory is at 1234567, not the target"):
+        self.message = message
+        self.invocations = 0
+
+    def invoke(self, prompt, *, head_sha):
+        self.invocations += 1
+        raise WorkspaceError(self.message)
+
+
+def test_a_workspace_that_is_not_the_target_stops_the_turn():
+    """No verdict is better than a verdict about a tree nobody identified.
+
+    This is the failure the SHA binding cannot catch: a reviewer reading the
+    wrong tree echoes the target SHA back from its prompt, so the verdict
+    would validate, revalidate and be recorded as evidence about a commit
+    that was never read.
+    """
+    reviewer = UnbindableWorkspaceReviewer()
+    result, _, writer = _run(reviewer=reviewer)
+
+    assert result.outcome is ReviewOutcome.REVIEWER_WORKSPACE_INVALID
+    assert result.exit_code == 35
+    assert result.verdict is None
+    assert writer.posted == []
+
+
+def test_a_workspace_failure_is_not_reported_as_a_reviewer_failure():
+    """Different faults call for different responses.
+
+    REVIEWER_FAILED means the reviewer ran and broke; this means it never
+    started, and the thing to fix is the workspace the runner was given.
+    """
+    result, _, _ = _run(reviewer=UnbindableWorkspaceReviewer())
+
+    assert result.outcome is not ReviewOutcome.REVIEWER_FAILED
+    assert result.reviewer_invoked is False
+
+
+def test_the_workspace_failure_reason_reaches_the_caller():
+    result, _, _ = _run(
+        reviewer=UnbindableWorkspaceReviewer("origin/refs/pull/27/head resolves to abc")
+    )
+
+    assert result.reasons == ("origin/refs/pull/27/head resolves to abc",)
+
+
+def test_the_reviewer_is_told_which_commit_its_workspace_must_be():
+    """The runner hands over the exact SHA, never an abbreviation or a ref."""
+    result, reviewer, _ = _run()
+
+    assert result.outcome is ReviewOutcome.REVIEW_VALID
+    assert reviewer.head_shas == [FULL_SHA]
+    assert len(FULL_SHA) == 40

@@ -25,6 +25,7 @@ from .github_client import GitHubApiError
 from .model import CiEvaluation, Verdict
 from .review_target import ReviewTarget, TargetNotVerified, drift_reasons, from_evaluation
 from .reviewer_prompt import build_prompt
+from .reviewer_workspace import WorkspaceError
 from .runner import verify_pull_request
 from .verdict import (
     MAX_COMMENT_CHARS,
@@ -176,8 +177,20 @@ def run_review(
             dry_run=dry_run,
         )
 
-    # 3. Run the reviewer against the exact target.
-    run = reviewer.invoke(build_prompt(target))
+    # 3. Run the reviewer against the exact target -- in a working directory
+    #    that *is* that commit. Binding the verdict to a SHA is not worth much
+    #    if the reviewer read a different tree and echoed the SHA back from
+    #    the prompt, which is what an unbound working directory allows.
+    try:
+        run = reviewer.invoke(build_prompt(target), head_sha=target.head_sha)
+    except WorkspaceError as exc:
+        return ReviewResult(
+            outcome=ReviewOutcome.REVIEWER_WORKSPACE_INVALID,
+            reasons=(str(exc),),
+            pre_evaluation=pre,
+            target=target,
+            dry_run=dry_run,
+        )
     if not run.ok:
         return ReviewResult(
             outcome=ReviewOutcome.REVIEWER_FAILED,

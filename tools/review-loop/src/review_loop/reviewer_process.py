@@ -112,8 +112,15 @@ class SubprocessReviewer:
         self._cwd = cwd
         self._max_output_bytes = max_output_bytes
 
-    def invoke(self, prompt: str) -> ReviewerRun:
-        """Run the reviewer with ``prompt`` on stdin and capture stdout."""
+    def invoke(self, prompt: str, *, cwd: str | None = None) -> ReviewerRun:
+        """Run the reviewer with ``prompt`` on stdin and capture stdout.
+
+        ``cwd`` overrides the directory configured at construction. The
+        caller that supplies it is
+        :class:`review_loop.reviewer_workspace.WorkspaceBoundReviewer`, which
+        has already verified that the directory is a clean checkout of the
+        commit under review.
+        """
         try:
             completed = subprocess.run(
                 list(self.argv),
@@ -121,7 +128,7 @@ class SubprocessReviewer:
                 capture_output=True,
                 text=True,
                 timeout=self._timeout,
-                cwd=self._cwd,
+                cwd=self._cwd if cwd is None else cwd,
                 env=self._env,
                 shell=False,
                 check=False,

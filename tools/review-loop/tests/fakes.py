@@ -249,9 +249,11 @@ class FakeReviewer:
     def __init__(self, run: ReviewerRun | None = None) -> None:
         self.run = run if run is not None else ReviewerRun(stdout=verdict_text())
         self.prompts: list[str] = []
+        self.head_shas: list[str] = []
 
-    def invoke(self, prompt: str) -> ReviewerRun:
+    def invoke(self, prompt: str, *, head_sha: str = "") -> ReviewerRun:
         self.prompts.append(prompt)
+        self.head_shas.append(head_sha)
         return self.run
 
     @property
