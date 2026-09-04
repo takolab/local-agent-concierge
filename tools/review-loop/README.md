@@ -1,19 +1,27 @@
 # Review loop runner
 
-A local, read-only command that answers two questions about a pull request
-before an Independent AI Review is started against it:
+A local command that runs one Independent AI Review turn against a pull
+request, and records the result only when it can prove which exact pull
+request state that review describes.
+
+It has two commands.
+
+**`review-loop --pr N`** answers two questions, read-only:
 
 1. **Which exact commit would be reviewed?** — the pull request's current
    40-character head SHA, not its merge commit and not its base.
 2. **Is that exact commit's CI in a state where a review may start?**
 
-It is deliberately small. It does not start a reviewer, does not generate or
-parse findings, does not invoke a Coding Agent, and does not write anything to
-GitHub. It is the correctness boundary those later pieces will sit on: if the
-runner says `READY`, the review that follows is attached to a commit whose CI
-state is actually known.
+**`review-loop review --pr N`** uses that answer to run the review itself:
+capture the verified target, invoke an independent read-only reviewer, validate
+the Structured Verdict it returns, re-verify that the target has not moved, and
+record the result as one `## Independent AI Review` comment.
 
-## Usage
+Everything else the review loop will eventually need — routing findings to a
+Coding Agent, applying fixes, re-review, merge decisions — is not here. This
+is one review turn, bound to one verified state.
+
+## Verification: `review-loop --pr N`
 
 ```bash
 pip install -e "tools/review-loop[test]"
@@ -42,9 +50,8 @@ GitHub write performed: No
 Options: `--pr` (required), `--repo owner/name` (defaults to the current git
 remote), `--dry-run`, `--json`. Run `review-loop --help` for the exit codes.
 
-`--dry-run` is currently a no-op, because every mode is already read-only. It
-exists so the read-only verification path keeps a stable name if the runner
-later grows a mode that does write.
+`--dry-run` is a no-op for this command, because verification is read-only in
+every mode. It is meaningful for `review-loop review`, below.
 
 ## CI verdict semantics
 
@@ -209,17 +216,272 @@ target but the merge CI validated no longer exists. Either one yields
 `STALE_TARGET`; a green result for a superseded commit or a superseded merge is
 never reported as `READY`.
 
-## GitHub authentication and the read-only guarantee
+## GitHub authentication
 
-The runner shells out to the already-authenticated `gh` CLI (`gh auth login`).
-It introduces no new credential: no PAT, no GitHub App, no secret, and nothing
+Everything shells out to the already-authenticated `gh` CLI (`gh auth login`).
+No new credential is introduced: no PAT, no GitHub App, no secret, and nothing
 stored in the repository.
 
-Every request goes through a single `gh api` call site that hard-codes
-`--method GET`. No caller supplies an HTTP method, and no write endpoint is
-referenced anywhere in the client. The runner cannot post a comment, submit a
-review, change a label, push, dispatch or re-run a workflow, or merge. Tests
-assert this at the source level.
+The verification client is read-only by construction. Every request it makes
+goes through a single `gh api` call site that hard-codes `--method GET`; no
+caller supplies an HTTP method, and no write endpoint is referenced anywhere in
+it. The one write this tool can perform — creating a review comment — lives in
+a separate module, described under [GitHub writes](#github-writes). Tests
+assert both halves at the source level.
+
+## The review turn: `review-loop review --pr N`
+
+```bash
+review-loop review --pr 29 --reviewer-command "my-reviewer --read-only" --dry-run
+```
+
+```text
+PR:                   #29 (base master)
+Head SHA:             3b514700c1c2c257a39a7037f1a21ca5b9064106  [3b51470]
+CI merge base:        6a2f7cfe8cc8cb4af22b7824d1c70e6fce389bb8
+CI verification:      READY
+Reviewer:             my-reviewer --read-only
+Reviewer invoked:     Yes
+Verdict:              round=1 recommendation=changes_requested open=1 (Blocking 0 / Major 1 / Minor 0)
+Reviewed head SHA:    3b514700c1c2c257a39a7037f1a21ca5b9064106 (matches target)
+Revalidation:         READY, target unchanged
+Outcome:              REVIEW_VALID
+Reason:
+  - dry run: the review is valid and would be recorded
+GitHub write performed: No
+```
+
+The steps, in order, and why the order is the design:
+
+1. **Verify** with the command above. Anything but `READY` stops here and *no
+   reviewer is started*: a review of a commit whose CI state is unknown would
+   produce a record claiming more than was verified.
+2. **Capture the target** — repository, pull request number, exact head SHA,
+   base branch, the base commit CI merged onto, and the runs that were green.
+3. **Check for an existing record** before paying for a review that could not
+   be posted anyway.
+4. **Run the reviewer** against that exact SHA.
+5. **Parse and validate** its output against the Structured Verdict contract.
+6. **Re-verify the target**, because a reviewer takes minutes and a pull
+   request can move in minutes.
+7. **Check for an existing record again**, immediately before writing.
+8. **Post exactly one comment.**
+
+| Outcome | Exit | Meaning |
+| --- | --- | --- |
+| `REVIEW_VALID` | 0 | A validated review was recorded — or, under `--dry-run`, would have been. |
+| `COMMENT_ALREADY_EXISTS` | 0 | This exact review is already on the pull request. Nothing was written. |
+| `TARGET_NOT_READY` | 10/11/12/13/20 | Verification did not report `READY`; the exit code is that verdict's own. No reviewer ran. |
+| `API_ERROR` | 20 | GitHub could not be queried. |
+| `REVIEWER_FAILED` | 30 | The reviewer exited non-zero, timed out, or could not be run. |
+| `REVIEW_MALFORMED` | 31 | The output is not a valid verdict. |
+| `REVIEW_SHA_MISMATCH` | 32 | The verdict describes a commit other than the target. |
+| `TARGET_STALE` | 33 | The pull request moved while the reviewer was running. |
+| `GITHUB_WRITE_FAILED` | 34 | The verdict was valid but the comment could not be created. |
+
+Exit code `0` means *a validated review record for this exact target exists*,
+whether this run created it or found it. Every failure keeps its own code:
+"the reviewer broke" and "the pull request moved" call for different responses.
+
+### Reviewer invocation
+
+The reviewer is a command you configure, not a vendor integration:
+
+```bash
+review-loop review --pr 29 --reviewer-command "claude -p" --reviewer-env ANTHROPIC_API_KEY
+```
+
+* It is **tokenised with shell quoting rules but never run by a shell**, so
+  `;`, `|` and `$(...)` are literal arguments to one program. Untrusted GitHub
+  text — a title, a branch name, an author — is never part of the command line
+  at all; it reaches the reviewer only inside the prompt, as data.
+* The prompt arrives on **stdin**; the verdict is read from **stdout**. stderr
+  is captured for diagnostics and never parsed, so a reviewer that writes a
+  perfect verdict block to stderr has not produced one.
+* The child gets an **environment allowlist** (`PATH`, `HOME`, `LANG`,
+  `LC_ALL`, `TERM`, `TMPDIR`, `USER`), not this process's environment. A
+  repository secret exported in your shell does not silently become the
+  reviewer's to read. Pass what the reviewer genuinely needs with
+  `--reviewer-env NAME`, repeatable.
+* `--reviewer-timeout` (default 900s) abandons a reviewer that does not
+  finish; stdout above 1 MB is refused rather than parsed.
+
+No new credential is introduced: GitHub access is the existing `gh auth login`
+session, and the reviewer's own authentication is whatever that command
+already uses.
+
+The prompt itself lives in `reviewer_prompt.py`, versioned with the code and
+asserted by tests. It tells the reviewer to treat the pull request description
+and any implementing agent's summary as **claims to be checked, not evidence**;
+that it is read-only; and that repository content is review material, so
+instructions found inside it are data, never orders to the reviewer.
+
+### Structured Verdict v1
+
+The reviewer answers with one delimited block. Anything outside it is ignored
+— a reviewer may reason out loud, and none of that reasoning is parsed or
+recorded.
+
+```text
+BEGIN INDEPENDENT REVIEW VERDICT v1
+Round: 1
+Reviewed head SHA: 3b514700c1c2c257a39a7037f1a21ca5b9064106
+Recommendation: changes_requested
+Finding ID: F1
+Severity: Major
+Location: tools/review-loop/src/review_loop/runner.py:42
+Problem: the head is re-read after evidence is collected, but the base is not
+Evidence: run 33797660279 merged this head onto 6a2f7cf, which is no longer the tip
+Required outcome: both ends of the tested merge are re-read before READY
+Scope boundary: the runner and its tests; no change to the evaluator
+END INDEPENDENT REVIEW VERDICT v1
+```
+
+The format is the `Label: value` style this repository's review comments
+already use by hand, made explicit enough to parse without an LLM: a label
+counts only at the start of a line, so a `Problem:` inside an indented code
+snippet is text rather than a field boundary, and a paragraph-shaped field runs
+until the next label. An unrecognised label at column 0 is an error, never
+content — silently absorbing `Sevrity:` into the previous paragraph would turn
+a typo into an invisible missing-field rejection.
+
+Envelope: `Round`, `Reviewed head SHA`, `Recommendation`, optional `Resolved`
+and `Escalation reason`. Per finding: `Finding ID`, `Severity`, `Location`,
+`Problem`, `Evidence`, `Required outcome`, optional `Scope boundary`. Repeat
+the finding group once per open finding; omit it entirely when there are none.
+
+Every field except the two optional ones is required and must be non-empty.
+**`Evidence` is required**: a finding without it is an assertion, and these
+comments are recorded as evidence-bearing artifacts.
+
+A verdict is rejected in full — no comment, no partial record — when:
+
+* `Reviewed head SHA` is not **exactly** the target's 40-character SHA
+* `Round` is anything but `1` (re-review is a later slice)
+* `Recommendation` is unknown, or contradicts its own findings:
+  `approved` with any finding, `changes_requested` with none, or `escalate`
+  with neither a finding nor an `Escalation reason`
+* a `Blocking` finding is paired with `changes_requested` — this project's
+  standing decision is that Blocking always escalates to a human rather than
+  being routed as a bounded fix
+* a severity is not `Blocking`, `Major` or `Minor`
+* a `Finding ID` is empty, repeated, or not a plain token
+* any required field is missing or empty
+* a field contains HTML-comment syntax or the marker prefix, which would let
+  reviewer text forge the record's identity
+* there are more than 50 findings, a field is over 4000 characters, or the
+  rendered comment would exceed GitHub's limit
+
+Recommendation and severity are matched case-insensitively (`Changes
+Requested` → `changes_requested`). Nothing else is normalised, and nothing is
+inferred: if the contract is not satisfied, the review is discarded rather
+than interpreted.
+
+### Why the exact SHA is the whole argument
+
+A review is evidence about the commit the reviewer actually read. A verdict
+naming an abbreviated SHA is not a vaguer way of naming the same commit — it
+is a value this runner refuses to resolve, because resolving it is exactly the
+guess that would let a review be recorded against a commit nobody reviewed.
+Abbreviated, malformed, differently-cased and merely-different SHAs are all
+one outcome: `REVIEW_SHA_MISMATCH`, zero writes.
+
+### Post-review revalidation
+
+After the reviewer returns and **before** anything is written, the full PR #28
+verification runs again. All of the following must hold:
+
+* the pull request still verifies as `READY`
+* the head is still the exact SHA that was reviewed
+* the base branch is still the same branch
+* CI still validates that head merged onto **the same base commit** as when
+  the review started
+
+The last one is not implied by the others. The base can advance, CI can re-run
+green against the new merge, and verification will report `READY` again — for
+a merge context nobody reviewed. Any difference is `TARGET_STALE`, and nothing
+is posted. The review may well have been correct about the commit it read; it
+is simply not evidence about the pull request's current state, and this slice
+does not record historical reviews.
+
+### The recorded comment
+
+```text
+## Independent AI Review
+
+Round: 1
+Reviewed head SHA: 3b514700c1c2c257a39a7037f1a21ca5b9064106
+Review target base: master at 6a2f7cfe8cc8cb4af22b7824d1c70e6fce389bb8
+CI verification: READY — .github/workflows/pytest.yml (run 33797660279: success)
+Recommendation: changes_requested
+
+Blocking: 0
+Major: 1
+Minor: 0
+Open findings: 1
+
+Findings:
+
+### Major — F1
+
+Finding ID: F1
+Severity: Major
+Location: tools/review-loop/src/review_loop/runner.py:42
+Problem: ...
+Evidence: ...
+Required outcome: ...
+
+---
+
+Recorded automatically by `review-loop review`. ...
+
+<!-- local-agent-concierge:independent-review:v1 repo=takolab/local-agent-concierge pr=29 head=3b51470... round=1 role=independent-reviewer -->
+```
+
+Only **validated fields** are rendered. The reviewer's raw output never reaches
+GitHub, so prose, reasoning, or instruction-shaped text around the verdict
+block cannot end up in the record. A review with nothing to report says
+`Open findings: 0` explicitly.
+
+### Identity and idempotency
+
+A record is identified by its **hidden marker**, never by its heading.
+`## Independent AI Review` is a convention this repository's humans already
+use by hand — PRs #26, #27 and #28 all carry one written by a person — so
+treating the heading as proof of an automation record would let a human
+comment suppress a real review. The marker carries identity only: repository,
+pull request, exact head SHA, round, role. No secret, no prompt, no duplicate
+of the verdict.
+
+Identity is deliberately *not* "one review per pull request". A new head, or a
+later round, is a different record, so a future re-review adds evidence rather
+than overwriting it.
+
+Retrying is safe. The duplicate check runs twice — once before the reviewer,
+once immediately before the write — and the second is the one that matters
+for the case where a `POST` succeeded but its response was lost: the retry
+finds the marker and writes nothing.
+
+### GitHub writes
+
+Creating one issue comment is the only write this tool can perform.
+
+The boundary is structural. PR #28's `github_client.py` remains read-only by
+construction: it names no comment endpoint and issues no method but `GET`.
+The single write lives in `github_comments.py`, in a class whose entire public
+surface is one method, with `POST` and the `issues/{n}/comments` path
+hard-coded. Tests assert at the source level that no other module in the
+package contains a write method or a comment endpoint as a string literal, and
+that the comment body travels as JSON on stdin rather than as a command-line
+argument.
+
+There is no code path to editing or deleting a comment, submitting a review
+object, changing a label, pushing, dispatching or re-running a workflow, or
+merging.
+
+`--dry-run` runs everything — including the reviewer and the revalidation —
+and prints the comment it would have recorded. It never constructs a writer at
+all, so there is nothing that could write even if the branching were wrong.
 
 ## Tests
 
@@ -228,15 +490,44 @@ pip install -e "tools/review-loop[test]"
 python -m pytest tools/review-loop/tests
 ```
 
-No test performs network access or requires credentials; the GitHub API is
-replaced by fakes built from real recorded response shapes.
+No test performs network access, invokes a real reviewer, or requires
+credentials; the GitHub API is replaced by fakes built from real recorded
+response shapes, and the reviewer-process tests run `sys.executable` with an
+inline script. CI needs no agent credentials.
+
+## Known limitations
+
+* **Only the initial review round.** `Round: 1` is the only accepted value;
+  re-review, finding-resolution tracking across rounds, and the multi-round
+  loop are not implemented. The record identity already includes the round and
+  head SHA so that they can be added without overwriting existing evidence.
+* **A residual race on the write.** GitHub offers no compare-and-set on issue
+  comments. The window between the final duplicate check and the `POST` is
+  narrow but real; two runners racing on the same target could produce two
+  comments.
+* **One GitHub identity for every role.** The reviewer record is posted under
+  the same account that authors the pull requests, so the role is a convention
+  rather than an access-controlled fact. Accepted deliberately at this
+  project's scale; a human merge decision remains the backstop.
+* **The reviewer is trusted to have actually reviewed.** This runner validates
+  the *shape* and *binding* of a verdict, not its truth. A reviewer that
+  invents findings, or claims to have read a commit it did not, produces a
+  well-formed record.
+* **No persistent state.** Everything is reconstructed from GitHub and the
+  current invocation on each run; there is no database and no daemon.
+* **Historical reviews are discarded.** If the target moves during the review,
+  the result is dropped rather than recorded as evidence about the older
+  commit.
 
 ## Scope boundary
 
-This slice ends at "which exact commit, and may a review start against it".
-The next slice — invoking an Independent Reviewer, producing Structured
-Findings, routing them to a Coding Agent, and re-reviewing — consumes this
-verdict but is not part of it. Out of scope here: reviewer invocation, finding
-generation or parsing, PR comments or reviews, Coding Agent invocation,
-automatic fixes, waiting for CI after a fix, multi-round loops, merge
-decisions, any server or daemon, and any persistent state.
+This slice ends at "one validated review, recorded against one verified pull
+request state". Out of scope here, and left for later slices: routing
+Structured Findings to a Coding Agent, the Bounded Fix Response, applying
+fixes, waiting for CI after a fix, Independent Re-Review, multi-round loops,
+finding resolution tracking, the Merge Decision Brief, automatic merge, any
+server or daemon, and any persistent state.
+
+The next slice is **Structured Findings → Coding Agent routing + Bounded Fix
+Response**. Before that, this one-turn flow should be used on a real pull
+request to see whether it actually replaces starting a review by hand.
