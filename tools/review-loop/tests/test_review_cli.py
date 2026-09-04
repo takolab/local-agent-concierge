@@ -260,3 +260,16 @@ def test_json_output_never_abbreviates_a_sha_it_reports_as_an_identity():
     assert len(payload["target"]["head_sha"]) == 40
     assert len(payload["target"]["ci_merge_base_sha"]) == 40
     assert len(payload["verdict"]["reviewed_head_sha"]) == 40
+
+
+def test_an_unready_pull_request_still_reports_which_commit_it_looked_at():
+    client = FakeGitHubClient(
+        pull_requests=[pull_request_payload(number=27, head_sha=FULL_SHA)],
+        runs=[run_payload(run_id=1, status="in_progress", conclusion=None)],
+        changed_files=("README.md",),
+    )
+
+    _, output = _run(BASE_ARGV, client=client)
+
+    assert f"Head SHA:             {FULL_SHA}" in output
+    assert "(not resolved)" not in output

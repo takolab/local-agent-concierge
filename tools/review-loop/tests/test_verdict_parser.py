@@ -189,3 +189,10 @@ def test_a_bare_label_with_no_value_parses_as_empty_rather_than_absent():
     )
 
     assert parsed.envelope["Round"] == ""
+
+
+def test_the_space_after_a_label_is_optional():
+    parsed = parse(_block(f"Round:1\nReviewed head SHA:  {FULL_SHA}\nRecommendation: approved"))
+
+    assert parsed.envelope["Round"] == "1"
+    assert parsed.envelope["Reviewed head SHA"] == FULL_SHA

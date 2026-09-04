@@ -143,15 +143,30 @@ def _verdict_summary(result: ReviewResult) -> str:
 
 def render_text(result: ReviewResult, stream: TextIO, *, reviewer_label: str) -> None:
     target = result.target
-    if target is None:
-        print("PR:                   (not resolved)", file=stream)
-    else:
+    # A run that stops before the target is captured -- an unready pull
+    # request, most often -- still knows which commit it was looking at, and
+    # that is the first thing a reader wants to see.
+    verified = result.pre_evaluation.target if result.pre_evaluation else None
+
+    if target is not None:
         print(f"PR:                   #{target.number} (base {target.base_ref})", file=stream)
         print(
             f"Head SHA:             {target.head_sha}  [{short_sha(target.head_sha)}]",
             file=stream,
         )
         print(f"CI merge base:        {target.ci_merge_base_sha}", file=stream)
+    elif verified is not None:
+        print(
+            f"PR:                   #{verified.number} "
+            f"({verified.head_ref} -> {verified.base_ref})",
+            file=stream,
+        )
+        print(
+            f"Head SHA:             {verified.head_sha}  [{short_sha(verified.head_sha)}]",
+            file=stream,
+        )
+    else:
+        print("PR:                   (not resolved)", file=stream)
 
     pre = result.pre_evaluation
     print(

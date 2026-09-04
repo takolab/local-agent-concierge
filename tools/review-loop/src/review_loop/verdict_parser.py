@@ -51,7 +51,7 @@ _FINDING_OPENER = "Finding ID"
 
 #: A line that looks like it is trying to be a label. Deliberately broader
 #: than the known vocabulary so that a misspelled label fails loudly.
-_LABEL_SHAPED = re.compile(r"\A([A-Za-z][A-Za-z ]{0,40}):(?: (.*))?\Z")
+_LABEL_SHAPED = re.compile(r"\A([A-Za-z][A-Za-z ]{0,40}):[ \t]*(.*)\Z")
 
 
 @dataclass
@@ -163,7 +163,7 @@ def parse(output: str) -> RawVerdict:
             )
 
         current_label = label
-        buffer = [match.group(2) or ""]
+        buffer = [match.group(2)]
 
         single_line = _ENVELOPE_LABELS.get(label, _FINDING_LABELS.get(label, False))
         if single_line:
