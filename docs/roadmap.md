@@ -1044,7 +1044,9 @@ containerized runtime. The first entry is
 request's exact head SHA, verifies whether that commit's GitHub Actions CI
 allows a review to start, and — with `review-loop review` — runs one
 Independent AI Review turn against that exact state, recording the validated
-verdict as a single pull request comment.
+verdict as a single pull request comment. Its first live end-to-end run against a
+real pull request and a real AI reviewer is recorded in
+[`docs/delegated-development/review-loop-live-experiment-1.md`](delegated-development/review-loop-live-experiment-1.md).
 
 ## Branch Naming
 
