@@ -1047,6 +1047,12 @@ Independent AI Review turn against that exact state, recording the validated
 verdict as a single pull request comment. Its first live end-to-end run against a
 real pull request and a real AI reviewer is recorded in
 [`docs/delegated-development/review-loop-live-experiment-1.md`](delegated-development/review-loop-live-experiment-1.md).
+That run found that the runner bound the verdict to an exact SHA but not the
+reviewer's working directory; the workspace-binding refinement that closed the
+gap was then validated live against a pull request in another repository, in
+[`docs/delegated-development/review-loop-live-experiment-2.md`](delegated-development/review-loop-live-experiment-2.md),
+which supports progressing to the next bounded slice — Structured Findings →
+Coding Agent routing.
 
 ## Branch Naming
 
