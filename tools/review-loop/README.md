@@ -373,7 +373,9 @@ So the reviewer's working directory is now part of the review target:
 * **By default the runner prepares one.** It fetches `refs/pull/N/head` from
   the remote, checks that the ref resolves to exactly the verified target SHA,
   creates a detached `git worktree` at that commit, runs the reviewer there,
-  and removes the worktree afterwards — including when the reviewer raises or
+  and removes the worktree afterwards. A fresh worktree holds only the
+  commit's own files, so none of the leftovers described below can be in it —
+  whatever the repository you invoked from happens to contain — including when the reviewer raises or
   the turn fails. The operator supplies nothing. They *cannot* usefully supply
   it: the target SHA is not known until verification has already run, so a
   directory chosen in advance is one chosen before anyone knows which commit
@@ -381,10 +383,23 @@ So the reviewer's working directory is now part of the review target:
 * **`--reviewer-cwd` replaces that with a directory you control** — a
   pre-warmed checkout, a container mount — and it is verified rather than
   trusted. It must be a git work tree, its `HEAD` must be exactly the target
-  SHA, and `git status --porcelain --untracked-files=all` must be empty.
-  Uncommitted edits and untracked files both count: the first is code that is
-  not in the pull request, the second is a file a reviewer can still open and
-  cite.
+  SHA, `git status --porcelain --untracked-files=all` must be empty, and
+  `git ls-files --others --ignored --exclude-standard` must be empty too.
+
+  All three kinds of leftover count, for the same reason and with different
+  remedies. Uncommitted edits are code that is not in the pull request.
+  Untracked files are files a reviewer can open and cite. And **git-ignored
+  files are neither reported by `git status` nor invisible to a reviewer** —
+  a `.env` sitting in a checkout is exactly as readable as any other file.
+  That last one is why the check is two commands rather than one: this
+  repository's `.gitignore` covers `.env`, `credentials.json`, `token.json`,
+  `*.pem` and `*.key`, so on this path the files it catches are precisely the
+  ones that must not reach a reviewer.
+
+  This makes `--reviewer-cwd` strict — an everyday working checkout with a
+  virtualenv or a real `.env` in it will be refused. That is the intended
+  direction: the prepared worktree is the ergonomic path, and the override is
+  for a workspace you have deliberately made clean.
 
 Any failure is `REVIEWER_WORKSPACE_INVALID` (35), raised **before** the
 reviewer starts. It is deliberately not `REVIEWER_FAILED`: nothing ran, and

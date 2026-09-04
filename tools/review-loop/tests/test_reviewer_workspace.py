@@ -57,7 +57,9 @@ def origin(tmp_path):
     seed.mkdir()
     git(seed, "init", "--quiet")
     (seed / "README.md").write_text("first\n")
-    git(seed, "add", "README.md")
+    # Mirrors this repository's own .gitignore, which covers credentials.
+    (seed / ".gitignore").write_text(".env\ncredentials.json\ndata/\n")
+    git(seed, "add", "README.md", ".gitignore")
     git(seed, "commit", "--quiet", "-m", "first")
     git(seed, "remote", "add", "origin", str(bare))
     git(seed, "push", "--quiet", "origin", "HEAD:refs/heads/master")
@@ -140,6 +142,44 @@ def test_an_abbreviated_target_is_refused_rather_than_resolved(clone):
         verify_checkout(str(clone), head_of(clone)[:7])
 
 
+def test_a_git_ignored_file_is_refused(clone):
+    """"Ignored by git" and "invisible to the reviewer" are different claims.
+
+    `git status` says nothing about ignored files, so a checkout at exactly
+    the target SHA can still have a `.env` sitting in it. The reviewer can
+    open it and cite it, and this repository's .gitignore covers `.env`,
+    `credentials.json`, `token.json`, `*.pem` and `*.key`.
+    """
+    (clone / ".env").write_text("SLACK_BOT_TOKEN=xoxb-not-a-real-token\n")
+
+    with pytest.raises(WorkspaceError, match="git-ignored path"):
+        verify_checkout(str(clone), head_of(clone))
+
+
+def test_the_refusal_names_the_ignored_paths_but_not_their_contents(clone):
+    (clone / "credentials.json").write_text('{"refresh_token": "secret"}\n')
+
+    with pytest.raises(WorkspaceError) as caught:
+        verify_checkout(str(clone), head_of(clone))
+
+    message = str(caught.value)
+    assert "credentials.json" in message
+    assert "secret" not in message, "a path is safe to print; its contents are not"
+
+
+def test_an_ignored_directory_is_refused(clone):
+    (clone / "data").mkdir()
+    (clone / "data" / "calendar.db").write_text("personal data\n")
+
+    with pytest.raises(WorkspaceError, match="git-ignored path"):
+        verify_checkout(str(clone), head_of(clone))
+
+
+def test_a_checkout_with_no_ignored_files_is_still_accepted(clone):
+    """The check must not reject every ordinary clean checkout."""
+    verify_checkout(str(clone), head_of(clone))
+
+
 # --------------------------------------------------------------------------
 # ExistingWorkspace
 # --------------------------------------------------------------------------
@@ -159,6 +199,18 @@ def test_an_existing_workspace_refuses_before_yielding(clone, origin):
             entered = True
 
     assert entered is False, "the reviewer must not run in an unverified directory"
+
+
+def test_an_existing_workspace_refuses_an_ignored_file_before_yielding(clone):
+    """The override path is the one exposed to this, so it is pinned here."""
+    (clone / ".env").write_text("SECRET=1\n")
+    entered = False
+
+    with pytest.raises(WorkspaceError, match="git-ignored path"):
+        with ExistingWorkspace(str(clone)).open(head_of(clone)):
+            entered = True
+
+    assert entered is False
 
 
 # --------------------------------------------------------------------------
@@ -265,3 +317,21 @@ def test_no_reviewer_runs_when_the_workspace_cannot_be_bound(clone, origin):
         )
 
     assert inner.cwds == [], "the reviewer must not be started at all"
+
+
+def test_a_prepared_worktree_is_unaffected_by_the_invoking_checkout(clone, origin):
+    """The default path is not exposed to this, and must not become so.
+
+    The repository the runner is invoked from routinely holds ignored files --
+    a real `.env`, a virtualenv, caches. A prepared worktree is a fresh
+    checkout of the target commit, with none of that layered on top, so the
+    stricter check costs the default path nothing.
+    """
+    (clone / ".env").write_text("SECRET=1\n")
+    (clone / "credentials.json").write_text("{}\n")
+    sha = publish_pull_request(origin, 18)
+
+    with PreparedWorkspace(str(clone), 18).open(sha) as path:
+        assert head_of(path) == sha
+        assert not os.path.exists(os.path.join(path, ".env"))
+        assert not os.path.exists(os.path.join(path, "credentials.json"))

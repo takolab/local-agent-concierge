@@ -27,8 +27,10 @@ Two ways to satisfy it, both ending in the same verification:
   nothing for them to get wrong.
 * :class:`ExistingWorkspace` -- ``--reviewer-cwd``, for a workspace the
   operator controls deliberately (a pre-warmed checkout, a container mount).
-  It is now *verified* rather than trusted: wrong commit, or a dirty tree,
-  and the run stops before the reviewer starts.
+  It is now *verified* rather than trusted: wrong commit, dirty tree, or a
+  git-ignored file layered on top, and the run stops before the reviewer
+  starts. Ignored files count because "ignored by git" and "invisible to the
+  reviewer" are different claims, and this repository ignores credentials.
 
 **This is still not a sandbox**, and enforcing this invariant does not make
 it one. The reviewer remains an ordinary child process with the invoking
@@ -149,6 +151,32 @@ def verify_checkout(path: str, head_sha: str, *, timeout: float = DEFAULT_GIT_TI
             f"the reviewer working directory {path!r} is at the review target "
             f"{head_sha} but has {changed} uncommitted or untracked path(s); the "
             "reviewer would read code that is not in this pull request"
+        )
+
+    # `git status` says nothing about ignored files, and "ignored by git" does
+    # not mean "invisible to the reviewer": an ignored file is as readable as
+    # any other. It is a separate question from the one above, so it gets its
+    # own command and its own message -- and the remedy differs, because the
+    # answer to a stray `.env` is never "commit it".
+    #
+    # This repository's own .gitignore covers `.env`, `credentials.json`,
+    # `token.json`, `*.pem` and `*.key`, so on the override path the files
+    # this catches are exactly the ones that must not reach a reviewer. A
+    # prepared worktree is unaffected: it is a fresh checkout with nothing
+    # layered on top.
+    ignored = _git(
+        ["ls-files", "--others", "--ignored", "--exclude-standard"],
+        cwd=path,
+        timeout=timeout,
+    )
+    if ignored:
+        paths = ignored.splitlines()
+        shown = ", ".join(paths[:3]) + (", ..." if len(paths) > 3 else "")
+        raise WorkspaceError(
+            f"the reviewer working directory {path!r} is at the review target "
+            f"{head_sha} but contains {len(paths)} git-ignored path(s) ({shown}); "
+            "they are not in this pull request and the reviewer can still read "
+            "them, and this repository ignores credential files"
         )
 
 
