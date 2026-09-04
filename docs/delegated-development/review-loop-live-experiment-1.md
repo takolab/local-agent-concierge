@@ -80,8 +80,14 @@ Reason:
 GitHub write performed: No
 ```
 
-Exit code 10, no reviewer started. After CI completed (11:38:52Z →
-11:42:01Z, about 3 minutes), the same command reported:
+Exit code 10. Note what this does and does not show: this is the
+verification-only command, which has no reviewer invocation path at all, so
+"no reviewer started" is a property of the command rather than something
+this run demonstrated about the review turn's gating. `review-loop review`
+was not run against a `PENDING` target — see the limitations below.
+
+After CI completed (11:38:52Z → 11:42:01Z, about 3 minutes), the same
+command reported:
 
 ```text
 Head SHA:             ae9869c986c73ac373bbc5ec307ea31356632ba5  [ae9869c]
@@ -280,11 +286,13 @@ risk — "a reviewer that invents findings or claims to have read a commit it
 did not produces a well-formed record" — and this is the concrete, easily
 triggered instance of it.
 
-**Everything else behaved as documented.** `PENDING` fail-closed with no
-reviewer started, path-filter explanations on a live diff, first-attempt
-verdict validation, exact SHA binding, unchanged-target revalidation,
-single-comment write, and pre-reviewer duplicate suppression all worked on
-the first live attempt, with no change to the PR #29 contract.
+**Everything else behaved as documented.** Verification's `PENDING`
+fail-closed, path-filter explanations on a live diff, first-attempt verdict
+validation, exact SHA binding, unchanged-target revalidation, single-comment
+write, and pre-reviewer duplicate suppression all worked on the first live
+attempt, with no change to the PR #29 contract. Every one of those was
+observed on the review turn itself except the `PENDING` result, which came
+from the verification-only command.
 
 **Unexpected behaviour.** None. No malformed verdict, no SHA mismatch, no
 stale target, no timeout, no API error, and no unexplained output across
@@ -301,6 +309,12 @@ the four runs.
   particular, no real reviewer has yet been observed *failing* to produce a
   valid verdict, so the claim "a real reviewer returns a Structured Verdict
   reliably" rests on two invocations.
+- **`TARGET_NOT_READY` was not exercised live either.** The `PENDING`
+  observation in Step 1 used the verification-only command. Every
+  `review-loop review` invocation in this experiment ran against an already
+  `READY` target, so the review turn's own refusal to start a reviewer while
+  the target is not `READY` remains test-covered rather than
+  live-exercised.
 - **"Independent" is bounded.** The reviewer ran in a fresh process with a
   fresh context and no knowledge of the implementing session, which is the
   independence the prompt asks for. It is not vendor independence: the
