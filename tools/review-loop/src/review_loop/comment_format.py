@@ -40,6 +40,7 @@ _MARKER_PATTERN = re.compile(
     + r"\s+repo=(?P<repo>\S+)"
     r"\s+pr=(?P<pr>\d+)"
     r"\s+head=(?P<head>[0-9a-f]{40})"
+    r"\s+base=(?P<base>[0-9a-f]{40})"
     r"\s+round=(?P<round>\d+)"
     r"\s+role=(?P<role>[a-z-]+)"
     r"\s*-->"
@@ -53,16 +54,27 @@ class RecordIdentity:
     Deliberately not "one review per pull request": the same pull request with
     a new head, or a later round, is a different record. Re-review has to be
     able to add evidence without erasing what came before.
+
+    ``base_sha`` is here for the same reason the rest of this package treats
+    the review target as a merge context rather than a commit. Without it, a
+    review of ``H`` merged onto ``B1`` would suppress a review of the very
+    same ``H`` merged onto ``B2`` -- and the second is a different integration
+    state, verified by different CI, that no reviewer has looked at. The
+    post-review revalidation already refuses to conflate the two; identity has
+    to agree with it, or the duplicate check quietly reintroduces exactly the
+    stale-evidence case revalidation exists to prevent.
     """
 
     repo: str
     number: int
     head_sha: str
+    base_sha: str
     round: int
     role: str = REVIEWER_ROLE
 
     def __post_init__(self) -> None:
         require_full_sha(self.head_sha, label="record identity head sha")
+        require_full_sha(self.base_sha, label="record identity base sha")
 
 
 def identity_for(target: ReviewTarget, verdict: ReviewVerdict) -> RecordIdentity:
@@ -70,6 +82,7 @@ def identity_for(target: ReviewTarget, verdict: ReviewVerdict) -> RecordIdentity
         repo=target.repo,
         number=target.number,
         head_sha=verdict.reviewed_head_sha,
+        base_sha=target.ci_merge_base_sha,
         round=verdict.round,
     )
 
@@ -82,7 +95,8 @@ def marker(identity: RecordIdentity) -> str:
     """
     return (
         f"<!-- {_MARKER_PREFIX}:{_MARKER_VERSION} repo={identity.repo} "
-        f"pr={identity.number} head={identity.head_sha} round={identity.round} "
+        f"pr={identity.number} head={identity.head_sha} "
+        f"base={identity.base_sha} round={identity.round} "
         f"role={identity.role} -->"
     )
 
@@ -96,6 +110,7 @@ def parse_markers(body: str) -> tuple[RecordIdentity, ...]:
                 repo=match.group("repo"),
                 number=int(match.group("pr")),
                 head_sha=match.group("head"),
+                base_sha=match.group("base"),
                 round=int(match.group("round")),
                 role=match.group("role"),
             )
@@ -140,7 +155,7 @@ def render(target: ReviewTarget, verdict: ReviewVerdict) -> str:
         "",
         f"Round: {verdict.round}",
         f"Reviewed head SHA: {verdict.reviewed_head_sha}",
-        f"Review target base: {target.base_ref} at {target.ci_merge_base_sha}",
+        f"CI integration base: {target.base_ref} at {target.ci_merge_base_sha}",
         f"CI verification: READY — {evidence}",
         f"Recommendation: {verdict.recommendation.value}",
         "",

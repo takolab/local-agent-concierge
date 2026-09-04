@@ -303,12 +303,32 @@ review-loop review --pr 29 --reviewer-command "claude -p" --reviewer-env ANTHROP
   repository secret exported in your shell does not silently become the
   reviewer's to read. Pass what the reviewer genuinely needs with
   `--reviewer-env NAME`, repeatable.
+
+**This is not a sandbox.** `--reviewer-command` names a *trusted, read-only
+reviewer wrapper that you choose*. The reviewer runs as an ordinary child
+process with your filesystem permissions, and `HOME` and `PATH` are on the
+allowlist because a real reviewer needs them — which also means it can reach
+`~/.config/gh`, `~/.ssh` and any tool on your path. A reviewer command that
+decided to push, comment or merge could. "Read-only" here is an instruction in
+the prompt plus a property of the command you configure; it is not a capability
+boundary this tool enforces. Enforcing one — a sandboxed, credential-less
+worktree — is a deliberate later change, not something this slice pretends to
+have done.
 * `--reviewer-timeout` (default 900s) abandons a reviewer that does not
   finish; stdout above 1 MB is refused rather than parsed.
 
 No new credential is introduced: GitHub access is the existing `gh auth login`
 session, and the reviewer's own authentication is whatever that command
 already uses.
+
+The prompt draws a line the rest of this tool depends on: the **review scope**
+is the pull request's own change set — the diff GitHub shows, from where the
+branch diverged to the head — while the CI base commit is **integration
+context** only. They are not the same commit. `ci_merge_base_sha` is the
+base-side commit CI merged the head onto, not necessarily the branch's fork
+point, so once the base has advanced, diffing it directly against the head
+would present base-only changes as though this pull request had made them.
+The prompt says so explicitly, and tells the reviewer not to take that diff.
 
 The prompt itself lives in `reviewer_prompt.py`, versioned with the code and
 asserted by tests. It tells the reviewer to treat the pull request description
@@ -411,7 +431,7 @@ does not record historical reviews.
 
 Round: 1
 Reviewed head SHA: 3b514700c1c2c257a39a7037f1a21ca5b9064106
-Review target base: master at 6a2f7cfe8cc8cb4af22b7824d1c70e6fce389bb8
+CI integration base: master at 6a2f7cfe8cc8cb4af22b7824d1c70e6fce389bb8
 CI verification: READY — .github/workflows/pytest.yml (run 33797660279: success)
 Recommendation: changes_requested
 
@@ -435,7 +455,7 @@ Required outcome: ...
 
 Recorded automatically by `review-loop review`. ...
 
-<!-- local-agent-concierge:independent-review:v1 repo=takolab/local-agent-concierge pr=29 head=3b51470... round=1 role=independent-reviewer -->
+<!-- local-agent-concierge:independent-review:v1 repo=takolab/local-agent-concierge pr=29 head=3b51470... base=6a2f7cf... round=1 role=independent-reviewer -->
 ```
 
 Only **validated fields** are rendered. The reviewer's raw output never reaches
@@ -450,12 +470,22 @@ A record is identified by its **hidden marker**, never by its heading.
 use by hand — PRs #26, #27 and #28 all carry one written by a person — so
 treating the heading as proof of an automation record would let a human
 comment suppress a real review. The marker carries identity only: repository,
-pull request, exact head SHA, round, role. No secret, no prompt, no duplicate
-of the verdict.
+pull request, exact head SHA, **the base commit CI merged that head onto**,
+round, role. No secret, no prompt, no duplicate of the verdict.
 
-Identity is deliberately *not* "one review per pull request". A new head, or a
-later round, is a different record, so a future re-review adds evidence rather
-than overwriting it.
+Identity is deliberately *not* "one review per pull request". A new head, a new
+integration base, or a later round is a different record, so a future
+re-review adds evidence rather than overwriting it.
+
+The base commit is part of identity for the same reason the target is a merge
+context rather than a commit. Without it, this happens: a review is recorded
+for head `H` on base `B1`; `master` advances to `B2`; CI re-runs green for `H`
+merged onto `B2`; the next run finds the old marker and reports
+`COMMENT_ALREADY_EXISTS`. The tool would be claiming the current state is
+reviewed, when the recorded review is evidence about a different integration
+state. Post-review revalidation already refuses to conflate those two, so
+identity has to agree with it — otherwise the duplicate check quietly
+reintroduces the very stale-evidence case revalidation exists to prevent.
 
 Retrying is safe. The duplicate check runs twice — once before the reviewer,
 once immediately before the write — and the second is the one that matters
@@ -464,9 +494,11 @@ finds the marker and writes nothing.
 
 ### GitHub writes
 
-Creating one issue comment is the only write this tool can perform.
+Creating one issue comment is the only write **this package** performs. The
+scope of that claim matters: it covers the Python code here, not the reviewer
+subprocess, which runs with your own permissions as described above.
 
-The boundary is structural. PR #28's `github_client.py` remains read-only by
+Within that scope the boundary is structural. PR #28's `github_client.py` remains read-only by
 construction: it names no comment endpoint and issues no method but `GET`.
 The single write lives in `github_comments.py`, in a class whose entire public
 surface is one method, with `POST` and the `issues/{n}/comments` path
@@ -475,9 +507,9 @@ package contains a write method or a comment endpoint as a string literal, and
 that the comment body travels as JSON on stdin rather than as a command-line
 argument.
 
-There is no code path to editing or deleting a comment, submitting a review
-object, changing a label, pushing, dispatching or re-running a workflow, or
-merging.
+No code path in this package leads to editing or deleting a comment,
+submitting a review object, changing a label, pushing, dispatching or
+re-running a workflow, or merging.
 
 `--dry-run` runs everything — including the reviewer and the revalidation —
 and prints the comment it would have recorded. It never constructs a writer at
@@ -509,10 +541,14 @@ inline script. CI needs no agent credentials.
   the same account that authors the pull requests, so the role is a convention
   rather than an access-controlled fact. Accepted deliberately at this
   project's scale; a human merge decision remains the backstop.
-* **The reviewer is trusted to have actually reviewed.** This runner validates
-  the *shape* and *binding* of a verdict, not its truth. A reviewer that
-  invents findings, or claims to have read a commit it did not, produces a
-  well-formed record.
+* **The reviewer is trusted, in two ways.** It is trusted to have actually
+  reviewed — this runner validates the *shape* and *binding* of a verdict, not
+  its truth, so a reviewer that invents findings or claims to have read a
+  commit it did not produces a well-formed record. And it is trusted not to
+  write: it runs as an ordinary child process with the invoking user's
+  permissions and can reach `~/.config/gh` and `~/.ssh` through `HOME`. The
+  structural write guarantee covers this package, not the command you point it
+  at. A sandboxed, credential-less reviewer worktree is a later change.
 * **No persistent state.** Everything is reconstructed from GitHub and the
   current invocation on each run; there is no database and no daemon.
 * **Historical reviews are discarded.** If the target moves during the review,

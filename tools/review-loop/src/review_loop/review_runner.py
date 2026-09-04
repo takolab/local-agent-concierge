@@ -126,7 +126,11 @@ def run_review(
         )
 
     identity = comment_format.RecordIdentity(
-        repo=repo, number=target.number, head_sha=target.head_sha, round=SUPPORTED_ROUND
+        repo=repo,
+        number=target.number,
+        head_sha=target.head_sha,
+        base_sha=target.ci_merge_base_sha,
+        round=SUPPORTED_ROUND,
     )
 
     # 2. Cheap early exit: if this exact review is already recorded, running a

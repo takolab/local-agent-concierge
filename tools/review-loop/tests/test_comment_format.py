@@ -33,11 +33,12 @@ def _verdict(**kwargs):
     return validate(parse(verdict_text(**kwargs)), target_head_sha=FULL_SHA)
 
 
-def _identity(head_sha=FULL_SHA, number=29, round_number=1):
+def _identity(head_sha=FULL_SHA, number=29, round_number=1, base_sha=BASE_TIP):
     return RecordIdentity(
         repo="takolab/local-agent-concierge",
         number=number,
         head_sha=head_sha,
+        base_sha=base_sha,
         round=round_number,
     )
 
@@ -56,7 +57,7 @@ def test_the_comment_shows_the_exact_reviewed_head_sha():
 def test_the_comment_shows_the_verified_merge_context_and_ci_evidence():
     body = render(TARGET, _verdict())
 
-    assert f"Review target base: master at {BASE_TIP}" in body
+    assert f"CI integration base: master at {BASE_TIP}" in body
     assert "CI verification: READY" in body
     assert f"{BASELINE_PATH} (run 33797660279: success)" in body
 
@@ -133,6 +134,7 @@ def test_the_marker_carries_identity_only():
     assert "takolab/local-agent-concierge" in line
     assert "pr=29" in line
     assert f"head={FULL_SHA}" in line
+    assert f"base={BASE_TIP}" in line
     assert "round=1" in line
     assert line.startswith("<!--") and line.endswith("-->")
 
@@ -148,6 +150,13 @@ def test_a_different_round_is_a_different_record():
     body = render(TARGET, _verdict())
 
     assert not body_records(body, _identity(round_number=2))
+
+
+def test_a_different_merge_base_is_a_different_record():
+    """Same head, different integration state: nobody has reviewed that one."""
+    body = render(TARGET, _verdict())
+
+    assert not body_records(body, _identity(base_sha=OTHER_SHA))
 
 
 def test_a_different_pull_request_is_a_different_record():

@@ -54,7 +54,10 @@ vector, receives the review prompt on stdin, and answers on stdout. Its
 environment is an allowlist ({', '.join(DEFAULT_ENV_ALLOWLIST)}) plus anything
 named with --reviewer-env.
 
-The only write this command can perform is creating one pull request comment.
+The only write this command itself performs is creating one pull request
+comment. The reviewer you configure is a trusted, read-only wrapper of your
+choosing: it runs as an ordinary child process with your filesystem access,
+so nothing here can stop a reviewer command that decides to write.
 """
 
 

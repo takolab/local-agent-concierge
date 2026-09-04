@@ -14,6 +14,7 @@ from review_loop.verdict import ReviewOutcome
 
 from fakes import (
     ADVANCED_BASE_TIP,
+    BASE_TIP,
     BASELINE_PATH,
     FILTERED_PATH,
     FULL_SHA,
@@ -327,9 +328,13 @@ def test_an_api_failure_during_revalidation_prevents_the_comment():
 # --- idempotency -----------------------------------------------------------
 
 
-def _recorded_comment(head_sha=FULL_SHA, number=PR, round_number=1):
+def _recorded_comment(head_sha=FULL_SHA, number=PR, round_number=1, base_sha=BASE_TIP):
     identity = comment_format.RecordIdentity(
-        repo=REPO, number=number, head_sha=head_sha, round=round_number
+        repo=REPO,
+        number=number,
+        head_sha=head_sha,
+        base_sha=base_sha,
+        round=round_number,
     )
     return f"## Independent AI Review\n\nRound: 1\n\n{comment_format.marker(identity)}\n"
 
@@ -390,6 +395,32 @@ def test_a_record_for_a_different_head_does_not_block_a_new_review():
 
     assert result.outcome is ReviewOutcome.REVIEW_VALID
     assert len(writer.posted) == 1
+
+
+def test_a_record_for_the_same_head_on_another_base_does_not_block_a_new_review():
+    """The head is identical, but CI verified it against a different base.
+
+    That is a different integration state, and the recorded review is not
+    evidence about it. Reviewing it again is the correct outcome, not a
+    duplicate.
+    """
+    reader = FakeCommentReader([_recorded_comment(base_sha=ADVANCED_BASE_TIP)])
+
+    result, reviewer, writer = _run(reader=reader)
+
+    assert reviewer.invoked
+    assert result.outcome is ReviewOutcome.REVIEW_VALID
+    assert len(writer.posted) == 1
+
+
+def test_a_record_for_the_same_head_and_base_is_a_duplicate():
+    reader = FakeCommentReader([_recorded_comment(base_sha=BASE_TIP)])
+
+    result, reviewer, writer = _run(reader=reader)
+
+    assert result.outcome is ReviewOutcome.COMMENT_ALREADY_EXISTS
+    assert not reviewer.invoked
+    assert writer.posted == []
 
 
 def test_a_record_for_a_later_round_does_not_block_this_round():

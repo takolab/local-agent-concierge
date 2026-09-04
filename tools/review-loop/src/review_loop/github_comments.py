@@ -5,7 +5,12 @@ comment endpoint and issues no method but ``GET``. The single write this slice
 introduces -- creating one Independent AI Review comment -- lives here instead,
 in a class whose entire public surface is one method.
 
-The boundary is structural, not a convention. :class:`IssueCommentReader`
+The boundary covers this package's own writes. It says nothing about the
+reviewer subprocess, which runs with the invoking user's permissions -- see
+:mod:`review_loop.reviewer_process`.
+
+Within that scope the boundary is structural, not a convention.
+:class:`IssueCommentReader`
 hard-codes ``GET``; :class:`IssueCommentWriter` hard-codes ``POST`` and the
 ``issues/{number}/comments`` path, so there is no code path from any caller to
 an edit, a delete, a review object, a label, a merge, a dispatch or a re-run.

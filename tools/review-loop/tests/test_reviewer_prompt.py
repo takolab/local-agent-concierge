@@ -70,5 +70,20 @@ def test_the_ci_evidence_the_review_rests_on_is_shown():
     assert f"{BASELINE_PATH} run 33797660279 success" in prompt
 
 
+def test_the_prompt_separates_the_review_diff_from_the_ci_integration_base():
+    """The CI base is the commit CI merged onto, not the branch's fork point.
+
+    Diffing it directly against the head would present base-only changes as
+    this pull request's own whenever the base has advanced.
+    """
+    # The prompt is wrapped prose; compare on collapsed whitespace.
+    prompt = " ".join(build_prompt(TARGET).split())
+
+    assert "this pull request's own change set" in prompt
+    assert f"Do not diff {BASE_TIP} against {FULL_SHA} directly" in prompt
+    assert "where this branch diverged" in prompt
+    assert f"{BASE_TIP} is integration context" in prompt
+
+
 def test_the_prompt_is_versioned():
     assert PROMPT_VERSION == "independent-review-v1"

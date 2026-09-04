@@ -13,6 +13,7 @@ from review_loop.reviewer_process import ReviewerRun
 from review_loop.verdict import REVIEW_EXIT_CODES, ReviewOutcome
 
 from fakes import (
+    BASE_TIP,
     BASELINE_PATH,
     FILTERED_PATH,
     FULL_SHA,
@@ -168,7 +169,7 @@ def test_an_already_recorded_review_exits_zero_without_writing():
     from review_loop import comment_format
 
     identity = comment_format.RecordIdentity(
-        repo=REPO, number=27, head_sha=FULL_SHA, round=1
+        repo=REPO, number=27, head_sha=FULL_SHA, base_sha=BASE_TIP, round=1
     )
     reader = FakeCommentReader([comment_format.marker(identity)])
     writer = FakeCommentWriter()
@@ -221,11 +222,13 @@ def test_the_help_documents_every_review_outcome_exit_code():
         assert str(code) in text
 
 
-def test_the_help_states_the_single_permitted_write():
-    text = build_review_parser().format_help()
+def test_the_help_states_the_single_permitted_write_and_its_scope():
+    """The claim is about this command's own writes, not the reviewer's."""
+    text = " ".join(build_review_parser().format_help().split())
 
-    assert "only write" in text
-    assert "one pull request comment" in text
+    assert "only write this command itself performs" in text
+    assert "creating one pull request comment" in text
+    assert "nothing here can stop a reviewer command that decides to write" in text
 
 
 # --- json ------------------------------------------------------------------

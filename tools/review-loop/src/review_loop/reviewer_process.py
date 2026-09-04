@@ -10,9 +10,19 @@ the prompt on stdin and read back from stdout. That keeps three properties:
   text -- a pull request title, a branch name, an author -- is never part of
   the command line at all: it reaches the reviewer only through the prompt on
   stdin, which is data.
-* **A hostile environment by default.** The child inherits an allowlist, not
-  this process's environment, so a repository secret exported into the shell
-  does not silently become the reviewer's to read.
+* **A narrowed environment.** The child inherits an allowlist, not this
+  process's environment, so a repository secret exported into the shell does
+  not silently become the reviewer's to read.
+
+This is emphatically **not** a sandbox, and the allowlist is not a capability
+boundary. The reviewer runs as an ordinary child process with the invoking
+user's filesystem permissions, and ``HOME`` and ``PATH`` are on the allowlist
+because a real reviewer needs them -- which also means it can reach ``~/.
+config/gh``, ``~/.ssh`` and any tool on the path. A reviewer command that
+wanted to push, comment or merge could. "Read-only" is an instruction in the
+prompt plus a property of the command the operator chooses to configure; the
+guarantee this package enforces mechanically covers only the writes *it*
+performs.
 
 stdout is the only channel that can carry a verdict. stderr is captured for
 diagnostics and never parsed: a reviewer that logs a well-formed verdict block
