@@ -163,10 +163,13 @@ local-agent-concierge/
     └── review-loop/
 ```
 
-`packages/` holds importable domain packages shared by services, `services/`
-holds the containerized runtime services, `infra/` holds infrastructure
-configuration such as the OpenTelemetry Collector, and `tools/` holds local
-development tooling that runs outside the containerized runtime.
+The containerized services built from this repository are spread across
+three directories: `apps/` (Hermes Agent, Slack Gateway), `mcp/` (the Google
+Calendar MCP server) and `services/` (the Orchestrator) — one `Dockerfile`
+each. `packages/` holds importable domain packages those services share,
+rather than a service of its own; `infra/` holds infrastructure
+configuration such as the OpenTelemetry Collector's; and `tools/` holds
+local development tooling that runs outside the containerized runtime.
 
 The repository structure will expand as additional agents and services are implemented.
 
