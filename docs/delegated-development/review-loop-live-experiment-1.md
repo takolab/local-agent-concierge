@@ -3,7 +3,13 @@
 This document records a development-process experiment: the first
 end-to-end run of `tools/review-loop`'s one-turn Independent AI Review
 runner against a real open pull request and a real AI reviewer. Until this
-run, every part of that flow had been exercised only against fakes.
+run, no real AI reviewer's result had flowed through that pipeline, and no
+`## Independent AI Review` comment had ever been written to a pull request.
+
+PR #29 had already driven the runner against real GitHub and CI state using
+a *fixture* reviewer that reviewed nothing, which is how its `PENDING` gate,
+its green full turn, and three of its failure paths were checked live. What
+was missing was a real reviewer at one end and a real record at the other.
 
 It is a process record, not a design document for the runner. The runner's
 design and contract are documented in
@@ -303,18 +309,23 @@ the four runs.
 - **One pull request, one reviewer, one round.** A 45-line documentation
   diff is a small and unusually verifiable review surface. Nothing here
   shows how the flow behaves on a large or subtle code change.
-- **The failure paths were not exercised live.** `REVIEW_MALFORMED`,
-  `REVIEW_SHA_MISMATCH`, `TARGET_STALE` and `GITHUB_WRITE_FAILED` are
-  covered by tests but were not observed against a real reviewer. In
-  particular, no real reviewer has yet been observed *failing* to produce a
-  valid verdict, so the claim "a real reviewer returns a Structured Verdict
-  reliably" rests on two invocations.
-- **`TARGET_NOT_READY` was not exercised live either.** The `PENDING`
-  observation in Step 1 used the verification-only command. Every
-  `review-loop review` invocation in this experiment ran against an already
-  `READY` target, so the review turn's own refusal to start a reviewer while
-  the target is not `READY` remains test-covered rather than
-  live-exercised.
+- **No failure path was exercised in this experiment.** All four runs took
+  the success path. `REVIEW_MALFORMED`, `REVIEW_SHA_MISMATCH` and
+  `REVIEWER_FAILED` were already exercised live in PR #29 against real
+  GitHub state, but with a fixture reviewer made to misbehave on purpose —
+  so no *real* reviewer has yet been observed failing to produce a valid
+  verdict, and the claim "a real reviewer returns a Structured Verdict
+  reliably" rests on two invocations. `TARGET_STALE` and
+  `GITHUB_WRITE_FAILED` remain covered only by tests; PR #29 performed no
+  writes at all, so this experiment was the first time the write path ran
+  outside a mock.
+- **`TARGET_NOT_READY` was not exercised in this experiment.** The `PENDING`
+  observation in Step 1 used the verification-only command, and every
+  `review-loop review` invocation here ran against an already `READY`
+  target. That path was, however, exercised live in PR #29 — real CI still
+  pending, fixture reviewer configured, `Reviewer invoked: No`, exit 10 — so
+  it is not test-only; this experiment simply adds no new live evidence for
+  it.
 - **"Independent" is bounded.** The reviewer ran in a fresh process with a
   fresh context and no knowledge of the implementing session, which is the
   independence the prompt asks for. It is not vendor independence: the
