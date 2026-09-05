@@ -714,6 +714,62 @@ codes occupy a block of their own: no fix outcome collides with a
 verification verdict (0–20) or a review outcome (30–35), and a test asserts
 that.
 
+### What a fix turn guarantees, and what it does not
+
+Worth stating as a contract, because the boundary is deliberately narrower
+than it first looks:
+
+> `review-loop fix` verifies that the pull request head still equals the
+> reviewed head SHA. It does **not** re-establish the review's original
+> merge/CI context. The produced patch is a **candidate fix against the
+> reviewed head**, not evidence that the current pull request merge context is
+> valid. Current authoritative CI and a fresh Independent Re-Review are
+> required before merge.
+
+So this is the whole guarantee, and each arrow is mechanical:
+
+```text
+validated review finding
+→ exact reviewed head H is still the pull request head
+→ one bounded Coding Agent turn against H
+→ machine-checked candidate patch for that reviewed head
+```
+
+**Head currency is the structural gate; merge-context currency is not.** If
+the base advances from B1 to B2 while the head stays at H, a fix turn still
+runs against H, and that is correct rather than a gap:
+
+```text
+review: B1 + H
+base advances: B1 → B2
+fix: still allowed against the exact reviewed head H
+```
+
+Nothing here commits, pushes, merges or deploys, so the artifact is a patch
+proposed against a commit that demonstrably still is the pull request's head.
+The stronger current-state guarantees belong to the stages that actually act:
+
+```text
+candidate patch
+→ commit / push
+→ authoritative CI against the current merge context
+→ fresh Independent Re-Review
+→ human merge decision
+→ merge
+```
+
+One property makes this coherent rather than merely convenient: **the change-set
+boundary does not drift when the base moves.** `merge-base` backs up to where
+the branch diverged, so a base that has advanced since contributes nothing to
+what the agent may edit. The boundary describes the pull request, not the
+freshness of its merge context, and a test pins that
+(`test_a_base_that_advanced_after_the_review_does_not_change_the_change_set`).
+
+The review turn does check merge-context currency, before and after the
+reviewer runs — see [Post-review revalidation](#post-review-revalidation).
+That check belongs there, because a review is a *record* about a merge context;
+a candidate patch is not.
+
 ### The handoff
 
 The fix turn's input is the review turn's own `--json` output, not a pull
@@ -1096,6 +1152,17 @@ success path and on the failure paths alike.
 * **The fix exists only as a patch.** Nothing commits, pushes, or updates the
   pull request; without `--write-patch` the change is discarded with the
   worktree. Applying it is the human's, and so is everything after.
+* **Merge-context currency is out of contract.** A fix turn gates on head
+  currency alone; the review's original merge/CI context is not
+  re-established, and the base may have moved since. See
+  [What a fix turn guarantees](#what-a-fix-turn-guarantees-and-what-it-does-not).
+  A deliberate narrowing, not an oversight — but it means a candidate patch is
+  never evidence that the pull request is currently green.
+* **A force-pushed base branch can move the boundary.** The change set is
+  `merge-base(base, head)..head`. A base that merely advances leaves it
+  unchanged, but one rewritten so the old divergence point is no longer an
+  ancestor yields a different merge base, and therefore a different boundary.
+  Nothing detects that; the run would simply be bounded differently.
 * **Only the initial review round.** `Round: 1` is the only accepted value;
   re-review, finding-resolution tracking across rounds, and the multi-round
   loop are not implemented. The record identity already includes the round and

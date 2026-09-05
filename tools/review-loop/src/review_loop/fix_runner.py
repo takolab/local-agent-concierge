@@ -36,6 +36,24 @@ a write. Target currency is established by git: the prepared worktree
 resolves ``refs/pull/N/head`` from the remote and refuses anything that is
 not the reviewed commit, which is the same fact a GitHub round-trip would
 have established, obtained without a credential.
+
+**The guarantee stops there, deliberately.** This turn verifies that the pull
+request head still equals the reviewed head SHA. It does *not* re-establish
+the review's original merge/CI context, so a base branch that advanced since
+the review does not stop a fix. What comes out is a **candidate patch against
+the reviewed head** -- not evidence that the pull request's current merge
+context is valid or green. Nothing here commits, pushes, merges or deploys,
+so that narrower claim is the honest one, and the stronger current-state
+guarantees belong to the stages that act on the patch: push, authoritative CI
+against the current merge context, fresh Independent Re-Review, and a human
+merge decision.
+
+Two things make head currency a sufficient gate here rather than a shortcut.
+The patch is proposed against a commit that demonstrably still *is* the head,
+so it is not a fix for a commit nobody is looking at. And the change-set
+boundary does not drift when the base moves: ``merge-base`` backs up to where
+the branch diverged, so a base that advanced afterwards contributes nothing to
+what the agent may edit.
 """
 
 from __future__ import annotations

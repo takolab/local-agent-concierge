@@ -458,3 +458,83 @@ def test_a_head_identical_to_its_base_has_no_change_set(clone, origin):
         resolve_change_set(
             str(clone), head_sha=base, base_ref="master", remote="origin"
         )
+
+
+@pytest.fixture
+def base_advanced(tmp_path):
+    """A pull request whose base branch moved on *after* it was branched.
+
+        B1 ----- B2      <- base advances after the review, changing comp_b
+         \
+          H            <- the pull request, changing comp_a only
+    """
+    bare = tmp_path / "origin.git"
+    bare.mkdir()
+    git(bare, "init", "--quiet", "--bare")
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    git(seed, "init", "--quiet")
+    for name in ("comp_a", "comp_b"):
+        (seed / name).mkdir()
+        (seed / name / "pyproject.toml").write_text(f"[project]\nname='{name}'\n")
+        (seed / name / "mod.py").write_text("value = 0\n")
+    git(seed, "add", "-A")
+    git(seed, "commit", "--quiet", "-m", "B1")
+    git(seed, "branch", "-M", "master")
+    git(seed, "remote", "add", "origin", str(bare))
+    git(seed, "push", "--quiet", "origin", "master:refs/heads/master")
+
+    git(seed, "checkout", "--quiet", "-b", "pr")
+    (seed / "comp_a" / "mod.py").write_text("value = 1\n")
+    git(seed, "add", "-A")
+    git(seed, "commit", "--quiet", "-m", "H")
+    head = head_of(seed)
+    git(seed, "push", "--quiet", "origin", "pr:refs/pull/9/head")
+
+    git(seed, "checkout", "--quiet", "master")
+    (seed / "comp_b" / "mod.py").write_text("value = 2\n")
+    git(seed, "add", "-A")
+    git(seed, "commit", "--quiet", "-m", "B2")
+    git(seed, "push", "--quiet", "origin", "master:refs/heads/master")
+
+    clone = tmp_path / "clone"
+    git(tmp_path, "clone", "--quiet", str(bare), str(clone))
+    git(clone, "fetch", "--quiet", "origin", "refs/pull/9/head")
+    return clone, head
+
+
+def test_a_base_that_advanced_after_the_review_does_not_change_the_change_set(
+    base_advanced,
+):
+    """Fetching the *current* base tip does not make the boundary drift.
+
+    ``merge-base`` backs up to where this branch diverged, so a base that has
+    moved on since contributes nothing. This is what lets the fix turn gate on
+    head currency alone: the boundary describes the pull request, not the
+    freshness of its merge context.
+    """
+    clone, head = base_advanced
+
+    changed = resolve_change_set(
+        str(clone), head_sha=head, base_ref="master", remote="origin"
+    )
+
+    assert changed == ("comp_a/mod.py",)
+    assert "comp_b/mod.py" not in changed, "B2 is the base's change, not this PR's"
+
+
+def test_the_change_set_is_the_same_before_and_after_the_base_moves(base_advanced):
+    """The same pull request yields the same boundary whenever it is asked."""
+    clone, head = base_advanced
+    first = resolve_change_set(
+        str(clone), head_sha=head, base_ref="master", remote="origin"
+    )
+
+    # Nothing about the pull request changed; only the base moved, which the
+    # previous fetch already picked up.
+    second = resolve_change_set(
+        str(clone), head_sha=head, base_ref="master", remote="origin"
+    )
+
+    assert first == second == ("comp_a/mod.py",)

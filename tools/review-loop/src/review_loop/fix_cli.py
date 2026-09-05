@@ -98,6 +98,13 @@ named with --agent-env. It runs in a dedicated detached worktree at the exact
 reviewed commit, which is removed afterwards on every path -- so use
 --write-patch to keep the diff.
 
+What this produces is a candidate patch against the reviewed head. It checks
+that the head still equals the reviewed SHA; it does not re-establish the
+review's merge/CI context, so the patch is not evidence that the pull request
+is currently valid or green. Authoritative CI and a fresh Independent
+Re-Review belong after the patch is committed and pushed, which this command
+does not do.
+
 Nothing here commits, pushes, or touches the pull request. The agent is told
 not to, and the working tree is inspected afterwards to check that it did
 not. It is not a sandbox: the agent runs as an ordinary child process with
