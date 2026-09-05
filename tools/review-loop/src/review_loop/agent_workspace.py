@@ -253,6 +253,10 @@ def inspect_workspace(
 # has advanced since the branch was cut, and using the second would present
 # base-only changes as though this pull request had made them -- widening the
 # boundary with commits nobody in this pull request wrote.
+#
+# The same care applies to *which* base tip is used, and for the same reason:
+# see :func:`_base_tip`, which fetches it rather than trusting a local
+# remote-tracking ref that nothing in a fix turn refreshes.
 
 
 def _try_rev_parse(worktree: str, revision: str, timeout: float) -> str | None:
@@ -270,17 +274,34 @@ def _try_rev_parse(worktree: str, revision: str, timeout: float) -> str | None:
 def _base_tip(
     worktree: str, *, base_ref: str, remote: str, timeout: float
 ) -> str:
-    """Find the base branch's tip, preferring what is already local.
+    """Resolve the base branch's tip from the remote, every time.
 
-    A remote-tracking ref first, then a local branch, and only then the
-    network. Most invocations run in an ordinary clone where the first
-    candidate answers, so the common path adds no fetch.
+    A local ``refs/remotes/<remote>/<base>`` is **not** consulted, and the
+    reason is the whole point of this function. That ref is a cache with no
+    expiry: nothing in a fix turn refreshes it, because
+    :class:`review_loop.reviewer_workspace.PreparedWorkspace` fetches only
+    ``refs/pull/N/head``. In a clone made before the base branch advanced it
+    can be arbitrarily old.
+
+    An earlier version of this module preferred it, to save a fetch. That was
+    wrong, and the failure is not subtle. Take a clone whose
+    ``origin/master`` is B0, a base branch that has since advanced to B1
+    changing an unrelated component, and a pull request branched from B1:
+    ``merge-base(B0, H)`` is B0, so ``diff B0..H`` reports B1's component as
+    part of this pull request. That component then enters
+    ``change_set_boundary``, and a finding's ``Location`` may select it -- so
+    reviewer prose regains write scope over a component this pull request
+    never touched, which is precisely the hole the boundary exists to close.
+    (Independent re-review of PR #34 found this; the finding was correct.)
+
+    It is the same mistake as using ``ci_merge_base_sha``, reached by a
+    different route: both substitute a remembered base for the current one.
+
+    So the base tip is fetched, per turn, and a failure to fetch is a refusal
+    rather than a fallback. The prepared-worktree flow already reaches the
+    remote for the head ref; one more small fetch is a much better price than
+    an authority boundary resting on whenever this clone last pulled.
     """
-    for candidate in (f"refs/remotes/{remote}/{base_ref}", f"refs/heads/{base_ref}"):
-        resolved = _try_rev_parse(worktree, candidate, timeout)
-        if resolved:
-            return resolved
-
     try:
         run_git(
             ["fetch", "--quiet", remote, f"refs/heads/{base_ref}"],
@@ -289,10 +310,11 @@ def _base_tip(
         )
     except WorkspaceError as exc:
         raise WorkspaceError(
-            f"the base branch {base_ref!r} is not available in this repository "
-            f"and could not be fetched from {remote!r} ({exc}). Without it the "
-            "pull request's own change set cannot be established, and the fix "
-            "scope would have no authority behind it but the reviewer's text"
+            f"the base branch {base_ref!r} could not be fetched from {remote!r} "
+            f"({exc}). Without the current base tip this pull request's own "
+            "change set cannot be established, and the fix scope would have no "
+            "authority behind it but the reviewer's text. A stale local "
+            f"{remote}/{base_ref} is deliberately not used instead"
         ) from exc
 
     fetched = _try_rev_parse(worktree, "FETCH_HEAD", timeout)

@@ -17,7 +17,11 @@ import subprocess
 
 import pytest
 
-from review_loop.agent_workspace import inspect_workspace, is_residue
+from review_loop.agent_workspace import (
+    inspect_workspace,
+    is_residue,
+    resolve_change_set,
+)
 from review_loop.reviewer_workspace import (
     ExistingWorkspace,
     PreparedWorkspace,
@@ -312,3 +316,145 @@ def test_the_refusal_names_the_coding_agent_not_the_reviewer(clone):
     with pytest.raises(WorkspaceError, match="coding agent working directory"):
         with ExistingWorkspace(str(clone), role="coding agent").open(head_of(clone)):
             pytest.fail("must not yield")
+
+
+# --------------------------------------------------------------------------
+# The pull request's own change set
+#
+# This is the outer authority the coding agent's scope is bounded by, so the
+# tests here are about what git actually reports -- including in the one shape
+# where a plausible shortcut gets it wrong.
+# --------------------------------------------------------------------------
+
+
+@pytest.fixture
+def diverged(tmp_path):
+    """A clone whose ``origin/master`` is older than the pull request's base.
+
+    The shape independent re-review of PR #34 named:
+
+        B0  <- clone created here; local origin/master stays at B0
+         |
+        B1  <- base branch advances, changing comp_b
+         |
+         H  <- the pull request branches from B1, changing comp_a only
+
+    The clone then fetches only ``refs/pull/5/head``, exactly as
+    ``PreparedWorkspace`` does -- which does not advance ``origin/master``.
+    """
+    bare = tmp_path / "origin.git"
+    bare.mkdir()
+    git(bare, "init", "--quiet", "--bare")
+
+    seed = tmp_path / "seed"
+    seed.mkdir()
+    git(seed, "init", "--quiet")
+    for name in ("comp_a", "comp_b"):
+        (seed / name).mkdir()
+        (seed / name / "pyproject.toml").write_text(f"[project]\nname='{name}'\n")
+        (seed / name / "mod.py").write_text("value = 0\n")
+    git(seed, "add", "-A")
+    git(seed, "commit", "--quiet", "-m", "B0")
+    git(seed, "remote", "add", "origin", str(bare))
+    git(seed, "push", "--quiet", "origin", "HEAD:refs/heads/master")
+
+    clone = tmp_path / "clone"
+    git(tmp_path, "clone", "--quiet", str(bare), str(clone))
+    stale = git(clone, "rev-parse", "refs/remotes/origin/master")
+
+    # The base branch advances, changing a component the pull request will not.
+    (seed / "comp_b" / "mod.py").write_text("value = 1\n")
+    git(seed, "add", "-A")
+    git(seed, "commit", "--quiet", "-m", "B1")
+    git(seed, "push", "--quiet", "origin", "HEAD:refs/heads/master")
+
+    # The pull request branches from B1 and changes only comp_a.
+    (seed / "comp_a" / "mod.py").write_text("value = 2\n")
+    git(seed, "add", "-A")
+    git(seed, "commit", "--quiet", "-m", "H")
+    head = head_of(seed)
+    git(seed, "push", "--quiet", "origin", "HEAD:refs/pull/5/head")
+
+    # What a fix turn actually does: fetch the head ref, and nothing else.
+    git(clone, "fetch", "--quiet", "origin", "refs/pull/5/head")
+    return clone, head, stale
+
+
+def test_the_change_set_is_what_the_pull_request_itself_changed(clone, origin):
+    sha = publish_pull_request(origin, 31)
+    git(clone, "fetch", "--quiet", "origin", f"refs/pull/31/head")
+
+    changed = resolve_change_set(
+        str(clone), head_sha=sha, base_ref="master", remote="origin"
+    )
+
+    assert changed == ("pkg/feature.py",)
+
+
+def test_a_stale_local_base_ref_does_not_widen_the_change_set(diverged):
+    """The finding: a cached origin/master can smuggle base-only changes in.
+
+    With the stale ref, merge-base(B0, H) is B0 and the diff reports comp_b --
+    a component this pull request never touched, which would then enter the
+    scope boundary and be selectable by reviewer text.
+    """
+    clone, head, stale = diverged
+    assert git(clone, "rev-parse", "refs/remotes/origin/master") == stale, (
+        "the fixture must reproduce a stale remote-tracking ref"
+    )
+
+    changed = resolve_change_set(
+        str(clone), head_sha=head, base_ref="master", remote="origin"
+    )
+
+    assert changed == ("comp_a/mod.py",)
+    assert "comp_b/mod.py" not in changed, (
+        "a base-only change must never be reported as this pull request's"
+    )
+
+
+def test_the_stale_ref_really_would_have_been_wrong(diverged):
+    """Pins the bug itself, so the fixture cannot silently stop reproducing it.
+
+    If this ever fails, the fixture no longer builds a diverged history and
+    the test above has stopped proving anything.
+    """
+    clone, head, stale = diverged
+
+    merge_base = git(clone, "merge-base", stale, head)
+    naive = git(clone, "diff", "--name-only", merge_base, head).split()
+
+    assert "comp_b/mod.py" in naive
+
+
+def test_a_base_branch_that_cannot_be_fetched_fails_closed(clone, origin):
+    sha = publish_pull_request(origin, 32)
+    git(clone, "fetch", "--quiet", "origin", f"refs/pull/32/head")
+
+    with pytest.raises(WorkspaceError, match="could not be fetched"):
+        resolve_change_set(
+            str(clone), head_sha=sha, base_ref="no-such-branch", remote="origin"
+        )
+
+
+def test_an_unreachable_remote_fails_closed_rather_than_using_a_local_ref(clone, origin):
+    """Offline is a refusal, not a reason to trust the cache."""
+    sha = publish_pull_request(origin, 33)
+    git(clone, "fetch", "--quiet", "origin", f"refs/pull/33/head")
+
+    with pytest.raises(WorkspaceError, match="could not be fetched"):
+        resolve_change_set(
+            str(clone), head_sha=sha, base_ref="master", remote="no-such-remote"
+        )
+
+
+def test_a_head_identical_to_its_base_has_no_change_set(clone, origin):
+    """"I could not work out what changed" and "nothing changed" are different
+    facts, and only one of them is a reason to route a fix."""
+    base = head_of(clone)
+    git(clone, "push", "--quiet", "origin", f"HEAD:refs/pull/34/head")
+
+    with pytest.raises(WorkspaceError, match="changes no path"):
+        resolve_change_set(
+            str(clone), head_sha=base, base_ref="master", remote="origin"
+        )

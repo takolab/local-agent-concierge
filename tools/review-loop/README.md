@@ -835,6 +835,19 @@ change set, against the divergence point rather than against `ci_merge_base_sha`
 Those differ once the base branch advances, and using the second would widen
 the boundary with commits nobody in this pull request wrote.
 
+**The base tip is fetched every turn**, and a local `origin/<base>` is
+deliberately *not* consulted. That ref is a cache with no expiry — a fix turn
+fetches `refs/pull/N/head` and nothing else, so in a clone made before the base
+advanced it can be arbitrarily old. The failure is concrete: with
+`origin/master` at B0, a base that has since advanced to B1 changing an
+unrelated component, and a pull request branched from B1, `merge-base(B0, H)`
+is B0 and `diff B0..H` reports B1's component as part of this pull request. It
+would enter the boundary, a finding's `Location` could select it, and reviewer
+prose would regain write scope over a component the pull request never touched.
+It is the same mistake as using `ci_merge_base_sha`, reached by a different
+route: both substitute a remembered base for the current one. (Re-review of
+PR #34 found this; the finding was correct.)
+
 **2. A finding's `Location` selects within that boundary.** Its cited paths
 contribute their own component roots, and a component root outside the
 boundary is **discarded rather than granted** — recorded and printed as
@@ -865,7 +878,7 @@ Three ways this fails closed, none of them with a guess:
 
 | Situation | Outcome |
 | --- | --- |
-| The base branch is not available locally and cannot be fetched, so the change set is unknown | `CODING_AGENT_WORKSPACE_INVALID` (42). No agent runs — a scope with no authority behind it is not a scope. |
+| The base branch cannot be fetched from `--git-remote`, so the current base tip is unknown | `CODING_AGENT_WORKSPACE_INVALID` (42). No agent runs, and a stale local ref is never used instead — a scope with no authority behind it is not a scope. |
 | A finding cites no path that exists at the reviewed commit | `REVIEW_REQUIRES_HUMAN` (40) |
 | Every path a finding cites lies outside the change set | `REVIEW_REQUIRES_HUMAN` (40) |
 
@@ -1065,11 +1078,13 @@ success path and on the failure paths alike.
   explicit `--allow-path`. A component root is also wider than most fixes
   need: within `tools/review-loop/` the scope check would not catch an
   unrelated edit to a neighbouring file in the same package.
-* **The change-set boundary needs the base branch.** It is resolved from a
-  remote-tracking ref, a local branch, or a fetch, in that order. A clone
-  without the base branch and without network access cannot establish it, and
-  the run fails closed at `CODING_AGENT_WORKSPACE_INVALID` rather than falling
-  back to reviewer-derived scope.
+* **The change-set boundary needs the remote, every run.** The base tip is
+  fetched rather than read from a local `origin/<base>`, so a fix turn cannot
+  run fully offline: no reachable remote means
+  `CODING_AGENT_WORKSPACE_INVALID` rather than a fallback to a cached ref. That
+  is deliberate — a cached base tip is how base-only changes leak into the
+  boundary — but it does mean one small fetch per turn, and it means
+  `--agent-cwd` now sees a `git fetch` into the repository you supplied.
 * **The fix is checked for shape and place, never for correctness.** The
   runner establishes that the change is the one that was asked for, where it
   was allowed, and no more. Whether it actually satisfies the reviewer's

@@ -45,14 +45,10 @@ def tree(tmp_path):
     branch to have diverged from, would make every assertion here a statement
     about a workspace the runner would refuse in production.
 
-    So the shape is the real one -- a ``master`` holding the base commit, and
-    a detached head one commit ahead of it, which is the pull request.
+    So the shape is the real one -- a reachable remote holding ``master`` at
+    the base commit, and a detached head one commit ahead of it, which is the
+    pull request.
     """
-    work = tmp_path / "work"
-    package = work / "pkg"
-    package.mkdir(parents=True)
-    (package / "pyproject.toml").write_text("[project]\nname='pkg'\n")
-    (package / "code.py").write_text("value = 0\n")
     env = {
         **os.environ,
         "GIT_AUTHOR_NAME": "Test",
@@ -61,18 +57,34 @@ def tree(tmp_path):
         "GIT_COMMITTER_EMAIL": "test@example.invalid",
     }
 
-    def git(*argv):
+    def git(cwd, *argv):
         subprocess.run(
-            ["git", *argv], cwd=str(work), check=True, env=env, capture_output=True
+            ["git", *argv], cwd=str(cwd), check=True, env=env, capture_output=True
         )
 
-    git("-c", "init.defaultBranch=master", "init", "--quiet")
-    git("add", "-A")
-    git("commit", "--quiet", "-m", "base")
-    git("checkout", "--quiet", "--detach")
+    # A bare "remote", because the change-set boundary fetches the base tip
+    # rather than trusting a local ref -- so a repository with no reachable
+    # remote is one the runner now correctly refuses.
+    bare = tmp_path / "origin.git"
+    bare.mkdir()
+    git(bare, "init", "--quiet", "--bare")
+
+    work = tmp_path / "work"
+    package = work / "pkg"
+    package.mkdir(parents=True)
+    (package / "pyproject.toml").write_text("[project]\nname='pkg'\n")
+    (package / "code.py").write_text("value = 0\n")
+
+    git(work, "-c", "init.defaultBranch=master", "init", "--quiet")
+    git(work, "add", "-A")
+    git(work, "commit", "--quiet", "-m", "base")
+    git(work, "remote", "add", "origin", str(bare))
+    git(work, "push", "--quiet", "origin", "HEAD:refs/heads/master")
+
+    git(work, "checkout", "--quiet", "--detach")
     (package / "code.py").write_text("value = 1\n")
-    git("add", "-A")
-    git("commit", "--quiet", "-m", "the pull request")
+    git(work, "add", "-A")
+    git(work, "commit", "--quiet", "-m", "the pull request")
     return work
 
 

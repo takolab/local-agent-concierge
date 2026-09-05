@@ -86,8 +86,10 @@ resolving anywhere else stops the run.
 The outer limit on what the coding agent may edit is what this pull request
 itself changed, also taken from git -- the diff against the point this branch
 diverged from its base. A finding's Location selects within that limit and
-cannot reach beyond it; only --allow-path can. Establishing it needs the base
-branch locally, or fetchable from --git-remote.
+cannot reach beyond it; only --allow-path can. The base tip is fetched from
+--git-remote once per run rather than read from a local remote-tracking ref,
+which can be arbitrarily stale and would let base-only changes widen the
+limit; an unreachable remote stops the run instead.
 
 The coding agent is run with no shell: it is tokenised into an argument
 vector, receives the task contract on stdin, and answers on stdout. Its
