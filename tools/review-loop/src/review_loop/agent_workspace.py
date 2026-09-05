@@ -50,7 +50,12 @@ import os
 from dataclasses import dataclass
 
 from .fix_response import MAX_PATCH_BYTES
-from .reviewer_workspace import DEFAULT_GIT_TIMEOUT_SECONDS, WorkspaceError, run_git
+from .reviewer_workspace import (
+    DEFAULT_GIT_TIMEOUT_SECONDS,
+    DEFAULT_REMOTE,
+    WorkspaceError,
+    run_git,
+)
 
 #: Directory names that are build or test residue wherever they appear.
 RESIDUE_DIRECTORIES = frozenset(
@@ -230,3 +235,113 @@ def inspect_workspace(
         patch=patch,
         patch_refused=refused,
     )
+
+
+# --------------------------------------------------------------------------
+# The pull request's own change set
+# --------------------------------------------------------------------------
+#
+# This is the one authority in a fix turn that neither the reviewer nor the
+# coding agent controls: what *this pull request* actually changed, according
+# to git. :mod:`review_loop.fix_request` uses it as the outer boundary a
+# finding's cited paths may select within, so that reviewer prose can narrow
+# the fix scope but never widen it.
+#
+# It is deliberately computed the way the reviewer prompt (PR #29) tells a
+# reviewer to compute it: against the point the branch diverged from its base,
+# not against the commit CI merged onto. Those differ whenever the base branch
+# has advanced since the branch was cut, and using the second would present
+# base-only changes as though this pull request had made them -- widening the
+# boundary with commits nobody in this pull request wrote.
+
+
+def _try_rev_parse(worktree: str, revision: str, timeout: float) -> str | None:
+    """Resolve a revision, or return None if this repository does not have it."""
+    try:
+        return run_git(
+            ["rev-parse", "--verify", "--quiet", f"{revision}^{{commit}}"],
+            cwd=worktree,
+            timeout=timeout,
+        )
+    except WorkspaceError:
+        return None
+
+
+def _base_tip(
+    worktree: str, *, base_ref: str, remote: str, timeout: float
+) -> str:
+    """Find the base branch's tip, preferring what is already local.
+
+    A remote-tracking ref first, then a local branch, and only then the
+    network. Most invocations run in an ordinary clone where the first
+    candidate answers, so the common path adds no fetch.
+    """
+    for candidate in (f"refs/remotes/{remote}/{base_ref}", f"refs/heads/{base_ref}"):
+        resolved = _try_rev_parse(worktree, candidate, timeout)
+        if resolved:
+            return resolved
+
+    try:
+        run_git(
+            ["fetch", "--quiet", remote, f"refs/heads/{base_ref}"],
+            cwd=worktree,
+            timeout=timeout,
+        )
+    except WorkspaceError as exc:
+        raise WorkspaceError(
+            f"the base branch {base_ref!r} is not available in this repository "
+            f"and could not be fetched from {remote!r} ({exc}). Without it the "
+            "pull request's own change set cannot be established, and the fix "
+            "scope would have no authority behind it but the reviewer's text"
+        ) from exc
+
+    fetched = _try_rev_parse(worktree, "FETCH_HEAD", timeout)
+    if not fetched:
+        raise WorkspaceError(
+            f"{remote}/{base_ref} was fetched but did not resolve to a commit, so "
+            "the pull request's own change set cannot be established"
+        )
+    return fetched
+
+
+def resolve_change_set(
+    worktree: str,
+    *,
+    head_sha: str,
+    base_ref: str,
+    remote: str = DEFAULT_REMOTE,
+    timeout: float = DEFAULT_GIT_TIMEOUT_SECONDS,
+) -> tuple[str, ...]:
+    """Return the paths this pull request changed, according to git.
+
+    Raises :class:`WorkspaceError` rather than returning an empty tuple when
+    the answer cannot be established. "I could not work out what this pull
+    request changed" and "this pull request changed nothing" are different
+    facts, and only one of them is a reason to route a fix.
+    """
+    base = _base_tip(worktree, base_ref=base_ref, remote=remote, timeout=timeout)
+    try:
+        merge_base = run_git(
+            ["merge-base", base, head_sha], cwd=worktree, timeout=timeout
+        )
+    except WorkspaceError as exc:
+        raise WorkspaceError(
+            f"no common ancestor of {base_ref} ({base[:12]}) and the target "
+            f"{head_sha[:12]} could be found, so this pull request's change set "
+            f"cannot be established: {exc}"
+        ) from exc
+
+    raw = run_git(
+        ["diff", "--name-only", "-z", merge_base, head_sha],
+        cwd=worktree,
+        timeout=timeout,
+        strip=False,
+    )
+    changed = tuple(sorted(set(_split_nul(raw))))
+    if not changed:
+        raise WorkspaceError(
+            f"the target {head_sha[:12]} changes no path relative to where this "
+            f"branch diverged from {base_ref} ({merge_base[:12]}), so there is no "
+            "change set for a fix to be bounded to"
+        )
+    return changed

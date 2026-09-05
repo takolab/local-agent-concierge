@@ -40,15 +40,19 @@ SOURCE = "pkg/code.py"
 def tree(tmp_path):
     """A real git worktree the fake workspace hands to the agent.
 
-    Real git, because the runner inspects the tree with it: a plain directory
-    would make every assertion here a statement about a workspace the runner
-    would refuse in production.
+    Real git, because the runner inspects the tree with it *and* asks it what
+    this pull request changed: a plain directory, or a repository with no base
+    branch to have diverged from, would make every assertion here a statement
+    about a workspace the runner would refuse in production.
+
+    So the shape is the real one -- a ``master`` holding the base commit, and
+    a detached head one commit ahead of it, which is the pull request.
     """
     work = tmp_path / "work"
     package = work / "pkg"
     package.mkdir(parents=True)
     (package / "pyproject.toml").write_text("[project]\nname='pkg'\n")
-    (package / "code.py").write_text("value = 1\n")
+    (package / "code.py").write_text("value = 0\n")
     env = {
         **os.environ,
         "GIT_AUTHOR_NAME": "Test",
@@ -56,13 +60,19 @@ def tree(tmp_path):
         "GIT_COMMITTER_NAME": "Test",
         "GIT_COMMITTER_EMAIL": "test@example.invalid",
     }
-    for argv in (
-        ["init", "--quiet"],
-        ["add", "-A"],
-        ["commit", "--quiet", "-m", "first"],
-    ):
-        subprocess.run(["git", *argv], cwd=str(work), check=True, env=env,
-                       capture_output=True)
+
+    def git(*argv):
+        subprocess.run(
+            ["git", *argv], cwd=str(work), check=True, env=env, capture_output=True
+        )
+
+    git("-c", "init.defaultBranch=master", "init", "--quiet")
+    git("add", "-A")
+    git("commit", "--quiet", "-m", "base")
+    git("checkout", "--quiet", "--detach")
+    (package / "code.py").write_text("value = 1\n")
+    git("add", "-A")
+    git("commit", "--quiet", "-m", "the pull request")
     return work
 
 
@@ -361,6 +371,82 @@ def test_the_json_output_pins_the_write_boundaries(tmp_path, tree):
     assert payload["github_write_performed"] is False
     assert payload["github_requests_performed"] == 0
     assert payload["commit_or_push_performed"] is False
+
+
+def test_the_boundary_is_reported_alongside_the_allowed_scope(tmp_path, tree, head):
+    path = write(tmp_path, review_json(routed(), head_sha=head))
+
+    def edit(worktree):
+        with open(os.path.join(worktree, SOURCE), "w") as handle:
+            handle.write("value = 2\n")
+
+    agent = ScriptedAgent(stdout=response_text(files=(SOURCE,), head_sha=head), edit=edit)
+
+    code, output = invoke(
+        ["--review-json", path], agent=agent, workspace=FakeWorkspace(str(tree))
+    )
+
+    assert code == 0
+    assert "Change-set boundary:  pkg/" in output
+    assert "Allowed scope:        pkg/" in output
+
+
+def test_a_citation_outside_the_change_set_is_shown_as_not_granted(
+    tmp_path, tree, head
+):
+    """An operator deciding whether to pass --allow-path has to see it."""
+    reaching = routed(
+        location="pkg/code.py:1 which contradicts pkg/pyproject.toml and README.md"
+    )
+    (tree / "README.md").write_text("unchanged by this pull request\n")
+    path = write(tmp_path, review_json(reaching, head_sha=head))
+    agent = ScriptedAgent(stdout="unused")
+
+    code, output = invoke(
+        ["--review-json", path], agent=agent, workspace=FakeWorkspace(str(tree))
+    )
+
+    assert "Cited but out of PR:  README.md" in output
+    assert "--allow-path" in output
+
+
+def test_the_json_output_carries_the_boundary(tmp_path, tree, head):
+    path = write(tmp_path, review_json(routed(), head_sha=head))
+
+    def edit(worktree):
+        with open(os.path.join(worktree, SOURCE), "w") as handle:
+            handle.write("value = 2\n")
+
+    agent = ScriptedAgent(stdout=response_text(files=(SOURCE,), head_sha=head), edit=edit)
+
+    _, output = invoke(
+        ["--review-json", path, "--json"],
+        agent=agent,
+        workspace=FakeWorkspace(str(tree)),
+    )
+
+    payload = json.loads(output)
+    assert payload["request"]["change_set_boundary"] == ["pkg/"]
+    assert payload["request"]["findings"][0]["out_of_boundary_paths"] == []
+
+
+def test_a_repository_without_the_base_branch_cannot_bound_a_fix(
+    tmp_path, tree, head
+):
+    """Failing closed: with no base to have diverged from, the scope would
+    have no authority behind it but the reviewer's own text."""
+    path = write(
+        tmp_path, review_json(routed(), head_sha=head).replace('"master"', '"absent"')
+    )
+    agent = ScriptedAgent(stdout="unused")
+
+    code, output = invoke(
+        ["--review-json", path], agent=agent, workspace=FakeWorkspace(str(tree))
+    )
+
+    assert code == 42
+    assert "CODING_AGENT_WORKSPACE_INVALID" in output
+    assert agent.prompts == [], "no agent runs without an established boundary"
 
 
 def test_every_outcome_has_a_distinct_exit_code():

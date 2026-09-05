@@ -179,6 +179,46 @@ def test_too_many_findings_never_invoke_the_agent(workspace, repo):
     assert agent.prompts == []
 
 
+def test_a_finding_reaching_outside_the_pull_requests_change_set_is_refused(
+    workspace, repo
+):
+    """Reviewer prose may select inside what the PR changed, never beyond it.
+
+    ``other/`` exists at the target but was introduced by the base commit, so
+    this pull request never touched it. Routing a finding that cites it would
+    let reviewer-written text hand the agent a component the change set gives
+    it no claim to.
+    """
+    _, sha = repo
+    agent = ScriptedAgent(stdout="unused")
+
+    result = run(
+        workspace, agent, routed_finding(location="other/thing.py:1"), sha=sha
+    )
+
+    assert result.outcome is FixRunOutcome.REVIEW_REQUIRES_HUMAN
+    assert "lies outside what this pull request changed" in result.reasons[0]
+    assert agent.prompts == []
+
+
+def test_the_routed_scope_never_exceeds_the_change_set(workspace, repo):
+    _, sha = repo
+    seen = {}
+
+    def record(worktree):
+        edit(SOURCE)(worktree)
+
+    agent = ScriptedAgent(
+        stdout=response_text(head_sha=sha, files=(SOURCE,)), edit=record
+    )
+
+    result = run(workspace, agent, routed_finding(), sha=sha)
+
+    boundary = {entry.path for entry in result.request.change_set_boundary}
+    assert boundary == {"pkg"}, "only the component this pull request changed"
+    assert not result.request.permits(OUTSIDE)
+
+
 def test_a_finding_whose_scope_cannot_be_bounded_goes_to_a_human(workspace, repo):
     _, sha = repo
     agent = ScriptedAgent(stdout="unused")
@@ -399,6 +439,121 @@ def test_an_agent_that_fails_is_reported_and_cleans_up(workspace, repo):
     assert result.outcome is FixRunOutcome.CODING_AGENT_FAILED
     assert result.exit_code == 43
     assert not os.path.isdir(seen["path"]), "a failed agent leaves no checkout behind"
+
+
+def test_an_agent_that_edits_and_then_fails_still_has_its_tree_inspected(
+    workspace, repo
+):
+    """An agent that edited files and then timed out has still edited files.
+
+    Skipping the inspection on the failure path would discard the evidence in
+    the case an operator most needs it -- and with --agent-cwd the workspace is
+    a directory the runner does not remove, so the result would be the only
+    record that anything was left behind.
+    """
+    _, sha = repo
+    agent = ScriptedAgent(
+        failure="the coding agent did not finish within 1s", edit=edit(SOURCE, NEW_TEST)
+    )
+
+    result = run(workspace, agent, routed_finding(), sha=sha)
+
+    assert result.outcome is FixRunOutcome.CODING_AGENT_FAILED
+    assert result.inspection is not None
+    assert set(result.inspection.changed_paths) == {SOURCE, NEW_TEST}
+    assert any("left 2 changed path(s)" in reason for reason in result.reasons)
+    assert any("did not finish" in reason for reason in result.reasons)
+
+
+def test_a_failed_agent_that_changed_nothing_says_so(workspace, repo):
+    _, sha = repo
+    agent = ScriptedAgent(failure="the coding agent exited 2")
+
+    result = run(workspace, agent, routed_finding(), sha=sha)
+
+    assert result.outcome is FixRunOutcome.CODING_AGENT_FAILED
+    assert result.inspection is not None
+    assert result.inspection.clean
+    assert any("holds no change" in reason for reason in result.reasons)
+
+
+def test_a_failed_agent_that_also_committed_has_that_reported(workspace, repo):
+    _, sha = repo
+
+    def commit(worktree):
+        edit(SOURCE)(worktree)
+        git(worktree, "add", "-A")
+        git(worktree, "commit", "--quiet", "-m", "half a fix")
+
+    agent = ScriptedAgent(failure="the coding agent exited 1", edit=commit)
+
+    result = run(workspace, agent, routed_finding(), sha=sha)
+
+    assert result.outcome is FixRunOutcome.CODING_AGENT_FAILED
+    assert any("moved HEAD" in reason for reason in result.reasons)
+
+
+def test_a_failed_agent_that_left_a_credential_file_has_that_reported(workspace, repo):
+    _, sha = repo
+
+    def leave(worktree):
+        edit(SOURCE)(worktree)
+        with open(os.path.join(worktree, ".env"), "w") as handle:
+            handle.write("SECRET=1\n")
+
+    agent = ScriptedAgent(failure="the coding agent exited 1", edit=leave)
+
+    result = run(workspace, agent, routed_finding(), sha=sha)
+
+    assert result.outcome is FixRunOutcome.CODING_AGENT_FAILED
+    assert result.inspection.unexpected_ignored == (".env",)
+    assert any("git-ignored path(s)" in reason for reason in result.reasons)
+
+
+# --------------------------------------------------------------------------
+# The patch has to survive, or the turn is not a success
+# --------------------------------------------------------------------------
+
+
+def test_a_diff_too_large_to_capture_is_not_a_success(workspace, repo, monkeypatch):
+    """The worktree is removed when the run ends, so an uncaptured diff is a
+    change nobody can retrieve. Reporting exit 0 for it would be a false
+    success -- the fix would be announced and then discarded."""
+    monkeypatch.setattr("review_loop.agent_workspace.MAX_PATCH_BYTES", 10)
+    _, sha = repo
+    agent = ScriptedAgent(
+        stdout=response_text(head_sha=sha, files=(SOURCE,)), edit=edit(SOURCE)
+    )
+
+    result = run(workspace, agent, routed_finding(), sha=sha)
+
+    assert result.outcome is FixRunOutcome.PATCH_TOO_LARGE
+    assert result.exit_code == 51
+    assert result.exit_code != 0
+    assert result.patch == ""
+    assert result.validated is not None, "the response itself was valid"
+    assert any("larger than" in reason for reason in result.reasons)
+
+
+def test_an_escalation_still_outranks_an_uncapturable_patch(workspace, repo, monkeypatch):
+    """A human has been asked a question; that stays the headline."""
+    monkeypatch.setattr("review_loop.agent_workspace.MAX_PATCH_BYTES", 10)
+    _, sha = repo
+    output = response_text(finding_id="F1", head_sha=sha, files=(SOURCE,)) + response_text(
+        finding_id="F2",
+        head_sha=sha,
+        outcome="escalate",
+        files=(),
+        verification=None,
+        reason="F2 is not a real problem",
+        preamble="",
+    )
+    agent = ScriptedAgent(stdout=output, edit=edit(SOURCE))
+
+    result = run(workspace, agent, routed_finding("F1"), routed_finding("F2"), sha=sha)
+
+    assert result.outcome is FixRunOutcome.FIX_ESCALATED
+    assert any("larger than" in reason for reason in result.reasons)
 
 
 def test_output_that_is_not_a_response_is_malformed(workspace, repo):

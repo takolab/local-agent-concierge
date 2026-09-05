@@ -17,10 +17,15 @@ path exists" means it exists in the commit under fix rather than in whatever
 the operator happens to have checked out.
 
 **Inspect before you read the answer.** When the agent returns, the working
-tree is read *first*, and it is read for every outcome including a malformed
-response. Reading the agent's answer first and the tree second would mean
-deciding what to look for based on what the agent said it did, which is the
-one thing the tree is there to check.
+tree is read *first*, and it is read for every outcome -- a malformed
+response, and a failed or timed-out agent too. Reading the agent's answer
+first and the tree second would mean deciding what to look for based on what
+the agent said it did, which is the one thing the tree is there to check; and
+skipping the read when the *process* failed would discard the evidence in
+exactly the case an operator most needs it. That matters beyond diagnostics:
+with ``--agent-cwd`` the workspace is the operator's own directory and is not
+removed, so a failed agent's half-finished edits stay on disk, and a result
+that did not mention them would be the only record.
 
 **Capture before you clean up.** The worktree is removed on every path,
 success and failure alike, so the patch is taken while it still exists. A fix
@@ -38,7 +43,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .agent_prompt import build_prompt
-from .agent_workspace import WorkspaceInspection, inspect_workspace
+from .agent_workspace import (
+    WorkspaceInspection,
+    inspect_workspace,
+    resolve_change_set,
+)
 from .fix_request import (
     FixRequest,
     RoutingDecision,
@@ -59,7 +68,7 @@ from .fix_response import (
 from .fix_response_parser import parse
 from .fix_validation import ScopeViolation, ValidatedFix, validate
 from .review_target import ReviewTarget
-from .reviewer_workspace import WorkspaceError
+from .reviewer_workspace import DEFAULT_REMOTE, WorkspaceError
 from .verdict import ReviewVerdict
 
 
@@ -115,6 +124,52 @@ def _aggregate(validated: ValidatedFix) -> tuple[FixRunOutcome, tuple[str, ...]]
     )
 
 
+def _inspect(
+    worktree: str, head_sha: str
+) -> tuple[WorkspaceInspection | None, tuple[str, ...]]:
+    """Read the working tree, or say why it could not be read.
+
+    Returning the failure instead of raising is what keeps an unreadable tree
+    from being reported as the reason the turn ended. When the agent has
+    already failed, "the agent timed out" is the fact an operator needs; that
+    the tree could not then be read is a second fact, not a replacement.
+    """
+    try:
+        return inspect_workspace(worktree, target_head_sha=head_sha), ()
+    except WorkspaceError as exc:
+        return None, (f"the working tree could not be inspected afterwards: {exc}",)
+
+
+def _residue_reasons(
+    inspection: WorkspaceInspection | None, head_sha: str
+) -> tuple[str, ...]:
+    """State what a failed agent left behind, so nothing is lost silently."""
+    if inspection is None:
+        return ()
+    reasons: list[str] = []
+    if inspection.changed_paths:
+        reasons.append(
+            f"the coding agent left {len(inspection.changed_paths)} changed "
+            f"path(s) in the workspace: {', '.join(inspection.changed_paths[:5])}"
+            + (", ..." if len(inspection.changed_paths) > 5 else "")
+            + ". They were not validated against any fix response"
+        )
+    else:
+        reasons.append("the workspace holds no change")
+    if inspection.head_sha != head_sha:
+        reasons.append(
+            f"the coding agent also moved HEAD to {inspection.head_sha}, away "
+            f"from the target {head_sha}"
+        )
+    if inspection.unexpected_ignored:
+        reasons.append(
+            f"the coding agent left {len(inspection.unexpected_ignored)} "
+            "git-ignored path(s) that are not build or test residue: "
+            + ", ".join(inspection.unexpected_ignored[:3])
+        )
+    return tuple(reasons)
+
+
 def run_fix(
     *,
     agent,
@@ -123,6 +178,7 @@ def run_fix(
     verdict: ReviewVerdict,
     allow_paths: tuple[str, ...] = (),
     max_findings: int = DEFAULT_MAX_ROUTED_FINDINGS,
+    git_remote: str = DEFAULT_REMOTE,
     dry_run: bool = False,
 ) -> FixResult:
     """Route one validated review's findings to one bounded Coding Agent turn."""
@@ -170,6 +226,7 @@ def run_fix(
                 verdict=verdict,
                 findings=selection.findings,
                 allow_paths=allow_paths,
+                git_remote=git_remote,
                 selection_reasons=selection.reasons,
             )
     except WorkspaceError as exc:
@@ -190,18 +247,34 @@ def _run_in_workspace(
     verdict: ReviewVerdict,
     findings,
     allow_paths: tuple[str, ...],
+    git_remote: str,
     selection_reasons: tuple[str, ...],
 ) -> FixResult:
     """Everything that happens while the bound worktree exists."""
 
-    # 3. Resolve the scope against the target commit's own tree. A finding
-    #    that cannot be bounded is refused rather than routed with a guess.
+    # 3a. Establish what this pull request itself changed. This is the outer
+    #     limit on the scope, and the only input to it that neither the
+    #     reviewer nor the agent can influence. Failing to establish it is a
+    #     property of the workspace -- typically a clone without the base
+    #     branch -- so it is reported as one and no agent runs.
+    change_set = resolve_change_set(
+        worktree,
+        head_sha=target.head_sha,
+        base_ref=target.base_ref,
+        remote=git_remote,
+    )
+
+    # 3b. Resolve each finding's scope inside that boundary, against the
+    #     target commit's own tree. A finding that cannot be bounded -- or
+    #     that only points outside the change set -- is refused rather than
+    #     routed with a guess or with borrowed authority.
     try:
         request = build_request(
             target=target,
             round=verdict.round,
             findings=findings,
             worktree=worktree,
+            change_set=change_set,
             allow_paths=allow_paths,
         )
     except ScopeError as exc:
@@ -215,21 +288,40 @@ def _run_in_workspace(
     # 4. One bounded turn. The prompt names the commit, the finding ids and
     #    the allowed paths; nothing untrusted reaches the command line.
     run = agent.invoke(build_prompt(request), cwd=worktree)
+
+    # 5. Read the tree. Once the agent has been started this happens on every
+    #    path, including the one where the process itself failed: an agent
+    #    that edited files and then timed out has still edited files, and with
+    #    --agent-cwd those edits stay in a directory the runner does not
+    #    remove. The inspection is attempted defensively, because a failure to
+    #    read the tree must not replace the reason the turn actually ended.
+    inspection, inspection_failure = _inspect(worktree, target.head_sha)
+
     if not run.ok:
         return FixResult(
             outcome=FixRunOutcome.CODING_AGENT_FAILED,
-            reasons=(run.failure or "the coding agent failed",),
+            reasons=(run.failure or "the coding agent failed",)
+            + _residue_reasons(inspection, target.head_sha)
+            + inspection_failure,
             target=target,
             request=request,
+            inspection=inspection,
             agent_invoked=True,
             workspace_created=True,
             agent_stderr=run.stderr,
         )
 
-    # 5. Read the tree before reading the answer, and read it on every path:
-    #    an operator diagnosing a malformed response still needs to know what
-    #    the agent left behind.
-    inspection = inspect_workspace(worktree, target_head_sha=target.head_sha)
+    if inspection is None:
+        return FixResult(
+            outcome=FixRunOutcome.CODING_AGENT_WORKSPACE_INVALID,
+            reasons=inspection_failure,
+            target=target,
+            request=request,
+            agent_invoked=True,
+            workspace_created=True,
+            agent_stdout=run.stdout,
+            agent_stderr=run.stderr,
+        )
 
     def failed(outcome: FixRunOutcome, reason: str) -> FixResult:
         return FixResult(
@@ -259,6 +351,13 @@ def _run_in_workspace(
     outcome, reasons = _aggregate(validated)
     if inspection.patch_refused:
         reasons = reasons + (inspection.patch_refused,)
+        # A turn whose diff could not be captured produced a change that no
+        # longer exists once the worktree is removed. That is not a success,
+        # so it may not keep an exit code of zero. It replaces FIX_APPLIED
+        # only: where the turn already ends non-zero the primary outcome still
+        # names the thing a human has to act on, and this is one more reason.
+        if outcome is FixRunOutcome.FIX_APPLIED:
+            outcome = FixRunOutcome.PATCH_TOO_LARGE
     return FixResult(
         outcome=outcome,
         reasons=selection_reasons + reasons,

@@ -16,29 +16,51 @@ is prose: ``tools/review-loop/src/review_loop/verdict.py:42``, or
 prose is not possible, and pretending otherwise would produce a scope check
 that fails on correct fixes and passes on incorrect ones.
 
-So the rule is deliberately coarse, mechanical, and stated in full:
+The scope is therefore built from **two** sources, and which one is the
+authority matters more than the arithmetic:
 
-    A finding's allowed scope is the **component root** of each repository
-    path its ``Location`` cites and that exists at the target commit. A
-    component root is the nearest ancestor directory holding a build manifest
-    (``pyproject.toml``, ``package.json``, ``go.mod``, ``Cargo.toml``) --
-    never the repository root. Failing that, it is the cited path's own
-    directory; and for a file at the repository root, the file itself.
+1. **The pull request's own change set is the outer boundary**, taken from
+   git via :func:`review_loop.agent_workspace.resolve_change_set` -- the paths
+   this branch changed relative to where it diverged from its base. Neither
+   the reviewer nor the coding agent has any influence over it. Each changed
+   path contributes its **component root**: the nearest ancestor directory
+   holding a build manifest (``pyproject.toml``, ``package.json``, ``go.mod``,
+   ``Cargo.toml``), never the repository root; failing that the path's own
+   directory, and for a repository-root file, the file itself.
+2. **A finding's ``Location`` selects within that boundary.** Its cited paths
+   contribute their own component roots, and a component root outside the
+   boundary is discarded rather than granted.
 
-That is "primary location + its related tests + its nearby docs", derived
-rather than guessed: for a finding in ``tools/review-loop/src/...`` the agent
-may edit that package's source, its tests and its README, and may not touch
-``services/orchestrator`` or ``.github/workflows``. It is wider than the
-single cited file on purpose -- a fix whose test cannot be updated is not a
-fix -- and much narrower than the repository.
+The direction of that second rule is the whole point. An earlier version of
+this module derived the allowed scope from ``Location`` alone, which meant
+reviewer-written text was itself an authority over what the coding agent was
+permitted to edit -- so a finding could name a component this pull request had
+never touched and the runner would hand the agent write access to it. The
+prompt-injection boundary was applied *after* the scope had already been
+computed from the same untrusted text. Reviewer prose can now narrow the
+scope; it cannot widen it. (Independent review of PR #34 found this; the
+finding was correct.)
 
-A finding whose ``Location`` cites no path that exists at the target commit
-cannot be bounded this way. It is refused rather than routed with an empty or
-a guessed scope: an unbounded fix task is the thing this module exists to
-prevent, and a human reading the finding is a perfectly good fallback.
+The result is "primary location + its related tests + its nearby docs, inside
+what this pull request already touches": for a finding in
+``tools/review-loop/src/...`` of a pull request that changed that package, the
+agent may edit its source, its tests and its README, and may not touch
+``services/orchestrator`` or ``.github/workflows``. Wider than the single
+cited file on purpose -- a fix whose test cannot be updated is not a fix --
+and much narrower than the repository.
 
-``--allow-path`` widens the scope deliberately, by an operator who has read
-the finding. It is the escape hatch, and it is explicit in the output and in
+Two ways a finding fails to bound, both refused rather than guessed at, and
+both ending with a human reading the finding:
+
+* its ``Location`` cites no path that exists at the target commit;
+* every path it cites lies outside the pull request's own change set.
+
+``--allow-path`` is the deliberate escape hatch, and it is the *only* input
+that may reach beyond the change-set boundary -- because it comes from an
+operator who has read the finding, which is exactly the human authorization
+the boundary exists to require. It *extends* the boundary rather than sitting
+beside it, so a finding that points outside the change set becomes routable
+once a human has said so, and not before. It is explicit in the output and in
 the agent's own task contract.
 """
 
@@ -63,9 +85,13 @@ from .verdict import Finding, Recommendation, ReviewVerdict, Severity
 COMPONENT_MANIFESTS = ("pyproject.toml", "package.json", "go.mod", "Cargo.toml")
 
 #: Path-shaped tokens in a reviewer's prose. Broad on purpose: everything it
-#: yields is then required to exist at the target commit, which is the filter
-#: that actually decides.
-_PATH_TOKEN = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.+/-]*")
+#: yields is then required to exist at the target commit *and* to fall inside
+#: the change set, which are the filters that actually decide.
+#:
+#: A leading dot is admitted only when a name follows it, so that a finding
+#: about ``.github/workflows/pytest.yml`` or ``.gitignore`` cites a path this
+#: runner can see -- without ``..`` ever becoming a token.
+_PATH_TOKEN = re.compile(r"(?:[A-Za-z0-9_]|\.(?=[A-Za-z0-9_]))[A-Za-z0-9_.+/-]*")
 
 #: ``file.py:42``, ``file.py:42:9``, ``file.py#anchor``, ``file.py:L42``.
 _LOCATION_SUFFIX = re.compile(r"(?::L?\d+(?::\d+)?|#.*)\Z")
@@ -120,6 +146,11 @@ class RoutedFinding:
     finding: Finding
     cited_paths: tuple[str, ...]
     allowed_paths: tuple[AllowedPath, ...]
+    #: Paths the finding cites that exist at the target but lie outside the
+    #: pull request's change set. Recorded rather than silently dropped: they
+    #: are what the reviewer was pointing at, and an operator deciding whether
+    #: to pass ``--allow-path`` needs to see them.
+    out_of_boundary_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -136,6 +167,10 @@ class FixRequest:
     round: int
     findings: tuple[RoutedFinding, ...]
     operator_allowed_paths: tuple[AllowedPath, ...] = ()
+    #: The component roots of the paths this pull request itself changed. The
+    #: outer limit on every finding-derived entry above, and the one input to
+    #: this request that no agent and no reviewer can influence.
+    change_set_boundary: tuple[AllowedPath, ...] = ()
 
     @property
     def allowed_paths(self) -> tuple[AllowedPath, ...]:
@@ -287,7 +322,33 @@ def component_root(worktree: str, relative: str) -> AllowedPath:
     return AllowedPath(relative, is_directory=False)
 
 
-def resolve_finding(finding: Finding, *, worktree: str) -> RoutedFinding:
+def boundary_from_change_set(
+    change_set: tuple[str, ...], *, worktree: str
+) -> tuple[AllowedPath, ...]:
+    """The outer scope limit: the component roots this pull request touched.
+
+    ``change_set`` comes from git, not from any text a reviewer or an agent
+    wrote, which is the only property that makes it usable as an authority.
+    """
+    entries: list[AllowedPath] = []
+    for path in change_set:
+        normalised = posixpath.normpath(path)
+        if _is_inside(worktree, normalised) is None:
+            continue
+        entry = component_root(worktree, normalised)
+        if entry not in entries:
+            entries.append(entry)
+    if not entries:
+        raise ScopeError(
+            "this pull request's change set yields no component root, so there "
+            "is no boundary to bound a fix inside"
+        )
+    return tuple(entries)
+
+
+def resolve_finding(
+    finding: Finding, *, worktree: str, boundary: tuple[AllowedPath, ...]
+) -> RoutedFinding:
     """Bound one finding's fix to a set of paths, or refuse it.
 
     ``worktree`` is a checkout of the exact target commit, already verified by
@@ -312,6 +373,7 @@ def resolve_finding(finding: Finding, *, worktree: str) -> RoutedFinding:
 
     cited: list[str] = []
     entries: list[AllowedPath] = []
+    outside: list[str] = []
     for token in candidate_paths(finding.location):
         normalised = posixpath.normpath(token)
         if _is_inside(worktree, normalised) is None:
@@ -324,20 +386,36 @@ def resolve_finding(finding: Finding, *, worktree: str) -> RoutedFinding:
             if os.path.isdir(os.path.join(worktree, normalised))
             else component_root(worktree, normalised)
         )
+        # The boundary decides. A cited path whose component root this pull
+        # request never touched is discarded, not granted: reviewer text may
+        # select inside the change set and may not reach beyond it.
+        if not any(limit.contains(entry.path) for limit in boundary):
+            if normalised not in outside:
+                outside.append(normalised)
+            continue
         if entry not in entries:
             entries.append(entry)
 
-    if not entries:
+    if not cited:
         raise ScopeError(
             f"finding {finding.finding_id}: its Location "
             f"({finding.location[:120]!r}) cites no path that exists at "
             "the target commit, so the fix cannot be bounded to a set of files"
+        )
+    if not entries:
+        raise ScopeError(
+            f"finding {finding.finding_id}: every path its Location cites "
+            f"({', '.join(outside)}) lies outside what this pull request "
+            "changed, so routing it would widen the coding agent's scope on "
+            "the reviewer's say-so. Pass --allow-path deliberately, or fix "
+            "this finding by hand"
         )
 
     return RoutedFinding(
         finding=finding,
         cited_paths=tuple(cited),
         allowed_paths=tuple(entries),
+        out_of_boundary_paths=tuple(outside),
     )
 
 
@@ -369,14 +447,35 @@ def build_request(
     round: int,
     findings: tuple[Finding, ...],
     worktree: str,
+    change_set: tuple[str, ...],
     allow_paths: tuple[str, ...] = (),
 ) -> FixRequest:
-    """Build the bounded routing request for one fix turn."""
-    routed = tuple(resolve_finding(f, worktree=worktree) for f in findings)
+    """Build the bounded routing request for one fix turn.
+
+    ``change_set`` is what this pull request changed, per git. It is required
+    rather than optional: without it there is no authority behind the scope
+    but the reviewer's own prose, which is the thing this boundary exists to
+    stop being an authority.
+    """
+    boundary = boundary_from_change_set(change_set, worktree=worktree)
     operator = tuple(parse_allow_path(p, worktree=worktree) for p in allow_paths)
+
+    # The operator's own entries extend the boundary rather than sitting
+    # beside it, so ``--allow-path`` actually rescues a finding that points
+    # outside the change set -- which is what the refusal message tells the
+    # operator to do. Resolving findings against the change set alone and
+    # adding the operator's paths afterwards would refuse the finding first
+    # and then permit paths nothing was routed to.
+    effective = boundary + tuple(
+        entry for entry in operator if entry not in boundary
+    )
+    routed = tuple(
+        resolve_finding(f, worktree=worktree, boundary=effective) for f in findings
+    )
     return FixRequest(
         target=target,
         round=round,
         findings=routed,
         operator_allowed_paths=operator,
+        change_set_boundary=boundary,
     )

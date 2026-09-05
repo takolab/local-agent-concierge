@@ -71,6 +71,8 @@ exit codes:
   48  FIX_NOT_APPLIED         the agent could not fix a routed finding
   49  FIX_ESCALATED           the agent escalated a routed finding
   50  PATCH_WRITE_FAILED      the fix was valid but --write-patch failed
+  51  PATCH_TOO_LARGE         the fix was valid but its diff was too large to
+                              capture, so no patch survives the run
   2   usage error
 
 Exit code 0 means there is nothing left for this step to do: either a
@@ -80,6 +82,12 @@ This command makes no GitHub request at all -- no read and no write. It needs
 no token. That the commit being fixed is still this pull request's head is
 established by git: the worktree is prepared from refs/pull/N/head, and a ref
 resolving anywhere else stops the run.
+
+The outer limit on what the coding agent may edit is what this pull request
+itself changed, also taken from git -- the diff against the point this branch
+diverged from its base. A finding's Location selects within that limit and
+cannot reach beyond it; only --allow-path can. Establishing it needs the base
+branch locally, or fetchable from --git-remote.
 
 The coding agent is run with no shell: it is tokenised into an argument
 vector, receives the task contract on stdin, and answers on stdout. Its
@@ -165,7 +173,8 @@ def build_fix_parser() -> argparse.ArgumentParser:
         default=DEFAULT_REMOTE,
         help=(
             "remote to fetch the pull request's head ref from when preparing the "
-            f"agent's worktree (default: {DEFAULT_REMOTE})"
+            "agent's worktree, and to resolve the base branch from when this "
+            f"pull request's change set cannot be read locally (default: {DEFAULT_REMOTE})"
         ),
     )
     parser.add_argument(
@@ -184,8 +193,9 @@ def build_fix_parser() -> argparse.ArgumentParser:
         metavar="PATH",
         help=(
             "widen the allowed scope by this repository-relative path or "
-            "directory; repeatable. Use it deliberately, after reading the "
-            "finding: the derived scope is what keeps the fix bounded."
+            "directory; repeatable. This is the only input that may reach "
+            "outside what the pull request itself changed, so use it "
+            "deliberately, after reading the finding."
         ),
     )
     parser.add_argument(
@@ -283,10 +293,32 @@ def render_text(result: FixResult, stream: TextIO, *, agent_label: str,
             file=stream,
         )
         print(
+            "Change-set boundary:  "
+            + (
+                ", ".join(entry.display() for entry in request.change_set_boundary)
+                or "(not established)"
+            ),
+            file=stream,
+        )
+        print(
             "Allowed scope:        "
             + ", ".join(entry.display() for entry in request.allowed_paths),
             file=stream,
         )
+        outside = sorted(
+            {
+                path
+                for routed in request.findings
+                for path in routed.out_of_boundary_paths
+            }
+        )
+        if outside:
+            print(
+                "Cited but out of PR:  "
+                + ", ".join(outside)
+                + "  (not granted; pass --allow-path to include)",
+                file=stream,
+            )
 
     inspection = result.inspection
     if inspection is not None:
@@ -380,6 +412,9 @@ def render_json(result: FixResult, stream: TextIO) -> None:
         else {
             "round": request.round,
             "allowed_paths": [entry.display() for entry in request.allowed_paths],
+            "change_set_boundary": [
+                entry.display() for entry in request.change_set_boundary
+            ],
             "findings": [
                 {
                     "finding_id": r.finding.finding_id,
@@ -387,6 +422,7 @@ def render_json(result: FixResult, stream: TextIO) -> None:
                     "location": r.finding.location,
                     "cited_paths": list(r.cited_paths),
                     "allowed_paths": [e.display() for e in r.allowed_paths],
+                    "out_of_boundary_paths": list(r.out_of_boundary_paths),
                 }
                 for r in request.findings
             ],
@@ -503,6 +539,7 @@ def fix_main(
             verdict=handoff.verdict,
             allow_paths=tuple(args.allow_path),
             max_findings=args.max_findings,
+            git_remote=args.git_remote,
             dry_run=args.dry_run,
         )
     except ScopeError as exc:

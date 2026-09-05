@@ -670,13 +670,19 @@ The steps, in order, and why the order is the design:
 3. **Bind the workspace** — fetch `refs/pull/N/head`, check it resolves to
    exactly the reviewed commit, create a detached worktree there, verify it.
    PR #32's machinery, reused unchanged.
-4. **Resolve the allowed scope** against that commit's own tree. A finding
-   whose location cites no path that exists there is refused rather than
-   routed with a guess.
+4. **Establish the change-set boundary** from git, then **resolve the allowed
+   scope** inside it against that commit's own tree. A finding that cites no
+   existing path, or only paths outside the boundary, is refused rather than
+   routed with a guess or with borrowed authority.
 5. **Run one Coding Agent turn** with the task contract on stdin.
-6. **Inspect the working tree** — first, and on every path including a
-   malformed response. Reading the agent's answer before the tree would mean
-   deciding what to look for based on what the agent said it did.
+6. **Inspect the working tree** — first, and on every path once the agent has
+   started: a malformed response, and a failed or timed-out agent too. Reading
+   the agent's answer before the tree would mean deciding what to look for
+   based on what the agent said it did; and skipping the read when the
+   *process* failed would discard the evidence in the case an operator most
+   needs it. An agent that edited files and then timed out has still edited
+   files, and with `--agent-cwd` those edits stay in a directory the runner
+   does not remove.
 7. **Validate the Structured Fix Response** against the routed identity and
    against that inspection.
 8. **Capture the patch, then remove the worktree.** Always, on success and on
@@ -698,6 +704,7 @@ The steps, in order, and why the order is the design:
 | `FIX_NOT_APPLIED` | 48 | The agent could not fix a routed finding. |
 | `FIX_ESCALATED` | 49 | The agent escalated a routed finding. |
 | `PATCH_WRITE_FAILED` | 50 | The fix was valid but `--write-patch` failed. |
+| `PATCH_TOO_LARGE` | 51 | The fix was valid but its diff was too large to capture, so no patch survives the run. |
 | — | 2 | CLI usage error. |
 
 Exit code `0` means *there is nothing left for this step to do* — either a
@@ -797,40 +804,76 @@ which is exactly where a hidden change would hide. Committing, and everything
 after it, is the next slice's decision — with a human in it.
 
 The worktree is removed on every path, so **use `--write-patch`**: without it
-the fix is reported and then discarded with the directory it lived in.
+the fix is reported and then discarded with the directory it lived in. For the
+same reason a diff too large to capture (`MAX_PATCH_BYTES`) is not a success —
+it is `PATCH_TOO_LARGE` (51), never exit 0, because the run would otherwise
+announce a fix and then throw it away. `--agent-cwd` is the exception to the
+removal: that directory is yours, is not cleaned up, and keeps whatever the
+agent left in it, including after a failed run.
 
 ### The allowed scope
 
 A reviewer writes `Location` for a human, so it is prose. Deriving an exact
 permitted file set from prose is not possible, and pretending otherwise would
-produce a check that fails on correct fixes and passes on incorrect ones. So
-the rule is coarse, mechanical, and stated in full:
+produce a check that fails on correct fixes and passes on incorrect ones.
 
-> A finding's allowed scope is the **component root** of each repository path
-> its `Location` cites *and that exists at the reviewed commit*. A component
-> root is the nearest ancestor directory holding a build manifest
-> (`pyproject.toml`, `package.json`, `go.mod`, `Cargo.toml`) — **never the
-> repository root**. Failing that it is the cited path's own directory, and
-> for a file at the repository root, the file itself.
+The scope is therefore built from **two** sources, and which one is the
+*authority* matters more than the arithmetic.
 
-For a finding at `tools/review-loop/src/review_loop/verdict.py`, that is
-`tools/review-loop/`: the agent may edit that package's source, its tests and
-its README, and may not touch `services/orchestrator/` or `.github/workflows/`.
-This is "primary location + related tests + necessary docs", derived rather
-than guessed — wider than the single cited file on purpose, because a fix
-whose test cannot be updated is not a fix.
+**1. The pull request's own change set is the outer boundary.** Taken from
+git — the paths this branch changed relative to the point it diverged from its
+base — so neither the reviewer nor the agent has any influence over it. Each
+changed path contributes its **component root**:
+
+> the nearest ancestor directory holding a build manifest (`pyproject.toml`,
+> `package.json`, `go.mod`, `Cargo.toml`) — **never the repository root**;
+> failing that the path's own directory, and for a repository-root file, the
+> file itself.
+
+It is computed the way the reviewer prompt tells a reviewer to compute the
+change set, against the divergence point rather than against `ci_merge_base_sha`.
+Those differ once the base branch advances, and using the second would widen
+the boundary with commits nobody in this pull request wrote.
+
+**2. A finding's `Location` selects within that boundary.** Its cited paths
+contribute their own component roots, and a component root outside the
+boundary is **discarded rather than granted** — recorded and printed as
+`Cited but out of PR`, so an operator can see what the reviewer was pointing
+at.
+
+The direction of that second rule is the whole point, and it is a correction:
+the first version of this slice derived the scope from `Location` alone, which
+made reviewer-written text an authority over what the agent could edit. A
+finding naming a component the pull request had never touched would have been
+granted write access to it, with the prompt-injection boundary applied *after*
+the scope had already been computed from the same untrusted text. Independent
+review of PR #34 found that; the finding was correct. **Reviewer prose can now
+narrow the scope; it cannot widen it.**
+
+For a finding at `tools/review-loop/src/review_loop/verdict.py` in a pull
+request that changed that package, the scope is `tools/review-loop/`: the agent
+may edit its source, its tests and its README, and may not touch
+`services/orchestrator/` or `.github/workflows/`. "Primary location + related
+tests + necessary docs, inside what this pull request already touches" — wider
+than the cited file on purpose, because a fix whose test cannot be updated is
+not a fix.
 
 Cited paths are untrusted text, so an absolute path, a `..` component, or a
 symlink resolving outside the worktree contributes nothing.
 
-A finding that cites no existing path cannot be bounded this way. It is
-refused (`REVIEW_REQUIRES_HUMAN`) rather than routed with an empty or guessed
-scope: an unbounded fix task is the thing this rule exists to prevent, and a
-human reading the finding is a perfectly good fallback.
+Three ways this fails closed, none of them with a guess:
 
-`--allow-path PATH` widens the scope deliberately, by an operator who has read
-the finding. It is repeatable, appears in the agent's own task contract and in
-the output, and may name a file that does not exist yet.
+| Situation | Outcome |
+| --- | --- |
+| The base branch is not available locally and cannot be fetched, so the change set is unknown | `CODING_AGENT_WORKSPACE_INVALID` (42). No agent runs — a scope with no authority behind it is not a scope. |
+| A finding cites no path that exists at the reviewed commit | `REVIEW_REQUIRES_HUMAN` (40) |
+| Every path a finding cites lies outside the change set | `REVIEW_REQUIRES_HUMAN` (40) |
+
+`--allow-path PATH` is the deliberate escape hatch, and the **only** input that
+may reach beyond the change-set boundary — because it comes from an operator
+who has read the finding, which is exactly the human authorization the boundary
+exists to require. It is repeatable, appears in the agent's task contract and
+in the output, and may name a file that does not exist yet.
 
 ### Structured Fix Response v1
 
@@ -953,12 +996,19 @@ finding text is a reviewer's claim quoted verbatim, and only the
 runner-generated contract defines authority. Nothing read from either can
 widen the allowed scope or authorise an external write.
 
-This is stated **and** backstopped. A finding that talked an agent into
-claiming a fix it did not make still fails, because the claim is checked
-against the diff; one that talked it into editing elsewhere still fails, at
-the scope check. As a smaller measure, a finding whose own text contains the
-fix-response delimiters is refused before routing: reviewer text may not
-contain the marker its own answer is read from.
+This is stated **and** backstopped, in that order of reliability. A finding
+that talked an agent into claiming a fix it did not make still fails, because
+the claim is checked against the diff; one that talked it into editing
+elsewhere still fails, at the scope check. As a smaller measure, a finding
+whose own text contains the fix-response delimiters is refused before routing:
+reviewer text may not contain the marker its own answer is read from.
+
+The load-bearing part is structural rather than textual: **the finding text is
+not an authority over the scope**. It selects within the change-set boundary
+and cannot extend it, so the worst a hostile or mistaken finding can do is
+narrow the fix or fail to route — never widen what the agent may write to. An
+earlier version of this slice did not have that property, and the boundary
+exists because independent review found it missing.
 
 ### What is structurally enforced, and what is only asked for
 
@@ -967,7 +1017,7 @@ guarantees.
 
 | | |
 | --- | --- |
-| **Enforced by this runner** | The workspace is the reviewed commit and starts clean. The response names the routed finding and the exact commit. The reported file set equals the actual one. Every changed path is inside the routed scope. `HEAD` did not move. No unexpected git-ignored file was left. The runner itself makes no GitHub request and creates no commit. |
+| **Enforced by this runner** | The workspace is the reviewed commit and starts clean. The scope's outer limit comes from git, not from reviewer text. The response names the routed finding and the exact commit. The reported file set equals the actual one. Every changed path is inside the routed scope. `HEAD` did not move. No unexpected git-ignored file was left. A fix that cannot be handed back does not exit zero. The runner itself makes no GitHub request and creates no commit. |
 | **Asked for in the prompt only** | That the agent does not commit or push *itself* (detected afterwards, not prevented). That it does not touch GitHub. That it does not read credentials. That it does not work outside the worktree. |
 
 **It is not a sandbox.** The agent is an ordinary child process running as the
@@ -1007,14 +1057,19 @@ success path and on the failure paths alike.
 
 ## Known limitations
 
-* **Scope is derived from prose, and coarsely.** A finding's allowed paths
-  come from path-shaped tokens in its `Location` that exist at the reviewed
-  commit, widened to their component root. A reviewer that describes a
-  location without naming a path gets `REVIEW_REQUIRES_HUMAN` rather than a
-  guess — correct, but it means a legitimate finding can fail to route on
-  wording alone. A component root is also wider than the fix usually needs:
-  within `tools/review-loop/` the scope check would not catch an unrelated
-  edit to a neighbouring file in the same package.
+* **Scope is coarse, and can refuse legitimate findings.** A reviewer that
+  describes a location without naming a path, or that names only paths outside
+  the pull request's change set, gets `REVIEW_REQUIRES_HUMAN` rather than a
+  guess. That is the intended direction, but it means a legitimate finding —
+  "your change here breaks the caller over there" — does not route without an
+  explicit `--allow-path`. A component root is also wider than most fixes
+  need: within `tools/review-loop/` the scope check would not catch an
+  unrelated edit to a neighbouring file in the same package.
+* **The change-set boundary needs the base branch.** It is resolved from a
+  remote-tracking ref, a local branch, or a fetch, in that order. A clone
+  without the base branch and without network access cannot establish it, and
+  the run fails closed at `CODING_AGENT_WORKSPACE_INVALID` rather than falling
+  back to reviewer-derived scope.
 * **The fix is checked for shape and place, never for correctness.** The
   runner establishes that the change is the one that was asked for, where it
   was allowed, and no more. Whether it actually satisfies the reviewer's

@@ -107,6 +107,11 @@ class FixRunOutcome(Enum):
     FIX_ESCALATED = "FIX_ESCALATED"
     #: The captured patch could not be written where it was asked for.
     PATCH_WRITE_FAILED = "PATCH_WRITE_FAILED"
+    #: The working tree held a valid fix, but its diff was larger than a
+    #: bounded fix may be, so no patch was captured. The worktree is removed
+    #: when the run ends, so this turn produced a change nobody can retrieve
+    #: -- which is not a success, whatever the response said.
+    PATCH_TOO_LARGE = "PATCH_TOO_LARGE"
 
 
 #: Exit code per outcome, in a block of their own so that no fix outcome can
@@ -130,6 +135,7 @@ FIX_EXIT_CODES: dict[FixRunOutcome, int] = {
     FixRunOutcome.FIX_NOT_APPLIED: 48,
     FixRunOutcome.FIX_ESCALATED: 49,
     FixRunOutcome.PATCH_WRITE_FAILED: 50,
+    FixRunOutcome.PATCH_TOO_LARGE: 51,
 }
 
 
