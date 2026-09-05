@@ -1051,8 +1051,17 @@ That run found that the runner bound the verdict to an exact SHA but not the
 reviewer's working directory; the workspace-binding refinement that closed the
 gap was then validated live against a pull request in another repository, in
 [`docs/delegated-development/review-loop-live-experiment-2.md`](delegated-development/review-loop-live-experiment-2.md),
-which supports progressing to the next bounded slice — Structured Findings →
-Coding Agent routing.
+which supported progressing to the next bounded slice.
+
+That slice is now `review-loop fix`: the validated findings of one review turn
+are routed to one bounded Coding Agent turn in a dedicated writable worktree at
+the reviewed commit, and the Structured Fix Response it returns is validated
+against the working tree the agent actually left. It makes no GitHub request at
+all and produces a patch, not a commit — the human keeps every decision about
+whether the finding is accepted, whether the fix is used, and whether anything
+is pushed. Committing that fix, pushing it and waiting for authoritative CI is
+the next bounded slice; Independent Re-Review, the multi-round loop and the
+Merge Decision Brief come after it.
 
 ## Branch Naming
 

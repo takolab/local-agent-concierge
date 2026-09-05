@@ -79,8 +79,17 @@ def _label(argv: list[str]) -> str:
     return "git " + " ".join(words or argv[:1])
 
 
-def _git(argv: list[str], *, cwd: str | None, timeout: float) -> str:
-    """Run one git command with no shell and return its stdout."""
+def run_git(
+    argv: list[str], *, cwd: str | None, timeout: float, strip: bool = True
+) -> str:
+    """Run one git command with no shell and return its stdout.
+
+    ``strip`` is on by default because almost every caller wants one line
+    without its newline. It must be turned **off** for ``-z`` output: a
+    ``git status --porcelain`` record begins with a two-character status
+    field whose first character is a space for an unstaged change, and
+    stripping it shifts every path by one character.
+    """
     if shutil.which("git") is None:
         raise WorkspaceError(
             "the 'git' CLI is required to bind the reviewer to the review target "
@@ -104,15 +113,29 @@ def _git(argv: list[str], *, cwd: str | None, timeout: float) -> str:
     if completed.returncode != 0:
         stderr = (completed.stderr or "").strip() or "(no stderr)"
         raise WorkspaceError(f"{_label(argv)} failed: {stderr}")
-    return (completed.stdout or "").strip()
+    stdout = completed.stdout or ""
+    return stdout.strip() if strip else stdout
 
 
-def verify_checkout(path: str, head_sha: str, *, timeout: float = DEFAULT_GIT_TIMEOUT_SECONDS) -> None:
+def verify_checkout(
+    path: str,
+    head_sha: str,
+    *,
+    timeout: float = DEFAULT_GIT_TIMEOUT_SECONDS,
+    role: str = "reviewer",
+) -> None:
     """Raise unless ``path`` is a clean checkout of exactly ``head_sha``.
 
     Every condition is checked positively. "Not obviously wrong" is not the
-    same claim as "is the review target", and only the second one permits a
-    reviewer to start.
+    same claim as "is the review target", and only the second one permits an
+    agent to start.
+
+    ``role`` names the actor in the failure message and changes nothing else.
+    The routing slice reuses these rules verbatim for a Coding Agent's
+    *starting* tree: a writable workspace that already holds someone else's
+    edits is not a workspace whose final state means anything. What that
+    agent is allowed to leave behind is a separate question, answered in
+    :mod:`review_loop.agent_workspace`.
     """
     if len(head_sha) != _FULL_SHA_LENGTH:
         raise WorkspaceError(
@@ -120,37 +143,37 @@ def verify_checkout(path: str, head_sha: str, *, timeout: float = DEFAULT_GIT_TI
             "workspace cannot be bound to it"
         )
     if not os.path.isdir(path):
-        raise WorkspaceError(f"the reviewer working directory {path!r} is not a directory")
+        raise WorkspaceError(f"the {role} working directory {path!r} is not a directory")
 
     # Outside a repository git *fails* rather than answering "false", so both
     # shapes are the same finding and deserve the same message.
     try:
-        inside = _git(["rev-parse", "--is-inside-work-tree"], cwd=path, timeout=timeout)
+        inside = run_git(["rev-parse", "--is-inside-work-tree"], cwd=path, timeout=timeout)
     except WorkspaceError as exc:
         raise WorkspaceError(
-            f"the reviewer working directory {path!r} is not a git work tree: {exc}"
+            f"the {role} working directory {path!r} is not a git work tree: {exc}"
         ) from exc
     if inside != "true":
-        raise WorkspaceError(f"the reviewer working directory {path!r} is not a git work tree")
+        raise WorkspaceError(f"the {role} working directory {path!r} is not a git work tree")
 
-    checked_out = _git(["rev-parse", "HEAD"], cwd=path, timeout=timeout)
+    checked_out = run_git(["rev-parse", "HEAD"], cwd=path, timeout=timeout)
     if checked_out != head_sha:
         raise WorkspaceError(
-            f"the reviewer working directory {path!r} is at {checked_out}, not the "
-            f"review target {head_sha}; a review of it would describe another commit"
+            f"the {role} working directory {path!r} is at {checked_out}, not the "
+            f"review target {head_sha}; work done in it would describe another commit"
         )
 
     # A clean tree matters as much as the right commit. `rev-parse HEAD` says
     # what was checked out, not what the reviewer would read: uncommitted
     # edits on top of the right SHA are still code that is not in the pull
     # request, and untracked files are still files a reviewer may open.
-    dirty = _git(["status", "--porcelain", "--untracked-files=all"], cwd=path, timeout=timeout)
+    dirty = run_git(["status", "--porcelain", "--untracked-files=all"], cwd=path, timeout=timeout)
     if dirty:
         changed = len(dirty.splitlines())
         raise WorkspaceError(
-            f"the reviewer working directory {path!r} is at the review target "
+            f"the {role} working directory {path!r} is at the review target "
             f"{head_sha} but has {changed} uncommitted or untracked path(s); the "
-            "reviewer would read code that is not in this pull request"
+            f"{role} would read code that is not in this pull request"
         )
 
     # `git status` says nothing about ignored files, and "ignored by git" does
@@ -164,7 +187,7 @@ def verify_checkout(path: str, head_sha: str, *, timeout: float = DEFAULT_GIT_TI
     # this catches are exactly the ones that must not reach a reviewer. A
     # prepared worktree is unaffected: it is a fresh checkout with nothing
     # layered on top.
-    ignored = _git(
+    ignored = run_git(
         ["ls-files", "--others", "--ignored", "--exclude-standard"],
         cwd=path,
         timeout=timeout,
@@ -173,9 +196,9 @@ def verify_checkout(path: str, head_sha: str, *, timeout: float = DEFAULT_GIT_TI
         paths = ignored.splitlines()
         shown = ", ".join(paths[:3]) + (", ..." if len(paths) > 3 else "")
         raise WorkspaceError(
-            f"the reviewer working directory {path!r} is at the review target "
+            f"the {role} working directory {path!r} is at the review target "
             f"{head_sha} but contains {len(paths)} git-ignored path(s) ({shown}); "
-            "they are not in this pull request and the reviewer can still read "
+            f"they are not in this pull request and the {role} can still read "
             "them, and this repository ignores credential files"
         )
 
@@ -183,17 +206,29 @@ def verify_checkout(path: str, head_sha: str, *, timeout: float = DEFAULT_GIT_TI
 class ExistingWorkspace:
     """A directory the operator chose, verified against the target."""
 
-    def __init__(self, path: str, *, timeout: float = DEFAULT_GIT_TIMEOUT_SECONDS) -> None:
+    def __init__(
+        self,
+        path: str,
+        *,
+        timeout: float = DEFAULT_GIT_TIMEOUT_SECONDS,
+        role: str = "reviewer",
+    ) -> None:
         self.path = path
+        self.role = role
         self._timeout = timeout
 
     @contextmanager
     def open(self, head_sha: str) -> Iterator[str]:
-        verify_checkout(self.path, head_sha, timeout=self._timeout)
+        verify_checkout(self.path, head_sha, timeout=self._timeout, role=self.role)
         yield self.path
 
     def describe(self) -> str:
-        return f"{self.path} (verified against the target)"
+        # Future tense on purpose. This label is rendered before the check
+        # runs, so live experiment #2 saw "(verified against the target)"
+        # printed a few lines above REVIEWER_WORKSPACE_INVALID -- a
+        # past-tense guarantee that did not hold, in the text an operator
+        # reads while diagnosing exactly that failure.
+        return f"{self.path} (verified against the target before use)"
 
 
 class PreparedWorkspace:
@@ -206,10 +241,12 @@ class PreparedWorkspace:
         *,
         remote: str = DEFAULT_REMOTE,
         timeout: float = DEFAULT_GIT_TIMEOUT_SECONDS,
+        role: str = "reviewer",
     ) -> None:
         self.repo_root = repo_root
         self.number = number
         self.remote = remote
+        self.role = role
         self._timeout = timeout
 
     @contextmanager
@@ -224,8 +261,8 @@ class PreparedWorkspace:
         # branch may live in a fork this repository has no remote for, and
         # refs/pull/N/head is what GitHub itself resolved the head from.
         ref = f"refs/pull/{self.number}/head"
-        _git(["fetch", "--quiet", self.remote, ref], cwd=self.repo_root, timeout=self._timeout)
-        fetched = _git(["rev-parse", "FETCH_HEAD"], cwd=self.repo_root, timeout=self._timeout)
+        run_git(["fetch", "--quiet", self.remote, ref], cwd=self.repo_root, timeout=self._timeout)
+        fetched = run_git(["rev-parse", "FETCH_HEAD"], cwd=self.repo_root, timeout=self._timeout)
         if fetched != head_sha:
             # Two authorities disagree about what this pull request's head is.
             # Guessing which one is current is exactly the guess this tool
@@ -239,14 +276,16 @@ class PreparedWorkspace:
         parent = tempfile.mkdtemp(prefix=f"review-loop-pr{self.number}-")
         worktree = os.path.join(parent, head_sha[:12])
         try:
-            _git(
+            run_git(
                 ["worktree", "add", "--detach", "--quiet", worktree, head_sha],
                 cwd=self.repo_root,
                 timeout=self._timeout,
             )
             # Verified rather than assumed. `worktree add` succeeding is not
             # the same fact as "this directory is that commit, and clean".
-            verify_checkout(worktree, head_sha, timeout=self._timeout)
+            verify_checkout(
+                worktree, head_sha, timeout=self._timeout, role=self.role
+            )
             yield worktree
         finally:
             self._remove(worktree, parent)
@@ -254,7 +293,7 @@ class PreparedWorkspace:
     def _remove(self, worktree: str, parent: str) -> None:
         """Best-effort cleanup: never mask the reason the review ended."""
         try:
-            _git(
+            run_git(
                 ["worktree", "remove", "--force", worktree],
                 cwd=self.repo_root,
                 timeout=self._timeout,
@@ -263,7 +302,7 @@ class PreparedWorkspace:
             pass
         shutil.rmtree(parent, ignore_errors=True)
         try:
-            _git(["worktree", "prune"], cwd=self.repo_root, timeout=self._timeout)
+            run_git(["worktree", "prune"], cwd=self.repo_root, timeout=self._timeout)
         except WorkspaceError:
             pass
 

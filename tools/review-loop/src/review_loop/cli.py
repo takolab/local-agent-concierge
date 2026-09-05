@@ -1,13 +1,16 @@
 """Command line front end.
 
-Two commands, one entry point:
+Three commands, one entry point:
 
 * ``review-loop --pr <number> --dry-run`` -- verification only, read-only,
   unchanged from the shape PR #28 shipped.
 * ``review-loop review --pr <number> --reviewer-command ...`` -- one
   Independent Review turn, which is the only path that can write to GitHub.
+* ``review-loop fix --review-json <file> --agent-command ...`` -- one bounded
+  Coding Agent turn routed from that review's validated findings. It makes no
+  GitHub request at all, and writes only inside a worktree it prepares.
 
-The subcommand is dispatched by name rather than by an argparse subparser so
+Subcommands are dispatched by name rather than by an argparse subparser so
 that the bare ``--pr`` form keeps working exactly as before, including its
 help text and its exit codes.
 """
@@ -37,7 +40,8 @@ exit codes:
 Only exit code 0 means a review may be started. This command never writes to
 GitHub: it issues read-only GET requests through the authenticated `gh` CLI.
 
-To run the review itself, see `review-loop review --help`.
+To run the review itself, see `review-loop review --help`. To route its
+findings to a bounded Coding Agent turn, see `review-loop fix --help`.
 """
 
 
@@ -188,9 +192,9 @@ def render_json(evaluation: CiEvaluation, stream: TextIO) -> None:
     stream.write("\n")
 
 
-#: The verification command's name for the review turn, dispatched before
-#: argparse sees the arguments.
+#: Subcommand names, dispatched before argparse sees the arguments.
 REVIEW_COMMAND = "review"
+FIX_COMMAND = "fix"
 
 
 def main(
@@ -201,9 +205,17 @@ def main(
     reader=None,
     writer=None,
     reviewer=None,
+    agent=None,
+    workspace=None,
     expected_author: str | None = None,
 ) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == FIX_COMMAND:
+        from .fix_cli import fix_main
+
+        # No client, reader or writer is threaded through: the fix turn holds
+        # no GitHub credential and issues no GitHub request.
+        return fix_main(arguments[1:], agent=agent, workspace=workspace, stream=stream)
     if arguments and arguments[0] == REVIEW_COMMAND:
         from .review_cli import review_main
 

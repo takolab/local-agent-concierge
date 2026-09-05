@@ -1,10 +1,11 @@
 # Review loop runner
 
 A local command that runs one Independent AI Review turn against a pull
-request, and records the result only when it can prove which exact pull
-request state that review describes.
+request, records the result only when it can prove which exact pull request
+state that review describes, and routes the findings that review produced to
+one bounded Coding Agent turn against that same exact state.
 
-It has two commands.
+It has three commands.
 
 **`review-loop --pr N`** answers two questions, read-only:
 
@@ -17,9 +18,16 @@ capture the verified target, invoke an independent read-only reviewer, validate
 the Structured Verdict it returns, re-verify that the target has not moved, and
 record the result as one `## Independent AI Review` comment.
 
-Everything else the review loop will eventually need — routing findings to a
-Coding Agent, applying fixes, re-review, merge decisions — is not here. This
-is one review turn, bound to one verified state.
+**`review-loop fix --review-json <file>`** takes that review's own JSON output
+and routes its open findings to one bounded Coding Agent turn: a dedicated
+writable worktree at the reviewed commit, an explicit allowed scope derived
+from the findings, a Structured Fix Response validated against the working
+tree, and a patch. It makes **no GitHub request at all** and commits nothing.
+
+Everything after that — committing the fix, pushing it, waiting for CI,
+re-review, merge decisions — is not here. This is one review turn and one
+bounded fix turn, both bound to one verified state, with the human keeping
+every decision about what happens to the result.
 
 ## Verification: `review-loop --pr N`
 
@@ -618,6 +626,358 @@ re-running a workflow, or merging.
 and prints the comment it would have recorded. It never constructs a writer at
 all, so there is nothing that could write even if the branching were wrong.
 
+## Routing findings to a Coding Agent: `review-loop fix`
+
+```bash
+review-loop review --pr 29 --reviewer-command "my-reviewer" --json > review.json
+review-loop fix --review-json review.json \
+  --agent-command "my-coding-agent" \
+  --write-patch fix.patch
+```
+
+```text
+PR:                   #29 (base master)
+Reviewed head SHA:    161669f40858aedfc4ebc6084338c990d2987870  [161669f]
+Repository:           takolab/local-agent-concierge
+Coding agent:         my-coding-agent
+Agent workspace:      a detached worktree at the target, from /home/you/repo
+Agent invoked:        Yes
+Routed findings:      F1 (Major)
+Allowed scope:        tools/review-loop/
+Working tree:         tools/review-loop/src/review_loop/verdict.py, tools/review-loop/tests/test_verdict.py
+HEAD after the run:   161669f40858aedfc4ebc6084338c990d2987870
+Fix responses:
+  F1: fixed (tools/review-loop/src/review_loop/verdict.py, tools/review-loop/tests/test_verdict.py)
+Outcome:              FIX_APPLIED
+Reason:
+  - 1 open finding(s) are routable: F1
+  - F1 was fixed in tools/review-loop/src/review_loop/verdict.py, ...
+Patch:                fix.patch
+GitHub write performed: No
+Commit or push performed: No
+```
+
+The steps, in order, and why the order is the design:
+
+1. **Load the routing input** and re-validate every field of it. See
+   [The handoff](#the-handoff) — a document that would not have been an
+   admissible verdict is not an admissible handoff.
+2. **Gate, before preparing anything.** Whether the verdict may be routed at
+   all is decided from the verdict alone, so an approval, a `Blocking`
+   finding or an escalated review costs no fetch, no worktree and no child
+   process. `--dry-run` stops here, and stopping here is what makes it a dry
+   run rather than a rehearsal.
+3. **Bind the workspace** — fetch `refs/pull/N/head`, check it resolves to
+   exactly the reviewed commit, create a detached worktree there, verify it.
+   PR #32's machinery, reused unchanged.
+4. **Resolve the allowed scope** against that commit's own tree. A finding
+   whose location cites no path that exists there is refused rather than
+   routed with a guess.
+5. **Run one Coding Agent turn** with the task contract on stdin.
+6. **Inspect the working tree** — first, and on every path including a
+   malformed response. Reading the agent's answer before the tree would mean
+   deciding what to look for based on what the agent said it did.
+7. **Validate the Structured Fix Response** against the routed identity and
+   against that inspection.
+8. **Capture the patch, then remove the worktree.** Always, on success and on
+   every failure.
+
+| Outcome | Exit | Meaning |
+| --- | --- | --- |
+| `FIX_APPLIED` | 0 | Every routed finding came back `fixed`, and the working tree agrees. |
+| `NO_ACTIONABLE_FINDINGS` | 0 | The review asks for nothing. No agent ran. |
+| `ROUTING_PREPARED` | 0 | `--dry-run`: the request was built and shown. No workspace, no agent. |
+| `REVIEW_REQUIRES_HUMAN` | 40 | A `Blocking` finding, an escalated review, more findings than one turn admits, or a finding whose scope cannot be bounded. No agent ran. |
+| `ROUTING_INPUT_INVALID` | 41 | The routing input is not a validated review. |
+| `CODING_AGENT_WORKSPACE_INVALID` | 42 | The workspace is not a clean checkout of the reviewed commit. No agent ran. |
+| `CODING_AGENT_FAILED` | 43 | The agent exited non-zero, timed out, or could not be run. |
+| `FIX_RESPONSE_MALFORMED` | 44 | The output is not a valid fix response. |
+| `FIX_TARGET_MISMATCH` | 45 | A response describes another commit. |
+| `FIX_FINDING_MISMATCH` | 46 | The responses do not correspond one-to-one with the routed findings. |
+| `FIX_SCOPE_VIOLATION` | 47 | The tree disagrees with the response, or holds a change the scope did not permit. |
+| `FIX_NOT_APPLIED` | 48 | The agent could not fix a routed finding. |
+| `FIX_ESCALATED` | 49 | The agent escalated a routed finding. |
+| `PATCH_WRITE_FAILED` | 50 | The fix was valid but `--write-patch` failed. |
+| — | 2 | CLI usage error. |
+
+Exit code `0` means *there is nothing left for this step to do* — either a
+validated fix exists, or the review gave this step nothing to act on. Every
+other value is a distinct reason, so a later slice can branch on why. The
+codes occupy a block of their own: no fix outcome collides with a
+verification verdict (0–20) or a review outcome (30–35), and a test asserts
+that.
+
+### The handoff
+
+The fix turn's input is the review turn's own `--json` output, not a pull
+request number. Two reasons, and one thing it deliberately is not.
+
+Running the review again to recover its findings would pay for a second
+reviewer and could produce a *different* verdict from the one a human read.
+Passing the reviewed verdict forward fixes what was actually reviewed.
+
+It is **not** a re-parse of untrusted text. Loosely scraping a GitHub comment,
+or re-reading the reviewer's raw output, would mean deriving a verdict a
+second time from something that was never a verdict. What happens instead is
+that a machine-generated serialisation of the already-validated model is read
+back through *the same invariants that produced it*: full 40-character SHAs,
+the closed severity and recommendation vocabularies, the finding-id pattern,
+the field limits, the round, and the review contract's own coherence rules
+(`approved` with findings, `changes_requested` with a `Blocking` finding, a
+verdict whose reviewed SHA is not its target's). A handoff that would not have
+been an admissible verdict is refused.
+
+A handoff file is operator-controlled input, and that is not a new authority:
+someone who can write it could equally run the command with different
+arguments. What they cannot do is route a fix against a commit that is not the
+pull request's head, because the workspace resolves `refs/pull/N/head` and
+refuses anything else. **Git, not the file, decides which commit gets fixed.**
+
+It is also not persistent state. It is one file piped from one command into
+the next; nothing reads it later, nothing accumulates, and deleting it loses
+nothing GitHub does not already hold.
+
+### Which findings route
+
+| Verdict | What happens |
+| --- | --- |
+| `approved`, or no open findings | `NO_ACTIONABLE_FINDINGS`. No agent runs. |
+| Any `Blocking` finding | `REVIEW_REQUIRES_HUMAN`. This project's standing decision: a Blocking finding goes to a human and never into an automated fix. |
+| `escalate` | `REVIEW_REQUIRES_HUMAN`, with the reviewer's escalation reason. |
+| More than `--max-findings` (default 5) open findings | `REVIEW_REQUIRES_HUMAN`. A turn carrying twenty findings is not bounded in any useful sense. |
+| Otherwise | All open findings route, in **one** agent turn. |
+
+The rule is re-applied here rather than assumed from the review side, because
+the verdict travelled through a file to get here, and a rule checked only
+upstream holds only as long as nothing changes upstream.
+
+**One verdict, one turn, one response block per finding.** Several findings
+share a turn, and each gets its own `Finding ID` block with its own outcome,
+so identity stays singular even when the turn is not. There is no parallel
+multi-agent routing here and no plan for one at this scale.
+
+### The Coding Agent's workspace
+
+The reviewer's workspace and the agent's are the same at the start and
+deliberately different at the end.
+
+**Before the agent runs**, PR #32's rules apply verbatim, via the same code:
+the directory is a git work tree, its `HEAD` is exactly the reviewed commit,
+`git status --porcelain --untracked-files=all` is empty, and
+`git ls-files --others --ignored --exclude-standard` is empty too. A writable
+workspace that already contains someone else's edits, or a stray `.env`, is
+not a workspace whose *final* state means anything. Any failure is
+`CODING_AGENT_WORKSPACE_INVALID` (42), raised before the agent starts.
+
+By default the runner prepares that workspace itself — fetch
+`refs/pull/N/head`, require it to resolve to exactly the reviewed commit,
+`git worktree add --detach`, verify, run, remove. `--agent-cwd` replaces it
+with a directory you control, verified the same way; its contents *will* be
+modified, so it should be a directory you dedicated to this.
+
+**After the agent runs**, three kinds of change are distinguished, because
+they are three different facts:
+
+* **Tracked and untracked changes are the fix.** They are compared, as a set,
+  against what the agent said it changed and against the routed scope.
+* **Build and test residue is expected.** `__pycache__`, `.pytest_cache`,
+  `.hypothesis`, `.venv`, `node_modules`, `*.pyc` and the like are git-ignored,
+  are therefore not part of the fix and cannot reach a pull request, and are
+  reported and tolerated. Reusing the reviewer's zero-ignored-files rule here
+  would fail every turn in which the agent did what it was told and ran the
+  tests.
+* **Any other git-ignored path is neither.** The tree started with none, so
+  each was produced by this run, and this repository's `.gitignore` covers
+  `.env`, `credentials.json`, `token.json`, `*.pem` and `*.key`. A run that
+  ends with one of those is `FIX_SCOPE_VIOLATION`.
+
+**The agent must not commit.** `HEAD` is re-read afterwards and a moved one
+fails the run: a committed fix is a change `git status` no longer reports,
+which is exactly where a hidden change would hide. Committing, and everything
+after it, is the next slice's decision — with a human in it.
+
+The worktree is removed on every path, so **use `--write-patch`**: without it
+the fix is reported and then discarded with the directory it lived in.
+
+### The allowed scope
+
+A reviewer writes `Location` for a human, so it is prose. Deriving an exact
+permitted file set from prose is not possible, and pretending otherwise would
+produce a check that fails on correct fixes and passes on incorrect ones. So
+the rule is coarse, mechanical, and stated in full:
+
+> A finding's allowed scope is the **component root** of each repository path
+> its `Location` cites *and that exists at the reviewed commit*. A component
+> root is the nearest ancestor directory holding a build manifest
+> (`pyproject.toml`, `package.json`, `go.mod`, `Cargo.toml`) — **never the
+> repository root**. Failing that it is the cited path's own directory, and
+> for a file at the repository root, the file itself.
+
+For a finding at `tools/review-loop/src/review_loop/verdict.py`, that is
+`tools/review-loop/`: the agent may edit that package's source, its tests and
+its README, and may not touch `services/orchestrator/` or `.github/workflows/`.
+This is "primary location + related tests + necessary docs", derived rather
+than guessed — wider than the single cited file on purpose, because a fix
+whose test cannot be updated is not a fix.
+
+Cited paths are untrusted text, so an absolute path, a `..` component, or a
+symlink resolving outside the worktree contributes nothing.
+
+A finding that cites no existing path cannot be bounded this way. It is
+refused (`REVIEW_REQUIRES_HUMAN`) rather than routed with an empty or guessed
+scope: an unbounded fix task is the thing this rule exists to prevent, and a
+human reading the finding is a perfectly good fallback.
+
+`--allow-path PATH` widens the scope deliberately, by an operator who has read
+the finding. It is repeatable, appears in the agent's own task contract and in
+the output, and may name a file that does not exist yet.
+
+### Structured Fix Response v1
+
+The agent answers with one delimited block **per routed finding**:
+
+```text
+BEGIN BOUNDED FIX RESPONSE v1
+Finding ID: F1
+Target head SHA: 161669f40858aedfc4ebc6084338c990d2987870
+Outcome: fixed
+Files changed:
+- calc/calc.py
+- calc/tests/test_mean.py
+Verification: python -m pytest calc/tests: 4 passed
+Summary: mean() now rejects an empty sequence with a ValueError naming the
+  input, so the required outcome holds. divide() is untouched.
+Scope notes: only calc/ was touched.
+END BOUNDED FIX RESPONSE v1
+```
+
+Same parsing rules as the Structured Verdict, for the same reasons: only
+delimited text is read, a label counts only at column 0, and an unrecognised
+label-shaped line at column 0 is an error rather than content. One rule
+differs — a fix turn produces a *sequence* of blocks, and an empty sequence is
+a failure rather than an empty answer.
+
+| Field | Required | Notes |
+| --- | --- | --- |
+| `Finding ID` | always | Must be one of the routed ids, answered exactly once. |
+| `Target head SHA` | always | Exactly the 40 characters of the reviewed commit. |
+| `Outcome` | always | `fixed`, `unable_to_fix`, or `escalate`. Nothing else. |
+| `Files changed` | always | `- path` per line, or `(none)`. A bare path with no marker is refused: it is indistinguishable from a wrapped continuation. |
+| `Summary` | always | |
+| `Verification` | when `fixed` | A fix reported with no verification is an assertion. |
+| `Reason` | when not `fixed` | What stopped the fix, or what is being escalated. |
+| `Scope notes` | optional | Where an agent reports what it deliberately did not touch. |
+
+Two rules are worth naming:
+
+* **`fixed` requires at least one changed file.** There is no "fixed, no code
+  change". If a finding turns out to need no change, that is not a fix — it is
+  a disagreement with the reviewer, and the contract has a word for it:
+  `escalate`.
+* **`unable_to_fix` and `escalate` must leave nothing behind.** Half-finished
+  edits with no claim attached are the worst possible artifact to hand a
+  human: they look like a fix and are not one.
+
+The turn's single outcome aggregates the blocks: `FIX_APPLIED` only if every
+one is `fixed`; any `escalate` makes the turn `FIX_ESCALATED`, which outranks
+everything else, because a human has been asked a question and a green exit
+code would bury it.
+
+### What is checked, and what cannot be
+
+The response is checked, never believed.
+
+**Identity.** Each block names exactly one routed finding and exactly the
+commit the fix started from. Abbreviated SHAs are refused rather than
+resolved. The set of blocks must correspond one-to-one with the routed
+findings — a silently dropped finding looks exactly like a handled one.
+
+**The working tree.** The union of every block's `Files changed` must equal
+what `git status --porcelain -z --untracked-files=all` reports. A file changed
+but not reported fails the turn; so does a file reported but not changed. This
+is the check that makes `Files changed` a claim rather than a courtesy. Every
+changed path must also fall inside the routed scope.
+
+**What is not checked:** whether the fix is *correct*. That cannot be
+mechanised here — the reviewer's `Required outcome` is prose, and a runner
+grading prose would be a second reviewer with none of the first one's
+independence. Nor is the agent's reported `Verification` command re-run: that
+string comes from the agent, and executing it would hand an untrusted process
+exactly the arbitrary-command channel the rest of this design refuses it. So
+the runner establishes that the fix is *the one that was asked for, in the
+place it was allowed, and no more*. Whether it is right, and whether it is
+used at all, stay with the human.
+
+### Coding Agent invocation
+
+The agent is a command you configure, run through the same mechanism as the
+reviewer (`bounded_process.py`), which is where the security argument for both
+roles lives in one place:
+
+* **no shell** — the command is tokenised into an argument vector; untrusted
+  text never reaches a command line;
+* **an allowlisted environment** — `PATH`, `HOME`, `LANG`, `LC_ALL`, `TERM`,
+  `TMPDIR`, `USER`, plus whatever `--agent-env NAME` names. No credential
+  variable is on that list. A coding agent legitimately needs more than a
+  reviewer, and it gets exactly what is named;
+* **a timeout** (default 1800s, longer than the reviewer's, because making a
+  change and running its tests is not the same work as reading) and an
+  **output size limit**;
+* **stdout only** — a response block written to stderr has not been produced.
+
+### GitHub and credential boundary
+
+`review-loop fix` makes **no GitHub request of any kind** — not a read, not a
+write. It constructs no client, reader or writer; the subcommand dispatch
+threads none in. The one fact a fix turn needs from outside — that the commit
+it is fixing is still this pull request's head — comes from git resolving
+`refs/pull/N/head`, which is the same fact a GitHub round-trip would have
+established, obtained without a credential.
+
+That claim is asserted at the source level, the way PR #29's single-write
+boundary is: tests parse each of the ten fix-path modules and assert that none
+imports `github_client` or `github_comments`, names `gh`, names a write HTTP
+method, or contains a GitHub API host.
+
+**No new credential is introduced.** The agent needs no GitHub token, and
+`GH_TOKEN`, `GITHUB_TOKEN` and every other credential variable are off the
+default allowlist. Nothing here pushes, commits, comments, labels, merges or
+dispatches a workflow.
+
+### Prompt injection boundary
+
+A coding agent has two untrusted inputs where a reviewer has one: repository
+content, and the reviewer's finding text. The task contract states both
+explicitly — repository files may contain instructions and are material, the
+finding text is a reviewer's claim quoted verbatim, and only the
+runner-generated contract defines authority. Nothing read from either can
+widen the allowed scope or authorise an external write.
+
+This is stated **and** backstopped. A finding that talked an agent into
+claiming a fix it did not make still fails, because the claim is checked
+against the diff; one that talked it into editing elsewhere still fails, at
+the scope check. As a smaller measure, a finding whose own text contains the
+fix-response delimiters is refused before routing: reviewer text may not
+contain the marker its own answer is read from.
+
+### What is structurally enforced, and what is only asked for
+
+Worth separating, because a table of instructions can read like a table of
+guarantees.
+
+| | |
+| --- | --- |
+| **Enforced by this runner** | The workspace is the reviewed commit and starts clean. The response names the routed finding and the exact commit. The reported file set equals the actual one. Every changed path is inside the routed scope. `HEAD` did not move. No unexpected git-ignored file was left. The runner itself makes no GitHub request and creates no commit. |
+| **Asked for in the prompt only** | That the agent does not commit or push *itself* (detected afterwards, not prevented). That it does not touch GitHub. That it does not read credentials. That it does not work outside the worktree. |
+
+**It is not a sandbox.** The agent is an ordinary child process running as the
+invoking user. A target-bound worktree is where it is *pointed*, not a wall
+around it: it can read and write elsewhere on the filesystem, and if the
+machine has a usable `gh` login it could use it. That is exactly why the
+working tree is inspected independently rather than trusted — but the
+inspection establishes what happened *inside the worktree*, and an agent that
+wrote somewhere else did so as you, unobserved.
+
 ## Tests
 
 ```bash
@@ -625,10 +985,10 @@ pip install -e "tools/review-loop[test]"
 python -m pytest tools/review-loop/tests
 ```
 
-No test performs network access, invokes a real reviewer, or requires
-credentials; the GitHub API is replaced by fakes built from real recorded
-response shapes, and the reviewer-process tests run `sys.executable` with an
-inline script. CI needs no agent credentials.
+No test performs network access, invokes a real reviewer or coding agent, or
+requires credentials; the GitHub API is replaced by fakes built from real
+recorded response shapes, and the reviewer- and agent-process tests run
+`sys.executable` with an inline script. CI needs no agent credentials.
 
 The workspace tests do drive **real `git`**, against repositories built in a
 temporary directory — the "remote" is a bare repository on disk and the head
@@ -637,8 +997,35 @@ faked git would prove nothing here: the failure being prevented is a claim
 about what git actually checked out, so the assertions are about real
 detached worktrees and a really dirty working tree.
 
+The fix-turn tests extend that to what an agent *leaves behind*. A scripted
+agent really edits files in a really prepared worktree, and the assertions are
+about what `git status` then reports: a hidden extra change, an out-of-scope
+edit, a real `git commit` made inside the worktree, a real `.env` left in it,
+and a real `__pycache__` that must not fail the turn. The operator's own
+checkout is asserted unchanged, and the worktree asserted removed, on the
+success path and on the failure paths alike.
+
 ## Known limitations
 
+* **Scope is derived from prose, and coarsely.** A finding's allowed paths
+  come from path-shaped tokens in its `Location` that exist at the reviewed
+  commit, widened to their component root. A reviewer that describes a
+  location without naming a path gets `REVIEW_REQUIRES_HUMAN` rather than a
+  guess — correct, but it means a legitimate finding can fail to route on
+  wording alone. A component root is also wider than the fix usually needs:
+  within `tools/review-loop/` the scope check would not catch an unrelated
+  edit to a neighbouring file in the same package.
+* **The fix is checked for shape and place, never for correctness.** The
+  runner establishes that the change is the one that was asked for, where it
+  was allowed, and no more. Whether it actually satisfies the reviewer's
+  `Required outcome` is not mechanised, and the agent's reported
+  `Verification` is a claim that is deliberately not re-run.
+* **A fix turn is not sandboxed.** See
+  [What is structurally enforced](#what-is-structurally-enforced-and-what-is-only-asked-for).
+  The worktree binds where the agent is pointed, not what it can reach.
+* **The fix exists only as a patch.** Nothing commits, pushes, or updates the
+  pull request; without `--write-patch` the change is discarded with the
+  worktree. Applying it is the human's, and so is everything after.
 * **Only the initial review round.** `Round: 1` is the only accepted value;
   re-review, finding-resolution tracking across rounds, and the multi-round
   loop are not implemented. The record identity already includes the round and
@@ -676,12 +1063,12 @@ detached worktrees and a really dirty working tree.
 
 ## Scope boundary
 
-This slice ends at "one validated review, recorded against one verified pull
-request state". Out of scope here, and left for later slices: routing
-Structured Findings to a Coding Agent, the Bounded Fix Response, applying
-fixes, waiting for CI after a fix, Independent Re-Review, multi-round loops,
-finding resolution tracking, the Merge Decision Brief, automatic merge, any
-server or daemon, and any persistent state.
+This slice ends at "one validated review recorded against one verified pull
+request state, and one bounded local fix routed from it". Out of scope here,
+and left for later slices: committing the fix, pushing it, updating the pull
+request, waiting for CI after a fix, Independent Re-Review, multi-round loops,
+finding resolution tracking across commits, the Merge Decision Brief,
+automatic merge, any server or daemon, and any persistent state.
 
 That live trial has now happened, on PR #30, and is recorded in
 [`docs/delegated-development/review-loop-live-experiment-1.md`](../../docs/delegated-development/review-loop-live-experiment-1.md).
@@ -691,5 +1078,11 @@ is what "Where the reviewer runs" above now does. That fix was then validated
 live, against a pull request in a different repository, in
 [`docs/delegated-development/review-loop-live-experiment-2.md`](../../docs/delegated-development/review-loop-live-experiment-2.md).
 
-The next slice is **Structured Findings → Coding Agent routing + Bounded Fix
-Response**.
+Structured Findings → Coding Agent routing + Bounded Fix Response is what
+`review-loop fix` above now does.
+
+The next slice is **bounded fix → exact fix commit identity → push → wait for
+authoritative CI**, followed later by fresh-context Independent Re-Review,
+finding resolution, the multi-round loop and the Merge Decision Brief. None of
+that is here, and the human gate is why: this pipeline automates *routing and
+bounded local fixing*. It does not automate acceptance.
