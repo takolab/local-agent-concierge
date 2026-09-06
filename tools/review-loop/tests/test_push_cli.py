@@ -155,7 +155,8 @@ def test_a_refusal_says_plainly_that_nothing_was_written(tmp_path, live):
     )
 
     assert code == PUSH_EXIT_CODES[PushOutcome.PUSH_BRANCH_REFUSED]
-    assert "No -- the pull request branch is verified unchanged" in out
+    # Narrower than "the branch is unchanged", which this runner cannot know.
+    assert "No -- this run performed no repository write" in out
     assert "Fix commit:           (none created)" in out
     assert live.remote_tip() == live.head_sha
 
@@ -204,7 +205,8 @@ def test_a_dry_run_reports_that_nothing_was_committed(tmp_path, live):
 
     assert code == 0
     assert "Outcome:              PUSH_PREPARED" in out
-    assert "No -- the pull request branch is verified unchanged" in out
+    # Narrower than "the branch is unchanged", which this runner cannot know.
+    assert "No -- this run performed no repository write" in out
     assert live.remote_tip() == live.head_sha
 
 
@@ -574,3 +576,42 @@ def test_the_push_command_cannot_detect_a_repository_from_the_directory():
             imported.update(alias.name for alias in node.names)
 
     assert "detect_repository" not in imported
+
+
+def test_the_unexpected_ref_outcome_does_not_render_a_missing_sha(tmp_path, live):
+    """Exit 74 has no pushed SHA, and must not claim one.
+
+    The generic pushed-SHA branch rendered `Yes -- None was pushed by this
+    run`, which is both false and unreadable for the one outcome that means
+    the authorised branch state was never established.
+    """
+    from review_loop.push_runner import PushResult
+
+    result = PushResult(outcome=PushOutcome.PUSH_WROTE_UNEXPECTED_REFS)
+    stream = io.StringIO()
+    push_cli.render_text(result, stream)
+    out = stream.getvalue()
+
+    assert result.repository_mutated is True
+    assert "None" not in out.split("Repository mutated:")[1].splitlines()[0]
+    assert "unexpected ref update" in out
+    assert "Inspect the remote" in out
+    assert "Outcome:              PUSH_WROTE_UNEXPECTED_REFS" in out
+
+
+def test_no_write_is_stated_as_this_runs_inaction_not_the_branchs_stillness():
+    """Concurrency makes "the branch is unchanged" a claim this cannot prove."""
+    from review_loop.push_runner import PushResult
+
+    for outcome in (
+        PushOutcome.PUSH_FAILED,
+        PushOutcome.PUSH_BRANCH_REFUSED,
+        PushOutcome.PUSH_TARGET_STALE,
+        PushOutcome.COMMIT_REFUSED,
+    ):
+        stream = io.StringIO()
+        push_cli.render_text(PushResult(outcome=outcome), stream)
+        out = stream.getvalue()
+
+        assert "No -- this run performed no repository write" in out
+        assert "verified unchanged" not in out

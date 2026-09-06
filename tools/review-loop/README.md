@@ -1357,10 +1357,18 @@ Two neighbouring settings were checked and need no flag: a configured
 
 And because "the flags are right" is a claim about this argv rather than about
 what happened, **the remote's own report is checked for refs nobody asked
-for.** Any per-ref line naming something other than our refspec ends the run
-as `PUSH_WROTE_UNEXPECTED_REFS`: something was certainly written, and more
-than the boundary permits, so a human looks rather than the run continuing on
-the strength of the branch alone.
+for** — and classified by what the report actually establishes, because git
+prints a line for a ref it left alone as readily as for one it changed:
+
+| Flag on the extra line | Established | Outcome |
+| --- | --- | --- |
+| space, `+`, `-`, `*` | it was updated | `PUSH_WROTE_UNEXPECTED_REFS` (74) |
+| `!` `[remote failure]`, unrecognised | nothing | `PUSH_NOT_VERIFIED` (66) |
+| `=`, `!` with a recognised refusal | it was *not* updated | reported in the reasons; the run continues |
+
+Exit 74 therefore means *a write beyond authority was established*, not merely
+that another ref appeared in the output — the same standard `PUSH_FAILED`
+holds itself to in the other direction.
 
 **This is not a force push**, despite the flag's name. The commit's parent is
 already proven to be the reviewed head, so the update it asks for is an
@@ -1516,22 +1524,22 @@ alongside anything else.
 | Exit | Outcome | Repository state |
 | --- | --- | --- |
 | 0 | `PUSH_READY` | **Pushed.** CI green for the exact commit, against the current merge context. |
-| 0 | `PUSH_PREPARED` | Not written. `--dry-run` verified and applied the patch in a throwaway worktree. |
-| 60 | `PUSH_INPUT_INVALID` | Not written. |
-| 61 | `PUSH_BRANCH_REFUSED` | Not written. Fork head, closed pull request, default branch, or an unusable branch name. |
-| 62 | `PUSH_TARGET_STALE` | Not written. The head moved, or the branch is somewhere unaccounted for. |
-| 63 | `PATCH_IDENTITY_MISMATCH` | Not written. |
-| 64 | `COMMIT_REFUSED` | Not written. |
-| 65 | `PUSH_FAILED` | Not written, **verified**: the remote's own `--porcelain` report *refused* the ref (a recognised rejection, not merely a failure). |
+| 0 | `PUSH_PREPARED` | This run wrote nothing. `--dry-run` verified and applied the patch in a throwaway worktree. |
+| 60 | `PUSH_INPUT_INVALID` | This run wrote nothing. |
+| 61 | `PUSH_BRANCH_REFUSED` | This run wrote nothing. Fork head, closed pull request, default branch, an unusable branch name, or a remote naming another repository. |
+| 62 | `PUSH_TARGET_STALE` | This run wrote nothing. The head moved, or the branch is somewhere unaccounted for. |
+| 63 | `PATCH_IDENTITY_MISMATCH` | This run wrote nothing. |
+| 64 | `COMMIT_REFUSED` | This run wrote nothing. |
+| 65 | `PUSH_FAILED` | **This run wrote nothing**, verified: the remote's own `--porcelain` report *refused* the ref (a recognised rejection, not merely a failure). |
 | 66 | `PUSH_NOT_VERIFIED` | **Unknown.** The remote gave no answer, or one that establishes nothing (`[remote failure]`, a timeout, a local hook). An absent commit proves nothing. Read the branch before doing anything else. |
 | 67 | `CI_FAILED` | **Pushed.** CI for the exact commit failed. |
 | 68 | `CI_PENDING` | **Pushed.** CI had not finished within `--ci-timeout`. |
 | 69 | `CI_STALE_TARGET` | **Pushed.** The head moved off it, its merge context is stale, or a lost response hid a push that landed — under a later commit, or under a rewrite. |
 | 70 | `CI_AMBIGUOUS` | **Pushed.** CI state undecidable. |
-| 71 | `PUSH_WORKSPACE_INVALID` | Not written. |
-| 72 | `PUSH_API_ERROR` | Not written. GitHub unreachable before the push. |
+| 71 | `PUSH_WORKSPACE_INVALID` | This run wrote nothing. |
+| 72 | `PUSH_API_ERROR` | This run wrote nothing. GitHub unreachable before the push. |
 | 73 | `CI_API_ERROR` | **Pushed.** GitHub unreachable while waiting. |
-| 74 | `PUSH_WROTE_UNEXPECTED_REFS` | **Written, beyond authority.** The remote reported updating a ref this run did not ask for. Inspect the remote. |
+| 74 | `PUSH_WROTE_UNEXPECTED_REFS` | **Written, beyond authority.** The remote reported *updating* a ref this run did not ask for. No pushed SHA: the authorised branch state was never established. Inspect the remote. |
 
 Three rules the runner keeps on the failure paths:
 

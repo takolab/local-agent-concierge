@@ -639,14 +639,20 @@ def _commit_and_push(
     # the backstop for the ones it does not know about. Reported first because
     # every classification below is about *our* ref, and none of them would
     # mention that a second one moved.
-    if attempt.unexpected_refs:
+    #
+    # "Moved" is the operative word. `git push` prints a line for a ref it
+    # left alone as readily as for one it changed, so the flag decides: only
+    # an established write is a boundary violation, and exit 74 means exactly
+    # that rather than "another ref appeared in the output".
+    extra = attempt.unexpected_refs
+    if extra.written:
         return _result(
             PushOutcome.PUSH_WROTE_UNEXPECTED_REFS,
             created
             + ((f"the push reported: {push_failure}",) if push_failure else ())
             + (
                 f"{git_remote} reports updating "
-                + ", ".join(attempt.unexpected_refs)
+                + ", ".join(extra.written)
                 + f", which this run did not ask it to. Only {refspec} was "
                 "authorised, so the write boundary was exceeded and this run "
                 "stops here rather than continuing on the strength of the branch "
@@ -656,6 +662,36 @@ def _commit_and_push(
             push_target=push_target,
             commit=commit,
             commit_created=True,
+        )
+    if extra.unresolved:
+        # Named, attempted, and the answer settles nothing -- the same class of
+        # non-answer the branch's own line can carry. Whether the boundary was
+        # exceeded is therefore unknown, and unknown is what gets reported.
+        return _result(
+            PushOutcome.PUSH_NOT_VERIFIED,
+            created
+            + ((f"the push reported: {push_failure}",) if push_failure else ())
+            + (
+                f"{git_remote} reported "
+                + ", ".join(extra.unresolved)
+                + f", which this run did not ask it to touch, with an answer that "
+                "does not establish whether they were updated. Only "
+                f"{refspec} was authorised, and whether more than that was written "
+                "is not known. Inspect the remote before doing anything else",
+            ),
+            target=target,
+            push_target=push_target,
+            commit=commit,
+            commit_created=True,
+        )
+    if extra.untouched:
+        # Mentioned and demonstrably not written. Not a violation, and not
+        # something to pass over in silence either.
+        created = created + (
+            f"{git_remote} also reported "
+            + ", ".join(extra.untouched)
+            + ", which this run did not ask it to touch; its answer establishes "
+            "that they were not updated",
         )
 
     # Read the ref back from the remote either way. On the failure path this

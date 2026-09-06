@@ -10,9 +10,12 @@ commit is on your branch" from "I do not know".
 Three groups, and the boundary between them is the push:
 
 * **Before any write** -- ``PUSH_INPUT_INVALID`` through ``PUSH_FAILED``.
-  The pull request branch is exactly where it was. A commit may have been
-  created inside a throwaway worktree that this run then removed, which is
-  not repository state and is never reported as though it were.
+  **This run performed no repository write.** That is deliberately narrower
+  than "the branch is where it was": another actor can move it at any moment,
+  and after a refused push it very often has. What is established is this
+  runner's own inaction, which is the only part it can prove. A commit may
+  have been created inside a throwaway worktree that this run then removed,
+  which is not repository state and is never reported as though it were.
 * **After a verified write** -- ``PUSH_READY`` and every ``CI_*`` value. The
   fix commit is on the pull request branch, and
   :attr:`PushResult.pushed_sha` names it. What differs between them is only
@@ -70,11 +73,13 @@ class PushOutcome(Enum):
 
     # -- mutated beyond what was authorised --------------------------------
 
-    #: The remote reported updating a ref this runner did not ask for -- a tag
-    #: carried along by ``push.followTags``, or anything else. Something was
-    #: certainly written, and more than the one ref the write boundary
+    #: The remote reported *updating* a ref this runner did not ask for -- a
+    #: tag carried along by ``push.followTags``, or anything else. Something
+    #: was certainly written, and more than the one ref the write boundary
     #: permits, so the run stops and a human looks rather than continuing to
-    #: CI on the strength of the branch alone.
+    #: CI on the strength of the branch alone. A ref the remote merely
+    #: mentioned and demonstrably did not update is not this: the flag on the
+    #: report line decides, and this outcome means an established write.
     PUSH_WROTE_UNEXPECTED_REFS = "PUSH_WROTE_UNEXPECTED_REFS"
 
     # -- before any write --------------------------------------------------
@@ -97,7 +102,9 @@ class PushOutcome(Enum):
     #: The workspace was not a clean checkout of the reviewed head, or the
     #: commit that was created is not exactly the candidate patch.
     COMMIT_REFUSED = "COMMIT_REFUSED"
-    #: ``git push`` failed and the remote branch is verified unchanged.
+    #: ``git push`` was refused by the remote, which is what establishes
+    #: that this run wrote nothing. Says nothing about where the branch is
+    #: now -- another actor may have moved it, and often has.
     PUSH_FAILED = "PUSH_FAILED"
     #: The workspace could not be prepared or verified. Nothing ran.
     PUSH_WORKSPACE_INVALID = "PUSH_WORKSPACE_INVALID"

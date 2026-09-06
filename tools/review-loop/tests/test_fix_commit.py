@@ -646,7 +646,7 @@ def test_a_real_accepted_push_carries_the_remotes_answer(worktree, scenario):
     )
 
     assert attempt.report == REMOTE_ACCEPTED
-    assert attempt.unexpected_refs == ()
+    assert attempt.unexpected_refs.any_reported is False
     assert scenario.remote_tip() == commit.sha
 
 
@@ -664,3 +664,58 @@ def test_every_push_url_is_read_not_only_the_first(tmp_path, scenario):
 
     assert str(other) in urls
     assert str(scenario.origin) in urls
+
+
+# --------------------------------------------------------------------------
+# An unexpected ref is not the same fact as an unexpected write
+# --------------------------------------------------------------------------
+
+
+def unexpected(*lines):
+    from review_loop.fix_commit import read_unexpected_refs
+
+    spec = "abc123:refs/heads/feat"
+    body = "\n".join(["To /x", f" \t{spec}\told..new", *lines, "Done", ""])
+    return read_unexpected_refs(body, refspec=spec)
+
+
+@pytest.mark.parametrize(
+    "flag,summary",
+    [(" ", "old..new"), ("+", "old...new (forced update)"), ("*", "[new tag]"), ("-", "[deleted]")],
+)
+def test_a_flag_meaning_updated_is_an_unexpected_write(flag, summary):
+    result = unexpected(f"{flag}\trefs/tags/x:refs/tags/x\t{summary}")
+
+    assert result.written == ("refs/tags/x:refs/tags/x",)
+    assert result.unresolved == ()
+
+
+def test_an_up_to_date_unexpected_ref_was_not_written():
+    """`git push` prints a line for a ref it left alone, too.
+
+    Counting that as a write would make exit 74 mean "another ref appeared in
+    the output" rather than "a write beyond authority was established".
+    """
+    result = unexpected("=\trefs/tags/x:refs/tags/x\t[up to date]")
+
+    assert result.written == ()
+    assert result.untouched == ("refs/tags/x:refs/tags/x",)
+
+
+def test_a_refused_unexpected_ref_was_not_written():
+    result = unexpected("!\trefs/tags/x:refs/tags/x\t[rejected] (already exists)")
+
+    assert result.written == ()
+    assert result.untouched == ("refs/tags/x:refs/tags/x",)
+
+
+def test_an_unexpected_ref_with_an_unhelpful_answer_is_unresolved():
+    """The same `[remote failure]` class the branch's own line can carry."""
+    result = unexpected("!\trefs/tags/x:refs/tags/x\t[remote failure]")
+
+    assert result.written == ()
+    assert result.unresolved == ("refs/tags/x:refs/tags/x",)
+
+
+def test_the_authorised_ref_is_never_counted_as_unexpected():
+    assert unexpected().any_reported is False

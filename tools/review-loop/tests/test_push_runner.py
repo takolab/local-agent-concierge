@@ -1208,7 +1208,7 @@ def test_the_push_argv_always_refuses_the_config_driven_expansions(scenario, mon
     assert "--recurse-submodules=no" in seen["argv"]
 
 
-def test_a_report_naming_another_ref_stops_the_run(scenario, monkeypatch):
+def test_a_report_naming_another_written_ref_stops_the_run(scenario, monkeypatch):
     """The backstop, for an expansion the flags do not know about."""
     from review_loop import fix_commit, push_runner
 
@@ -1220,7 +1220,9 @@ def test_a_report_naming_another_ref_stops_the_run(scenario, monkeypatch):
         )
         return fix_commit.PushAttempt(
             report=attempt.report,
-            unexpected_refs=("refs/tags/local-release:refs/tags/local-release",),
+            unexpected_refs=fix_commit.UnexpectedRefs(
+                written=("refs/tags/local-release:refs/tags/local-release",)
+            ),
         )
 
     monkeypatch.setattr(push_runner, "push_fix_commit", push_and_claim_a_tag)
@@ -1291,3 +1293,61 @@ def test_an_unhelpful_answer_is_not_described_as_no_answer(scenario, monkeypatch
     assert result.outcome is PushOutcome.PUSH_NOT_VERIFIED
     assert "does not establish whether the ref was updated" in reasons
     assert "gave no per-ref answer" not in reasons
+
+
+def test_an_unexpected_ref_that_was_not_written_does_not_stop_the_run(
+    scenario, monkeypatch
+):
+    """Reported, demonstrably untouched: said out loud, not treated as a write."""
+    from review_loop import fix_commit, push_runner
+
+    real = fix_commit.push_fix_commit
+
+    def push_and_mention_an_idle_tag(worktree, *, remote, refspec, lease, timeout=300.0):
+        attempt = real(
+            worktree, remote=remote, refspec=refspec, lease=lease, timeout=timeout
+        )
+        return fix_commit.PushAttempt(
+            report=attempt.report,
+            unexpected_refs=fix_commit.UnexpectedRefs(
+                untouched=("refs/tags/idle:refs/tags/idle",)
+            ),
+        )
+
+    monkeypatch.setattr(push_runner, "push_fix_commit", push_and_mention_an_idle_tag)
+
+    client = client_for(scenario)
+    timeline = Timeline({1: green(scenario, client, sha_getter=scenario.remote_tip)})
+    result = push(scenario, client=client, timeline=timeline)
+
+    assert result.outcome is PushOutcome.PUSH_READY
+    assert "refs/tags/idle" in " ".join(result.reasons)
+    assert "establishes that they were not updated" in " ".join(result.reasons)
+
+
+def test_an_unexpected_ref_with_an_unresolved_answer_is_reported_as_unknown(
+    scenario, monkeypatch
+):
+    """Named, attempted, and the answer settles nothing: not a claimed write."""
+    from review_loop import fix_commit, push_runner
+
+    real = fix_commit.push_fix_commit
+
+    def push_and_report_a_murky_tag(worktree, *, remote, refspec, lease, timeout=300.0):
+        attempt = real(
+            worktree, remote=remote, refspec=refspec, lease=lease, timeout=timeout
+        )
+        return fix_commit.PushAttempt(
+            report=attempt.report,
+            unexpected_refs=fix_commit.UnexpectedRefs(
+                unresolved=("refs/tags/murky:refs/tags/murky",)
+            ),
+        )
+
+    monkeypatch.setattr(push_runner, "push_fix_commit", push_and_report_a_murky_tag)
+
+    result = push(scenario)
+
+    assert result.outcome is PushOutcome.PUSH_NOT_VERIFIED
+    assert result.repository_mutated is None
+    assert "does not establish whether they were updated" in " ".join(result.reasons)

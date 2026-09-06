@@ -35,7 +35,7 @@ evidence and is never used.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .agent_workspace import _ignored_paths, _status_paths, is_residue
 from .model import FULL_SHA_PATTERN
@@ -80,6 +80,34 @@ REMOTE_SILENT = "silent"
 #: :func:`review_loop.reviewer_workspace.run_git_capture`.
 REFUSAL_SUMMARIES = ("[rejected]", "[remote rejected]", "[no match]")
 
+#: Porcelain flags that mean a ref *was* updated. ``=`` means it was already
+#: up to date, and ``!`` means rejected or failed -- neither is a write.
+_WRITTEN_FLAGS = (" ", "+", "-", "*")
+
+
+@dataclass(frozen=True)
+class UnexpectedRefs:
+    """Refs the remote reported that this runner did not ask it to touch.
+
+    Split by what the report actually establishes, because "another ref
+    appeared in the output" and "another ref was written" are different
+    facts and only the second is a boundary violation:
+
+    * ``written`` -- the remote says it updated them. Established.
+    * ``unresolved`` -- it tried and the answer settles nothing, the same
+      ``[remote failure]`` class the branch's own line has.
+    * ``untouched`` -- reported and demonstrably not written: already up to
+      date, or refused. Worth saying out loud, worth stopping for.
+    """
+
+    written: tuple[str, ...] = ()
+    unresolved: tuple[str, ...] = ()
+    untouched: tuple[str, ...] = ()
+
+    @property
+    def any_reported(self) -> bool:
+        return bool(self.written or self.unresolved or self.untouched)
+
 
 class CandidatePatchError(Exception):
     """The patch is not the validated candidate patch, or will not apply.
@@ -103,11 +131,13 @@ class PushAttempt:
     ``unexpected_refs`` exists because "one bounded ref update" is a claim
     about what the remote *did*, and the only place that shows up is the
     remote's own report. A push that also wrote a tag says so on a line this
-    runner would otherwise have skipped past.
+    runner would otherwise have skipped past -- and one that merely *mentioned*
+    a tag it left alone says so on a line that looks much the same, which is
+    why the two are classified apart rather than counted together.
     """
 
     report: str
-    unexpected_refs: tuple[str, ...] = ()
+    unexpected_refs: UnexpectedRefs = field(default_factory=UnexpectedRefs)
 
 
 class PushRefused(Exception):
@@ -495,18 +525,43 @@ def _porcelain_lines(stdout: str):
             yield fields[0], fields[1], fields[2]
 
 
-def read_unexpected_refs(stdout: str, *, refspec: str) -> tuple[str, ...]:
-    """Refs the remote reports updating that this runner did not ask for.
+def read_unexpected_refs(stdout: str, *, refspec: str) -> UnexpectedRefs:
+    """Classify every ref the remote reports other than the authorised one.
 
-    The argv already refuses the two expansions git configuration can apply
-    -- ``push.followTags`` and ``push.recurseSubmodules`` -- but that is the
+    The argv already refuses the two expansions git configuration can apply --
+    ``push.followTags`` and ``push.recurseSubmodules`` -- but that is the
     *stated* half of the boundary. This is the backstop: whatever the reason,
-    a report naming a ref other than ours means the push wrote more than one
-    ref, and the runner would rather stop and say so than continue on the
-    strength of having passed the right flags.
+    a report naming another ref means the push did more than name one refspec,
+    and the runner would rather stop and say so than continue on the strength
+    of having passed the right flags.
+
+    What it will not do is call every such line a write. ``git push`` reports
+    a ref it left alone the same way it reports one it changed -- by printing
+    a line for it -- and the flag is what separates them. Exit 74 means a
+    write beyond authority was *established*, so only the flags that mean "it
+    was updated" may produce one.
     """
-    return tuple(
-        spec for _flag, spec, _summary in _porcelain_lines(stdout) if spec != refspec
+    written: list[str] = []
+    unresolved: list[str] = []
+    untouched: list[str] = []
+    for flag, spec, summary in _porcelain_lines(stdout):
+        if spec == refspec:
+            continue
+        if flag.startswith("!"):
+            if any(reason in summary for reason in REFUSAL_SUMMARIES):
+                untouched.append(spec)
+            else:
+                unresolved.append(spec)
+        elif flag.startswith("="):
+            untouched.append(spec)
+        elif flag[:1] in _WRITTEN_FLAGS or flag == "":
+            written.append(spec)
+        else:
+            unresolved.append(spec)
+    return UnexpectedRefs(
+        written=tuple(written),
+        unresolved=tuple(unresolved),
+        untouched=tuple(untouched),
     )
 
 

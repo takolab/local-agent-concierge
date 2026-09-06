@@ -88,9 +88,10 @@ exit codes:
                               than the boundary permits. Inspect the remote
   2   usage error
 
-Exit codes differ in what changed. 60-65, 71 and 72 leave the pull request
-branch verified unchanged. 0 (PUSH_READY) and 67-70, 73 mean the fix commit IS
-on the branch. 66 means remote state is not known -- read the branch before
+Exit codes differ in what changed. 60-65, 71 and 72 mean this run performed
+no repository write -- which is not the same claim as the branch being where
+it was, since another actor can move it at any time. 0 (PUSH_READY) and 67-70,
+73 mean the fix commit IS on the branch. 66 means remote state is not known -- read the branch before
 doing anything else, and do not re-run blind. 74 means something WAS written
 and more than one ref moved.
 
@@ -259,14 +260,30 @@ def _read_document(path: str) -> str:
 
 
 def _mutation_line(result: PushResult) -> str:
+    """What changed, in one line an operator can act on.
+
+    Every claim here is about *this run's own write*. It is deliberately not a
+    claim that the branch is where it was: another actor can move it at any
+    moment, and after a refused push the branch very often is not where the
+    pre-flight found it. What this runner can establish is that it did not
+    write, which is the narrower and true statement.
+    """
     mutated = result.repository_mutated
+    if result.outcome is PushOutcome.PUSH_WROTE_UNEXPECTED_REFS:
+        # Written, and beyond authority: neither an ordinary push nor an
+        # unknown. It has no pushed SHA to report, because the branch state
+        # this run intended was never established.
+        return (
+            "Yes -- the remote reported an unexpected ref update; the authorised "
+            "branch state was not established. Inspect the remote"
+        )
     if mutated is None:
         return (
             "UNKNOWN -- the push ran and the branch did not read back as the "
             "created commit"
         )
     if not mutated:
-        return "No -- the pull request branch is verified unchanged"
+        return "No -- this run performed no repository write"
     if result.already_pushed:
         # Not "by an earlier run": this runner cannot tell an earlier run of
         # its own from another actor that put the same commit there, and the
