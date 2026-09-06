@@ -37,6 +37,9 @@ from .fix_handoff import FixHandoff, FixHandoffError, load_handoff
 from .github_client import GitHubApiError, GitHubClient
 from .model import EXIT_USAGE, short_sha
 from .push_response import (
+    BOUNDARY_CLEAN,
+    BOUNDARY_EXCEEDED,
+    BOUNDARY_UNKNOWN,
     DEFAULT_CI_POLL_SECONDS,
     DEFAULT_CI_TIMEOUT_SECONDS,
     PUSH_EXIT_CODES,
@@ -86,6 +89,11 @@ exit codes:
   74  PUSH_WROTE_UNEXPECTED_REFS  the remote reported updating a ref this run
                               did not ask for; something was written, and more
                               than the boundary permits. Inspect the remote
+  75  PUSH_BOUNDARY_NOT_VERIFIED  the remote reported trying a ref this run did
+                              not ask for, with an answer that settles nothing;
+                              whether the boundary was exceeded is unknown.
+                              What the authorised branch holds is still
+                              reported. Inspect the remote
   2   usage error
 
 Exit codes differ in what changed. 60-65, 71 and 72 mean this run performed
@@ -93,7 +101,10 @@ no repository write -- which is not the same claim as the branch being where
 it was, since another actor can move it at any time. 0 (PUSH_READY) and 67-70,
 73 mean the fix commit IS on the branch. 66 means remote state is not known -- read the branch before
 doing anything else, and do not re-run blind. 74 means something WAS written
-and more than one ref moved.
+and more than one ref moved; 75 means whether more than one ref moved could
+not be established. Both report what the authorised branch holds either way --
+the boundary and the branch are two facts, and this command does not let
+uncertainty about one erase the other.
 
 WRITE AUTHORITY. This command performs exactly one repository write: a
 fast-forward `git push` of one commit to refs/heads/<the pull request's head
@@ -271,11 +282,26 @@ def _mutation_line(result: PushResult) -> str:
     mutated = result.repository_mutated
     if result.outcome is PushOutcome.PUSH_WROTE_UNEXPECTED_REFS:
         # Written, and beyond authority: neither an ordinary push nor an
-        # unknown. It has no pushed SHA to report, because the branch state
-        # this run intended was never established.
+        # unknown. Whatever the branch read-back established is still stated,
+        # because the boundary being wrong is not a reason to forget it.
         return (
-            "Yes -- the remote reported an unexpected ref update; the authorised "
-            "branch state was not established. Inspect the remote"
+            "Yes -- the remote reported an unexpected ref update. "
+            + (
+                f"{result.pushed_sha} is on the branch"
+                if result.pushed_sha
+                else "the authorised branch does not hold this run's commit"
+            )
+            + ". Inspect the remote"
+        )
+    if result.outcome is PushOutcome.PUSH_BOUNDARY_NOT_VERIFIED:
+        return (
+            (
+                f"Yes -- {result.pushed_sha} is on the branch"
+                if result.pushed_sha
+                else "UNKNOWN -- the authorised branch does not hold this run's commit"
+            )
+            + ", and the remote's answer about a ref this run did not touch does "
+            "not establish whether it was written. Inspect the remote"
         )
     if mutated is None:
         return (
@@ -344,6 +370,16 @@ def render_text(result: PushResult, stream: TextIO, *, workspace_label: str | No
         file=stream,
     )
     print(f"Repository mutated:   {_mutation_line(result)}", file=stream)
+    print(
+        "Write boundary:       "
+        + {
+            BOUNDARY_CLEAN: "clean -- only the authorised ref was reported",
+            BOUNDARY_EXCEEDED: "EXCEEDED -- the remote wrote a ref nobody asked for",
+            BOUNDARY_UNKNOWN: "UNKNOWN -- a ref nobody asked for was reported "
+            "with an answer that settles nothing",
+        }[result.boundary_status],
+        file=stream,
+    )
 
     evaluation = result.ci_evaluation
     print(
@@ -389,6 +425,10 @@ def render_json(result: PushResult, stream: TextIO) -> None:
         "dry_run": result.dry_run,
         "reasons": list(result.reasons),
         "repository_mutated": result.repository_mutated,
+        # Reported beside the mutation rather than folded into it: whether the
+        # push stayed inside its one-ref boundary is a different question from
+        # whether the authorised branch moved.
+        "boundary_status": result.boundary_status,
         "push_performed": result.push_performed,
         "already_pushed": result.already_pushed,
         "commit_created": result.commit_created,

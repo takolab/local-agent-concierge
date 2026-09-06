@@ -85,6 +85,9 @@ from .push_branch import (
     resolve,
 )
 from .push_response import (
+    BOUNDARY_CLEAN,
+    BOUNDARY_EXCEEDED,
+    BOUNDARY_UNKNOWN,
     DEFAULT_CI_POLL_SECONDS,
     DEFAULT_CI_TIMEOUT_SECONDS,
     PUSH_EXIT_CODES,
@@ -123,6 +126,11 @@ class PushResult:
     push_performed: bool = False
     already_pushed: bool = False
     commit_created: bool = False
+    #: What this run established about the *boundary*: whether the push wrote
+    #: only the one ref it was authorised to. Deliberately separate from
+    #: everything above, which is about the authorised branch -- the two are
+    #: different questions and either can be known while the other is not.
+    boundary_status: str = BOUNDARY_CLEAN
     dry_run: bool = False
     ci_evaluation: CiEvaluation | None = None
     ci_polls: int = 0
@@ -146,6 +154,12 @@ class PushResult:
         if self.outcome is PushOutcome.PUSH_WROTE_UNEXPECTED_REFS:
             # Certainly written, and more than was authorised. Not unknown.
             return True
+        if self.outcome is PushOutcome.PUSH_BOUNDARY_NOT_VERIFIED:
+            # The boundary is what is unknown here, not necessarily the write.
+            # If the branch was read back holding this run's commit, a write
+            # *is* established, and saying otherwise would discard evidence
+            # that was already in hand.
+            return True if self.pushed_sha else None
         return self.outcome in PUSHED_OUTCOMES
 
 
@@ -634,56 +648,16 @@ def _commit_and_push(
 
     remote_said = attempt.report
 
-    # Before anything else: did the push write only the ref it was allowed to?
-    # The argv refuses the expansions git configuration can apply, and this is
-    # the backstop for the ones it does not know about. Reported first because
-    # every classification below is about *our* ref, and none of them would
-    # mention that a second one moved.
+    # What the push did to refs nobody asked about is a *second* fact, and it
+    # is deliberately established after the first rather than instead of it.
+    # An earlier version returned here, before the branch had been read back,
+    # and so answered "unknown" about a branch whose state was about to be
+    # sitting in a variable. Uncertainty about one ref is not a reason to
+    # discard what is known about another.
     #
-    # "Moved" is the operative word. `git push` prints a line for a ref it
-    # left alone as readily as for one it changed, so the flag decides: only
-    # an established write is a boundary violation, and exit 74 means exactly
-    # that rather than "another ref appeared in the output".
+    # "Wrote" is the operative word throughout. `git push` prints a line for a
+    # ref it left alone as readily as for one it changed, so the flag decides.
     extra = attempt.unexpected_refs
-    if extra.written:
-        return _result(
-            PushOutcome.PUSH_WROTE_UNEXPECTED_REFS,
-            created
-            + ((f"the push reported: {push_failure}",) if push_failure else ())
-            + (
-                f"{git_remote} reports updating "
-                + ", ".join(extra.written)
-                + f", which this run did not ask it to. Only {refspec} was "
-                "authorised, so the write boundary was exceeded and this run "
-                "stops here rather than continuing on the strength of the branch "
-                "alone. Inspect the remote before doing anything else",
-            ),
-            target=target,
-            push_target=push_target,
-            commit=commit,
-            commit_created=True,
-        )
-    if extra.unresolved:
-        # Named, attempted, and the answer settles nothing -- the same class of
-        # non-answer the branch's own line can carry. Whether the boundary was
-        # exceeded is therefore unknown, and unknown is what gets reported.
-        return _result(
-            PushOutcome.PUSH_NOT_VERIFIED,
-            created
-            + ((f"the push reported: {push_failure}",) if push_failure else ())
-            + (
-                f"{git_remote} reported "
-                + ", ".join(extra.unresolved)
-                + f", which this run did not ask it to touch, with an answer that "
-                "does not establish whether they were updated. Only "
-                f"{refspec} was authorised, and whether more than that was written "
-                "is not known. Inspect the remote before doing anything else",
-            ),
-            target=target,
-            push_target=push_target,
-            commit=commit,
-            commit_created=True,
-        )
     if extra.untouched:
         # Mentioned and demonstrably not written. Not a violation, and not
         # something to pass over in silence either.
@@ -692,6 +666,28 @@ def _commit_and_push(
             + ", ".join(extra.untouched)
             + ", which this run did not ask it to touch; its answer establishes "
             "that they were not updated",
+        )
+
+    boundary_status = BOUNDARY_CLEAN
+    boundary_reasons: tuple[str, ...] = ()
+    if extra.written:
+        boundary_status = BOUNDARY_EXCEEDED
+        boundary_reasons = (
+            f"{git_remote} reports updating "
+            + ", ".join(extra.written)
+            + f", which this run did not ask it to. Only {refspec} was authorised, "
+            "so the write boundary was exceeded. Inspect the remote before doing "
+            "anything else",
+        )
+    elif extra.unresolved:
+        boundary_status = BOUNDARY_UNKNOWN
+        boundary_reasons = (
+            f"{git_remote} reported "
+            + ", ".join(extra.unresolved)
+            + ", which this run did not ask it to touch, with an answer that does "
+            f"not establish whether they were updated. Only {refspec} was "
+            "authorised, and whether more than that was written is not known. "
+            "Inspect the remote before doing anything else",
         )
 
     # Read the ref back from the remote either way. On the failure path this
@@ -708,6 +704,7 @@ def _commit_and_push(
             PushOutcome.PUSH_NOT_VERIFIED,
             created
             + ((f"the push reported: {push_failure}",) if push_failure else ())
+            + boundary_reasons
             + (
                 f"the pull request branch could not be read back afterwards ({exc}), "
                 f"so whether {push_target.ref} now holds {commit.sha} is unknown. Do "
@@ -717,6 +714,39 @@ def _commit_and_push(
             push_target=push_target,
             commit=commit,
             commit_created=True,
+            boundary_status=boundary_status,
+        )
+
+    if boundary_status is not BOUNDARY_CLEAN:
+        # The branch has now been read back, so whatever it established is
+        # carried into the result even though the run stops here: a boundary
+        # this runner cannot vouch for is a reason for a human to look, not a
+        # reason to forget what the branch says.
+        on_branch = observed == commit.sha
+        moved_the_ref = on_branch and remote_said == REMOTE_ACCEPTED
+        return _result(
+            PushOutcome.PUSH_WROTE_UNEXPECTED_REFS
+            if boundary_status == BOUNDARY_EXCEEDED
+            else PushOutcome.PUSH_BOUNDARY_NOT_VERIFIED,
+            created
+            + ((f"the push reported: {push_failure}",) if push_failure else ())
+            + boundary_reasons
+            + (
+                f"{push_target.ref} reads back as {observed}"
+                + (
+                    f", which is the commit this run created"
+                    if on_branch
+                    else f", not the {commit.sha} this run created"
+                ),
+            ),
+            target=target,
+            push_target=push_target,
+            commit=commit,
+            pushed_sha=commit.sha if on_branch else None,
+            push_performed=moved_the_ref,
+            already_pushed=on_branch and not moved_the_ref,
+            commit_created=True,
+            boundary_status=boundary_status,
         )
 
     if observed == commit.sha:
@@ -1108,8 +1138,15 @@ def _wait(clock, sleep, deadline: float, interval: float) -> bool:
     observation, and always makes one final observation after the last sleep.
     A bounded wait that could return without ever having looked would be a
     timeout dressed up as an answer.
+
+    The sleep is clamped to the time actually remaining, because otherwise the
+    last one overshoots by up to a whole interval -- ``--ci-timeout 1
+    --ci-poll 20`` slept twenty seconds for a one-second bound. Both values
+    are the operator's to set, and a bound that is only approximately a bound
+    is not the thing the flag says it is.
     """
-    if clock() >= deadline:
+    remaining = deadline - clock()
+    if remaining <= 0:
         return False
-    sleep(interval)
+    sleep(min(interval, remaining))
     return True

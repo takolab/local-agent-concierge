@@ -23,6 +23,11 @@ Three groups, and the boundary between them is the push:
 * **Mutated beyond authority** -- ``PUSH_WROTE_UNEXPECTED_REFS`` alone. The
   remote reported writing a ref nobody asked for. Something was written for
   certain, and more than the boundary permits.
+* **Boundary unknown** -- ``PUSH_BOUNDARY_NOT_VERIFIED`` alone. The remote
+  reported *trying* a ref nobody asked for, and its answer settles nothing.
+  What happened to the authorised branch is still reported, because
+  uncertainty about one ref is not a reason to discard what is known about
+  another.
 * **Unknown** -- ``PUSH_NOT_VERIFIED`` alone. ``git push`` ran and the remote
   does not show the expected commit. This is not "the push failed": the
   remote may have taken it and answered late, or something else may have
@@ -81,6 +86,13 @@ class PushOutcome(Enum):
     #: mentioned and demonstrably did not update is not this: the flag on the
     #: report line decides, and this outcome means an established write.
     PUSH_WROTE_UNEXPECTED_REFS = "PUSH_WROTE_UNEXPECTED_REFS"
+    #: The remote reported *trying* to update a ref this runner did not ask
+    #: for, with an answer that settles nothing. Whether the boundary was
+    #: exceeded is unknown -- which is a different fact from whether the
+    #: authorised branch moved, and is reported as its own outcome so that
+    #: uncertainty about the first does not erase what is known about the
+    #: second.
+    PUSH_BOUNDARY_NOT_VERIFIED = "PUSH_BOUNDARY_NOT_VERIFIED"
 
     # -- before any write --------------------------------------------------
 
@@ -111,6 +123,13 @@ class PushOutcome(Enum):
     #: GitHub could not be queried before the push. Nothing was written.
     PUSH_API_ERROR = "PUSH_API_ERROR"
 
+
+#: What the push turn established about the *boundary* -- a fact distinct
+#: from what it established about the authorised branch, and reported
+#: separately so neither can quietly stand in for the other.
+BOUNDARY_CLEAN = "clean"
+BOUNDARY_EXCEEDED = "exceeded"
+BOUNDARY_UNKNOWN = "unknown"
 
 #: Outcomes after which the pull request branch is verified to hold the fix
 #: commit. Everything not listed here either left the branch untouched or --
@@ -153,6 +172,7 @@ PUSH_EXIT_CODES: dict[PushOutcome, int] = {
     PushOutcome.PUSH_API_ERROR: 72,
     PushOutcome.CI_API_ERROR: 73,
     PushOutcome.PUSH_WROTE_UNEXPECTED_REFS: 74,
+    PushOutcome.PUSH_BOUNDARY_NOT_VERIFIED: 75,
 }
 
 #: How long the runner waits for authoritative CI on the pushed commit, and

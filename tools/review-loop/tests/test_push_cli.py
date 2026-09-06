@@ -532,6 +532,17 @@ def test_only_outcomes_after_a_verified_push_report_a_mutation():
             # unknown, and the one outcome that is mutated without the branch
             # necessarily holding the fix.
             assert mutated is True
+        elif outcome is PushOutcome.PUSH_BOUNDARY_NOT_VERIFIED:
+            # The *boundary* is what is unknown. Whether a write happened is
+            # answered from the branch read-back, so it depends on the result
+            # rather than on the outcome alone.
+            assert mutated is None
+            assert (
+                PushResult(
+                    outcome=outcome, pushed_sha="a" * 40
+                ).repository_mutated
+                is True
+            )
         else:
             assert mutated is (outcome in PUSHED_OUTCOMES)
 
@@ -615,3 +626,45 @@ def test_no_write_is_stated_as_this_runs_inaction_not_the_branchs_stillness():
 
         assert "No -- this run performed no repository write" in out
         assert "verified unchanged" not in out
+
+
+def test_the_boundary_is_reported_as_its_own_line(tmp_path, live):
+    """Branch state and boundary state are two facts, printed as two lines."""
+    from review_loop.push_runner import PushResult
+
+    for outcome, fragment in (
+        (PushOutcome.PUSH_READY, "clean -- only the authorised ref"),
+        (PushOutcome.PUSH_WROTE_UNEXPECTED_REFS, "EXCEEDED"),
+        (PushOutcome.PUSH_BOUNDARY_NOT_VERIFIED, "UNKNOWN"),
+    ):
+        status = {
+            PushOutcome.PUSH_READY: "clean",
+            PushOutcome.PUSH_WROTE_UNEXPECTED_REFS: "exceeded",
+            PushOutcome.PUSH_BOUNDARY_NOT_VERIFIED: "unknown",
+        }[outcome]
+        stream = io.StringIO()
+        push_cli.render_text(
+            PushResult(outcome=outcome, boundary_status=status), stream
+        )
+        out = stream.getvalue()
+
+        assert "Write boundary:" in out
+        assert fragment in out.split("Write boundary:")[1].splitlines()[0]
+
+
+def test_an_exceeded_boundary_reports_the_branch_it_did_establish():
+    from review_loop.push_runner import PushResult
+
+    stream = io.StringIO()
+    push_cli.render_text(
+        PushResult(
+            outcome=PushOutcome.PUSH_WROTE_UNEXPECTED_REFS,
+            boundary_status="exceeded",
+            pushed_sha="c" * 40,
+        ),
+        stream,
+    )
+    out = stream.getvalue()
+
+    assert f"{'c' * 40} is on the branch" in out
+    assert "None" not in out.split("Repository mutated:")[1].splitlines()[0]

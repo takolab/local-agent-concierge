@@ -1360,15 +1360,24 @@ what happened, **the remote's own report is checked for refs nobody asked
 for** — and classified by what the report actually establishes, because git
 prints a line for a ref it left alone as readily as for one it changed:
 
-| Flag on the extra line | Established | Outcome |
+| Flag on the extra line | Established | Boundary |
 | --- | --- | --- |
-| space, `+`, `-`, `*` | it was updated | `PUSH_WROTE_UNEXPECTED_REFS` (74) |
-| `!` `[remote failure]`, unrecognised | nothing | `PUSH_NOT_VERIFIED` (66) |
-| `=`, `!` with a recognised refusal | it was *not* updated | reported in the reasons; the run continues |
+| space, `+`, `-`, `*` | it was updated | `exceeded` → `PUSH_WROTE_UNEXPECTED_REFS` (74) |
+| `!` `[remote failure]`, unrecognised | nothing | `unknown` → `PUSH_BOUNDARY_NOT_VERIFIED` (75) |
+| `=`, `!` with a recognised refusal | it was *not* updated | `clean`; reported in the reasons, the run continues |
 
 Exit 74 therefore means *a write beyond authority was established*, not merely
 that another ref appeared in the output — the same standard `PUSH_FAILED`
 holds itself to in the other direction.
+
+**The boundary is a second fact, not a replacement for the first.** What the
+push did to the authorised branch and what it did to everything else are
+separate questions, and either can be known while the other is not. So the
+branch is always read back *before* the boundary is judged, and both are
+reported: `boundary_status` in the JSON, its own line in the text output, and
+`pushed_sha` still populated when the read-back saw the commit. An earlier
+version returned on an unresolved extra ref before reading the branch at all,
+and answered "unknown" about a commit that was demonstrably sitting on it.
 
 **This is not a force push**, despite the flag's name. The commit's parent is
 already proven to be the reviewed head, so the update it asks for is an
@@ -1539,7 +1548,8 @@ alongside anything else.
 | 71 | `PUSH_WORKSPACE_INVALID` | This run wrote nothing. |
 | 72 | `PUSH_API_ERROR` | This run wrote nothing. GitHub unreachable before the push. |
 | 73 | `CI_API_ERROR` | **Pushed.** GitHub unreachable while waiting. |
-| 74 | `PUSH_WROTE_UNEXPECTED_REFS` | **Written, beyond authority.** The remote reported *updating* a ref this run did not ask for. No pushed SHA: the authorised branch state was never established. Inspect the remote. |
+| 74 | `PUSH_WROTE_UNEXPECTED_REFS` | **Written, beyond authority.** The remote reported *updating* a ref this run did not ask for. What the authorised branch holds is reported too. Inspect the remote. |
+| 75 | `PUSH_BOUNDARY_NOT_VERIFIED` | **Boundary unknown.** The remote reported *trying* a ref this run did not ask for, with an answer that settles nothing. What the authorised branch holds is reported separately. Inspect the remote. |
 
 Three rules the runner keeps on the failure paths:
 

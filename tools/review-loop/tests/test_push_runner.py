@@ -1233,8 +1233,11 @@ def test_a_report_naming_another_written_ref_stops_the_run(scenario, monkeypatch
     assert result.exit_code == 74
     # Known to have written, and more than was authorised: not "unknown".
     assert result.repository_mutated is True
+    assert result.boundary_status == "exceeded"
     assert "refs/tags/local-release" in " ".join(result.reasons)
     assert "write boundary was exceeded" in " ".join(result.reasons)
+    # And what the branch holds is still reported rather than discarded.
+    assert result.pushed_sha == scenario.remote_tip()
 
 
 def test_an_ancestor_commit_another_actor_pushed_is_not_credited_to_this_run(
@@ -1321,14 +1324,20 @@ def test_an_unexpected_ref_that_was_not_written_does_not_stop_the_run(
     result = push(scenario, client=client, timeline=timeline)
 
     assert result.outcome is PushOutcome.PUSH_READY
+    assert result.boundary_status == "clean"
     assert "refs/tags/idle" in " ".join(result.reasons)
     assert "establishes that they were not updated" in " ".join(result.reasons)
 
 
-def test_an_unexpected_ref_with_an_unresolved_answer_is_reported_as_unknown(
+def test_an_unexpected_ref_with_an_unresolved_answer_keeps_the_branch_evidence(
     scenario, monkeypatch
 ):
-    """Named, attempted, and the answer settles nothing: not a claimed write."""
+    """Named, attempted, and the answer settles nothing: not a claimed write.
+
+    The boundary being unknown must not erase what the branch read-back
+    established. An earlier version returned before reading the branch at all
+    and reported "unknown" about a commit that was demonstrably on it.
+    """
     from review_loop import fix_commit, push_runner
 
     real = fix_commit.push_fix_commit
@@ -1348,6 +1357,117 @@ def test_an_unexpected_ref_with_an_unresolved_answer_is_reported_as_unknown(
 
     result = push(scenario)
 
-    assert result.outcome is PushOutcome.PUSH_NOT_VERIFIED
-    assert result.repository_mutated is None
+    assert result.outcome is PushOutcome.PUSH_BOUNDARY_NOT_VERIFIED
+    assert result.exit_code == 75
+    assert result.boundary_status == "unknown"
     assert "does not establish whether they were updated" in " ".join(result.reasons)
+    # The branch fact survives the boundary being unknown: the push really did
+    # land, the read-back saw it, and the result says so.
+    assert result.pushed_sha == scenario.remote_tip()
+    assert result.repository_mutated is True
+    assert result.push_performed is True
+
+
+# --------------------------------------------------------------------------
+# Regressions from PR #35's sixth review round
+# --------------------------------------------------------------------------
+
+
+def test_an_exceeded_boundary_still_reports_what_the_branch_holds(scenario, monkeypatch):
+    """Two facts, and one being bad does not erase the other."""
+    from review_loop import fix_commit, push_runner
+
+    real = fix_commit.push_fix_commit
+
+    def push_and_claim_a_written_tag(worktree, *, remote, refspec, lease, timeout=300.0):
+        attempt = real(
+            worktree, remote=remote, refspec=refspec, lease=lease, timeout=timeout
+        )
+        return fix_commit.PushAttempt(
+            report=attempt.report,
+            unexpected_refs=fix_commit.UnexpectedRefs(written=("refs/tags/x:refs/tags/x",)),
+        )
+
+    monkeypatch.setattr(push_runner, "push_fix_commit", push_and_claim_a_written_tag)
+
+    result = push(scenario)
+
+    assert result.outcome is PushOutcome.PUSH_WROTE_UNEXPECTED_REFS
+    assert result.boundary_status == "exceeded"
+    # The branch was read back, and what it said is preserved.
+    assert result.pushed_sha == scenario.remote_tip() == result.commit.sha
+    assert result.push_performed is True
+
+
+def test_an_unknown_boundary_over_a_branch_that_did_not_move_stays_unknown(
+    scenario, monkeypatch
+):
+    """When neither fact is established, neither is claimed."""
+    from review_loop import fix_commit, push_runner
+
+    def refused_with_a_murky_tag(worktree, *, remote, refspec, lease, timeout=300.0):
+        raise fix_commit.PushRefused(
+            "git push failed: partial failure",
+            fix_commit.PushAttempt(
+                fix_commit.REMOTE_REJECTED,
+                unexpected_refs=fix_commit.UnexpectedRefs(
+                    unresolved=("refs/tags/murky:refs/tags/murky",)
+                ),
+            ),
+        )
+
+    monkeypatch.setattr(push_runner, "push_fix_commit", refused_with_a_murky_tag)
+
+    result = push(scenario)
+
+    assert result.outcome is PushOutcome.PUSH_BOUNDARY_NOT_VERIFIED
+    assert result.boundary_status == "unknown"
+    assert result.pushed_sha is None
+    assert result.repository_mutated is None
+    assert scenario.remote_tip() == scenario.head_sha
+
+
+def test_the_bounded_wait_does_not_overshoot_the_configured_timeout():
+    """`--ci-timeout 1 --ci-poll 20` slept twenty seconds for a one-second bound."""
+    from review_loop.push_runner import _wait
+
+    now = [0.0]
+    slept = []
+
+    def clock():
+        return now[0]
+
+    def sleep(seconds):
+        slept.append(seconds)
+        now[0] += seconds
+
+    deadline = clock() + 1.0
+    observations = 1  # the loop always looks once before waiting
+    while _wait(clock, sleep, deadline, 20.0):
+        observations += 1
+
+    assert sum(slept) <= 1.0
+    # And it still makes a final observation after the last sleep, rather than
+    # returning a timeout it never looked for.
+    assert observations >= 2
+
+
+def test_the_bounded_wait_still_uses_the_full_interval_when_there_is_time():
+    from review_loop.push_runner import _wait
+
+    now = [0.0]
+    slept = []
+
+    def clock():
+        return now[0]
+
+    def sleep(seconds):
+        slept.append(seconds)
+        now[0] += seconds
+
+    deadline = clock() + 100.0
+    while _wait(clock, sleep, deadline, 20.0):
+        pass
+
+    assert slept[:4] == [20.0, 20.0, 20.0, 20.0]
+    assert sum(slept) <= 100.0
