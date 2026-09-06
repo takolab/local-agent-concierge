@@ -105,6 +105,47 @@ MAX_CI_API_FAILURES = 3
 
 
 @dataclass(frozen=True)
+class FixProvenance:
+    """Which validated review caused this fix, and what git says the fix is.
+
+    Two halves, and the pairing is the point. The ``source_*`` fields name the
+    review whose findings were routed into the candidate patch; the ``fix_*``
+    fields are what **git** reported about the commit that is now on the
+    branch. A later stage holding this can establish something no single
+    document could otherwise show: that this exact commit was produced for
+    *this* finding set, rather than merely sitting in the right place.
+
+    It is populated identically on both paths to ``PUSH_READY`` -- the run
+    that created the commit and the run that found it already pushed --
+    because those paths establish the same two git facts, and a re-review
+    that lost the link whenever ``commit_created`` was false would have been
+    strictly weaker for no reason.
+    """
+
+    #: The identity of the validated review itself. The one field here that
+    #: distinguishes two *different* reviews of the same commit -- everything
+    #: below it can be identical for both, finding ids included.
+    source_review_sha256: str
+    #: The review round the routed findings belong to.
+    source_round: int
+    #: The commit the review was written against, and the fix's parent.
+    source_reviewed_head_sha: str
+    #: The base commit CI had merged that review's head onto. Part of the
+    #: review target here for the same reason it is part of a recorded
+    #: review's identity: the same head onto a different base is a different
+    #: integration state, and so a different review.
+    source_ci_merge_base_sha: str
+    #: The finding ids the fix turn answered, all of them.
+    source_finding_ids: tuple[str, ...]
+    #: The candidate patch the fix turn validated.
+    source_patch_sha256: str
+    #: The commit on the branch, as git reports it.
+    fix_sha: str
+    fix_parent_sha: str
+    fix_patch_sha256: str
+
+
+@dataclass(frozen=True)
 class PushResult:
     """Everything one push turn established, and what it changed."""
 
@@ -135,6 +176,9 @@ class PushResult:
     ci_evaluation: CiEvaluation | None = None
     ci_polls: int = 0
     verified_target: ReviewTarget | None = field(default=None)
+    #: Which review caused this fix, and what git says the fix is. Present
+    #: whenever the branch is known to hold the fix, on either path.
+    fix_provenance: FixProvenance | None = None
 
     @property
     def exit_code(self) -> int:
@@ -165,6 +209,37 @@ class PushResult:
 
 def _result(outcome: PushOutcome, reasons, **kwargs) -> PushResult:
     return PushResult(outcome=outcome, reasons=tuple(reasons), **kwargs)
+
+
+def _provenance(
+    handoff: FixHandoff, *, fix_sha: str, parent_sha: str | None, patch_sha256: str | None
+) -> FixProvenance:
+    """Pair the routed review with what git said about the pushed commit.
+
+    ``parent_sha`` and ``patch_sha256`` are typed optional because the
+    functions that produce them can fail to establish either. They cannot be
+    absent here: both call sites reach this only after git has reported a
+    commit whose parent is the reviewed head and whose diff is the candidate
+    patch, so an absent value would mean the caller took a path that does not
+    exist. The assertion says so rather than silently recording ``null`` in a
+    provenance record whose entire job is to be checkable.
+    """
+    if parent_sha is None or patch_sha256 is None:  # pragma: no cover - unreachable
+        raise AssertionError(
+            "fix provenance requires the parent and patch digest git reported for "
+            f"{fix_sha}; reaching here without them is a programming error"
+        )
+    return FixProvenance(
+        source_review_sha256=handoff.source_review_sha256,
+        source_round=handoff.round,
+        source_reviewed_head_sha=handoff.target.head_sha,
+        source_ci_merge_base_sha=handoff.target.ci_merge_base_sha,
+        source_finding_ids=handoff.finding_ids,
+        source_patch_sha256=handoff.patch_sha256,
+        fix_sha=fix_sha,
+        fix_parent_sha=parent_sha,
+        fix_patch_sha256=patch_sha256,
+    )
 
 
 def remote_said_label(remote: str) -> str:
@@ -207,6 +282,13 @@ class BranchState:
     #: whose diff is exactly the candidate patch -- i.e. this fix, pushed.
     is_this_fix: bool
     reason: str
+    #: What git said about the tip, kept rather than discarded once the
+    #: boolean above is decided. The already-pushed path establishes exactly
+    #: the same two facts the created-commit path does, and a later stage has
+    #: no way to re-derive them; throwing them away here is what made
+    #: ``commit_created == false`` mean "the provenance is gone".
+    parent_sha: str | None = None
+    patch_sha256: str | None = None
 
 
 def _classify_branch(
@@ -244,6 +326,8 @@ def _classify_branch(
                 f"reviewed head and whose diff is exactly this candidate patch; "
                 "this fix is already pushed"
             ),
+            parent_sha=parent,
+            patch_sha256=digest,
         )
     return BranchState(
         tip=tip,
@@ -465,6 +549,12 @@ def _run_push(
             push_target=push_target,
             pushed_sha=branch_state.tip,
             commit=None,
+            provenance=_provenance(
+                handoff,
+                fix_sha=branch_state.tip,
+                parent_sha=branch_state.parent_sha,
+                patch_sha256=branch_state.patch_sha256,
+            ),
             push_performed=False,
             already_pushed=True,
             prior_reasons=(branch_state.reason,),
@@ -782,6 +872,12 @@ def _commit_and_push(
             push_target=push_target,
             pushed_sha=commit.sha,
             commit=commit,
+            provenance=_provenance(
+                handoff,
+                fix_sha=commit.sha,
+                parent_sha=commit.parent_sha,
+                patch_sha256=commit.patch_sha256,
+            ),
             push_performed=moved_the_ref,
             already_pushed=not moved_the_ref,
             prior_reasons=created
@@ -950,6 +1046,7 @@ def _wait_for_ci(
     push_target: PushTarget,
     pushed_sha: str,
     commit: FixCommit | None,
+    provenance: FixProvenance,
     push_performed: bool,
     already_pushed: bool,
     prior_reasons: tuple[str, ...],
@@ -985,6 +1082,7 @@ def _wait_for_ci(
             ci_evaluation=evaluation,
             ci_polls=polls,
             verified_target=verified,
+            fix_provenance=provenance,
         )
 
     while True:

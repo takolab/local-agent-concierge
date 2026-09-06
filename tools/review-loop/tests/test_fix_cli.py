@@ -439,6 +439,48 @@ def test_the_json_output_carries_the_whole_result(tmp_path, tree, head):
     assert payload["request"]["allowed_paths"] == ["pkg/"]
 
 
+def test_the_fix_document_names_the_review_it_answers(tmp_path, tree):
+    """The first link in the provenance chain push and re-review pair on.
+
+    Finding ids alone cannot identify a review turn -- two independent
+    reviews of one commit routinely both raise `F1` over different findings --
+    so the fix document carries a digest of the validated review model itself.
+    """
+    from review_loop.review_identity import review_sha256
+    from review_loop.routing import load_handoff
+
+    document = review_json()
+    path = write(tmp_path, document)
+
+    _, output = invoke(
+        ["--review-json", path, "--json"],
+        agent=ScriptedAgent(stdout="unused"),
+        workspace=FakeWorkspace(str(tree)),
+    )
+
+    handoff = load_handoff(document)
+    assert json.loads(output)["source_review_sha256"] == review_sha256(
+        handoff.target, handoff.verdict
+    )
+
+
+def test_every_fix_outcome_names_its_source_review(tmp_path, tree):
+    # Including the ones that route nothing: an outcome that could not say
+    # which review it came from would be a hole in the chain wherever it
+    # appeared.
+    path = write(tmp_path, review_json(recommendation="approved"))
+
+    _, output = invoke(
+        ["--review-json", path, "--json"],
+        agent=ScriptedAgent(stdout="unused"),
+        workspace=FakeWorkspace(str(tree)),
+    )
+
+    payload = json.loads(output)
+    assert payload["outcome"] == "NO_ACTIONABLE_FINDINGS"
+    assert payload["source_review_sha256"]
+
+
 def test_the_json_output_pins_the_write_boundaries(tmp_path, tree):
     path = write(tmp_path, review_json())
 

@@ -7,7 +7,7 @@ bounded Coding Agent turn against that same exact state, and commits and
 pushes the patch that produces — proving, at each step, exactly which change
 is being carried forward.
 
-It has four commands, and only the fourth can change the repository.
+It has five commands, and only the fourth can change the repository.
 
 **`review-loop --pr N`** answers two questions, read-only:
 
@@ -25,6 +25,8 @@ and routes its open findings to one bounded Coding Agent turn: a dedicated
 writable worktree at the reviewed commit, an explicit allowed scope derived
 from the findings, a Structured Fix Response validated against the working
 tree, and a patch. It makes **no GitHub request at all** and commits nothing.
+Its document also names the review it answers, so the two later stages can
+pair on that artifact rather than on the labels inside it.
 
 **`review-loop push --fix-json <file> --patch <file>`** is the first stage
 with **authoritative repository write capability**. It proves the patch it
@@ -34,12 +36,20 @@ the remote ref back to confirm the exact pushed SHA, and waits for
 authoritative CI on that exact commit. Its entire write surface is one
 `git push` to one derived ref; GitHub itself stays read-only.
 
-Everything after that — Independent Re-Review, finding-resolution tracking,
-the multi-round loop, the Merge Decision Brief, merge — is not here. **The
-full Finding → Fix → Re-Review loop is not automated.** This is one review
-turn, one bounded fix turn, and one commit-and-push turn, each bound to one
-verified state, with the human keeping every decision about acceptance and
-merge.
+**`review-loop re-review --review-json <file> --push-json <file>`** runs one
+*fresh* Independent Re-Review against that pushed fix, and only if the pull
+request is still at it with authoritative CI green against the current merge
+context. A new reviewer process, with no access to the Coding Agent's
+context, reads that exact commit and answers two separate questions: did each
+original finding get resolved, and what does a fresh review of the pull
+request as it now stands find? Both answers are recorded, separately, as one
+`## Independent AI Re-Review` comment.
+
+Everything after that — a second fix round, the multi-round loop, the Merge
+Decision Brief, merge — is not here. **The full Finding → Fix → Re-Review
+loop is not automated.** This is one review turn, one bounded fix turn, one
+commit-and-push turn and one re-review turn, each bound to one verified
+state, with the human keeping every decision about acceptance and merge.
 
 ## Verification: `review-loop --pr N`
 
@@ -1581,6 +1591,14 @@ runs — the committer timestamp differs — so they are not what is compared.
 `already_pushed: true` in the JSON, and "was already on the branch" in the
 text, say which row was taken.
 
+Both of the first two rows establish the same two git facts — parent and diff
+digest — and both therefore report the same `fix_provenance` block, pairing
+them with the identity of the review the fix was routed from (see
+[`review_identity.py`](src/review_loop/review_identity.py)). That block is what
+lets `review-loop re-review` tell a fix for one review from a fix for another;
+it is emitted from the already-pushed row as well precisely so that
+`commit_created: false` does not quietly drop it.
+
 A local commit in a prepared worktree is never reused, because the worktree
 does not survive the run. `--commit-cwd` is the exception an operator opts
 into, and it is verified to be a clean checkout of the reviewed head first — a
@@ -1593,6 +1611,486 @@ built on.
 | --- | --- |
 | **Enforced by this runner** | The patch's bytes hash to the fix turn's digest. The applied tree and the created commit both re-hash to it. The commit's parent is the reviewed head and it is exactly one commit. The branch comes from GitHub's pull request object — read for the repository the handoff names, at both ends of the pull request — and cannot be a fork, a base or a default branch. Every URL for the chosen remote, fetch and push, names the target repository. The push is a fast-forward, conditional on the branch still being exactly the reviewed head. A no-write is claimed only on the remote's own recognised rejection; a failure after the push starts is never one. The pushed ref is read back from the remote. CI evidence belongs to the exact pushed commit, from the authoritative event, against the current merge context. |
 | **Not enforced, and not claimed** | That the fix is *correct*. That it resolves the finding. That the pull request should be merged. That your git hooks do nothing else — they run, deliberately, and are trusted. That a digest survives configuration this module does not pin. That a push which landed and was then force-pushed away can be detected. Whether a `pre-push` hook, a signing configuration or a branch protection rule refuses the push — those are the remote's and the operator's decisions, reported rather than bypassed. |
+
+## Re-reviewing the pushed fix: `review-loop re-review`
+
+`PUSH_READY` means *a re-review could start here*. This is the command that
+starts one.
+
+```bash
+review-loop push --fix-json fix.json --patch fix.patch --json > push.json
+
+review-loop re-review --review-json review.json --push-json push.json \
+  --reviewer-command "..."
+```
+
+What it does, in the order it does it:
+
+```text
+validated review + PUSH_READY push
+→ revalidate the pushed fix against GitHub
+→ fresh Independent Re-Review of that exact commit
+→ original finding resolutions + fresh findings
+→ re-verify the target
+→ one '## Independent AI Re-Review' comment
+```
+
+### Two facts, never one
+
+The whole design of this stage is a refusal to answer one question where
+there are two:
+
+```text
+Did each original finding get resolved?          (history, about F1, F2, …)
+Does the pull request now contain findings?      (a fresh review of now)
+```
+
+Neither implies the other, and collapsing them loses information in both
+directions. A fresh Major finding in the fix does not make `F1` unresolved —
+`F1` was resolved, and something else is now wrong. Every original finding
+being resolved does not make the pull request clean — the fix may have
+introduced something nobody has looked at.
+
+So the contract carries two independent collections, the validator never
+derives one from the other, the recorded comment renders them as two sections
+with no combined total, and the JSON output has two keys and no status field.
+The one place they legitimately meet is the reviewer's `Recommendation`, and
+each coherence rule there names which collection it reads.
+
+This is not hypothetical. PR #26's review found a real credential leak; PR
+#27's found documentation that overclaimed. A fix that satisfies its finding
+and introduces a provenance gap is the ordinary case, not the exotic one, and
+a re-review that only ticked off the original findings would record that pull
+request as clean.
+
+### The `PUSH_READY` precondition, revalidated
+
+The push document says the fix was pushed and green. That was true when the
+push turn ended; a re-review costs minutes, and this is the most expensive
+turn in the loop with the answer most likely to be acted on. So the claim is
+re-established from GitHub before a reviewer starts:
+
+| Checked | Failure |
+| --- | --- |
+| The pull request's head is exactly the pushed fix SHA | `TARGET_NOT_AT_FIX` |
+| It still targets the base branch the fix was pushed against | `TARGET_NOT_AT_FIX` |
+| Authoritative CI for that exact head verifies `READY` **now** | `TARGET_NOT_READY` |
+| The merge CI tested is still the base branch tip | `TARGET_NOT_AT_FIX` |
+| GitHub is reachable | `API_ERROR` |
+
+In every one of those cases **no reviewer is started**. The head check comes
+before the CI verdict deliberately: "the pull request is not at the fix any
+more" and "its CI is not green" send an operator to look at different things,
+and reporting the second when the first is true is a wrong instruction.
+
+The last row is the one that is easy to miss. `READY` already requires that
+the base tip and the merge base agree — except when the base tip could not be
+read at all, which `READY` tolerates. The re-review asserts merge-context
+currency itself rather than inheriting it, exactly as `review-loop push` does
+before reporting `PUSH_READY`.
+
+`TARGET_NOT_READY` reports the underlying verification verdict's own exit
+code, so the `PENDING` / `FAILED` / `AMBIGUOUS` / `STALE_TARGET` vocabulary is
+not duplicated.
+
+### The inputs
+
+Two documents, both machine-generated by earlier turns, both re-read through
+the invariants that produced them:
+
+* `--review-json` — a `review-loop review --json` document. Read by
+  `review_loop.routing`, the *same* loader `review-loop fix` uses, so there is
+  one implementation of "is this a validated review?" in the package. It must
+  report `REVIEW_VALID` or `COMMENT_ALREADY_EXISTS`, round 1, at least one
+  open finding, and `changes_requested`.
+* `--push-json` — a `review-loop push --json` document. It must report
+  `PUSH_READY`, not a dry run, `repository_mutated: true`, a `clean` write
+  boundary, a full 40-character `pushed_sha` that is not the reviewed head, a
+  `verified_target` at that SHA, and CI that was `READY`, bound to the pushed
+  commit, and tested against what was then the base tip.
+
+They must describe the same repository, the same pull request, and the same
+reviewed head.
+
+### Which review caused this fix
+
+Commit identity is not enough to pair them, and the gap is easy to reach by
+accident. Two reviews of the same commit — a second round against a different
+merge context, or a `--dry-run` review nobody recorded — raise different
+findings against the same head:
+
+```text
+Review A of H1: F1, F2      Review B of H1: F3
+Push A: H1 -> H2
+```
+
+`review-B.json` paired with `push-A.json` agrees on repository, pull request,
+reviewed head and pushed head. Every check that looks only at commit identity
+accepts it, and the re-review would then ask a fresh reviewer to resolve `F3`
+against a commit produced to fix `F1` and `F2`. The commit under review would
+be correctly bound; the *history* recorded about it would be false.
+
+Finding ids do not close this on their own, and it is worth being blunt about
+why: they are labels local to one review turn, and `F1`, `F2` is the
+convention the reviewer prompt itself suggests. Two independent reviews of one
+commit therefore routinely carry the *same* ids over completely different
+findings:
+
+```text
+Review A of H1              Review B of H1
+F1  worker.py  not atomic   F1  process.py  credentials leak
+F2  ci.py      stale CI     F2  README.md   false guarantee
+```
+
+Round, reviewed head and finding-id set are identical. So is the merge
+context, in the other direction: this package already treats a review of `H`
+onto `B1` as a different record from one of the same `H` onto `B2` — that is
+why `base_sha` is in `RecordIdentity` — and a fix provenance that ignored it
+would disagree with that about what "the same review" means.
+
+What identifies a review is therefore the **review itself**. See
+[`review_identity.py`](src/review_loop/review_identity.py): the canonical
+bytes of the validated review model — repository, pull request, head, base
+ref, CI merge base, round, recommendation, escalation reason, and every field
+of every finding in order — and their SHA-256. It travels the whole chain:
+
+```text
+review --json → fix handoff → push --json → re-review
+```
+
+`review-loop push` reports it inside a `fix_provenance` block, and this stage
+requires the block:
+
+```json
+"fix_provenance": {
+  "source_review_sha256": "…",
+  "source_round": 1,
+  "source_reviewed_head_sha": "…",
+  "source_ci_merge_base_sha": "…",
+  "source_finding_ids": ["F1", "F2"],
+  "source_patch_sha256": "…",
+  "fix_sha": "…",
+  "fix_parent_sha": "…",
+  "fix_patch_sha256": "…"
+}
+```
+
+The `source_*` half names the review whose findings were routed; the `fix_*`
+half is what **git** said about the commit now on the branch. The re-review
+requires the round, the reviewed head, the merge base and the *whole finding
+set* to match the review document, `fix_sha` to be the pushed commit,
+`fix_parent_sha` to be the reviewed head, and `fix_patch_sha256` to equal the
+candidate patch digest — and then, as the catch-all, that
+`source_review_sha256` equals the digest **recomputed** from the review
+document supplied here. Recomputed, never read back from it: agreement then
+means the two documents are the same validated artifact rather than that they
+carry the same string.
+
+The specific checks run first on purpose. "F3 was never fixed" is a reason an
+operator can act on; the digest is what catches every difference they cannot
+see.
+
+Two fields are deliberately outside the digest. `ci_evidence` is CI
+observation rather than review content and — decisively — `routing` does not
+read it back, so hashing it would make the digest uncomputable downstream.
+`resolved_finding_ids` is likewise not carried by the handoff and is always
+empty in round 1.
+
+The block is emitted on **both** paths to `PUSH_READY`, and that matters more
+than it looks. The already-pushed path — a retry that finds the fix already on
+the branch and reports no `commit` of its own — identifies the remote tip by
+checking that its parent is the reviewed head *and* that its diff is exactly
+the candidate patch. Those are the same two facts the created-commit path
+establishes. An earlier version of this stage checked the parent only when a
+`commit` block was present, so `commit_created: false` silently meant *the
+provenance is gone*.
+
+What this is **not** is a signature. Both documents remain operator-controlled
+input, exactly as the earlier handoffs are, and someone who edits them can
+still make them agree. What it removes is the silent mispairing — the one an
+operator hits without meaning to. And it still does not establish that the
+patch *addresses* those findings; nothing mechanical can, which is the
+question the fresh re-review exists to answer. Asserting it in the handoff
+would make the re-review ceremonial.
+
+The deeper limit is unchanged: they cannot make a reviewer read a commit that
+is not the pull request's head, because the runner re-derives that from GitHub
+and the workspace resolves `refs/pull/N/head` from the remote. The files
+select; git and GitHub decide.
+
+### Round semantics
+
+A **round is one Independent Review turn**, and this is the one place the
+whole loop's numbering is stated:
+
+```text
+round 1   the initial Independent Review
+          the fix turn routed from it        (still round 1)
+          the push of that fix               (still round 1)
+round 2   the fresh Independent Re-Review of the pushed fix
+```
+
+The fix and push turns do not start rounds of their own — they carry the
+round of the review whose findings they act on, which is why a push handoff
+must report `round: 1`. A later multi-round slice increments the same way, so
+nothing here needs a second numbering scheme to grow into.
+
+The round is part of the record identity, so a re-review adds evidence beside
+the round-1 review rather than overwriting it.
+
+### Finding identity
+
+Original finding ids are preserved exactly. If the round-1 review raised `F1`,
+`F2` and `F3`, the re-review reports resolutions against those three ids, in
+those spellings. They are never renumbered.
+
+Fresh findings are namespaced by the round that raised them: `R2.F1`,
+`R2.F2`, and so on. The prefix is checked, and so is the collision:
+
+* The prefix constrains **this round's reviewer**, which is what makes a
+  fresh id recognisable on sight in the record.
+* It says nothing about round 1, whose reviewer was never told to avoid the
+  namespace and was free to name a finding `R2.F1`.
+
+So every fresh id is also checked against the actual original ids, and that
+second check is what makes the separation a guarantee rather than a naming
+habit.
+
+### Bounded Re-Review Response v1
+
+The same shape as the Structured Verdict, with two kinds of block:
+
+```text
+BEGIN BOUNDED RE-REVIEW RESPONSE v1
+Round: 2
+Reviewed head SHA: <the exact 40-character pushed fix SHA>
+Recommendation: <approved | changes_requested | escalate>
+Escalation reason: <only when escalating with nothing else to escalate>
+Finding ID: F1
+Resolution: RESOLVED
+Evidence: <what at this commit shows it>
+Reason: <required for UNRESOLVED and ESCALATE>
+Finding ID: F2
+Resolution: UNRESOLVED
+Evidence: <what shows it is still true>
+Reason: <what the fix did not do>
+Fresh finding ID: R2.F1
+Severity: <Blocking | Major | Minor>
+Location: <file path, with a line or symbol>
+Problem: <what is wrong>
+Evidence: <what shows it is wrong>
+Required outcome: <what must be true for this to be resolved>
+Scope boundary: <optional>
+END BOUNDED RE-REVIEW RESPONSE v1
+```
+
+Parsing follows the same three rules as the verdict parser — only the
+delimited block is read, a label counts only at column 0, and an unrecognised
+label-shaped line at column 0 is an error rather than content. Two rules are
+specific to this contract:
+
+* **Two different openers.** `Finding ID` opens a resolution; `Fresh finding
+  ID` opens a fresh finding. Different words, so a fresh finding cannot be
+  reported as a resolution by accident, and `Evidence` — spelled the same in
+  both — lands in the block its opener chose.
+* **Resolutions come first.** Once a fresh finding has opened, a `Finding ID`
+  line is an error. The ordering costs the reviewer nothing and makes the
+  section a line belongs to decidable without lookahead.
+
+`Resolution` admits exactly three words: `RESOLVED`, `UNRESOLVED`,
+`ESCALATE`. There is deliberately **no `NEW_FINDING`** — a problem the fix
+introduced is a fresh finding, and saying it here would overwrite the
+historical fact about the original.
+
+### Resolution validation
+
+Mechanical, and failing closed:
+
+* Every original finding id appears **exactly once**. None omitted, none
+  duplicated, none unknown. A re-review that silently drops `F2` is not a
+  re-review with a gap; it is a document that would let `F2` disappear.
+* `Reviewed head SHA` is exactly the pushed fix SHA. Abbreviated, absent or
+  merely close is `RE_REVIEW_SHA_MISMATCH`, not a weaker binding — including
+  a response bound to the *original reviewed head*, which is the near miss
+  this stage is most exposed to.
+* `Round` is exactly 2.
+* `Evidence` is required for every resolution, `RESOLVED` included. "Fixed"
+  without the code that shows it is an assertion.
+* `Reason` is required for `UNRESOLVED` and `ESCALATE`, and optional for
+  `RESOLVED`. An unresolved finding has to say what the fix did not do; an
+  escalation has to say what the human is being asked.
+
+### Fresh finding validation
+
+Fresh findings are validated by `verdict_validation.validate_finding` — the
+Structured Verdict's own finding rules, called directly rather than
+reimplemented. A fresh finding is admissible exactly when the same finding
+would have been admissible in a round-1 verdict: the same closed severity
+vocabulary, the same required fields, the same field limits, the same refusal
+to let reviewer text contain the record marker's substrings, the same id
+pattern. On top of that come the namespace prefix, the collision check
+against the original ids, and uniqueness within the turn.
+
+### Recommendation coherence
+
+The one field that reads both collections, so each rule names its source:
+
+| Recommendation | Requires |
+| --- | --- |
+| `approved` | every original `RESOLVED` **and** zero fresh findings |
+| `changes_requested` | at least one non-`RESOLVED` original **or** at least one fresh finding |
+| `escalate` | an `ESCALATE` resolution, a fresh `Blocking` finding, or an explicit `Escalation reason` |
+
+A fresh `Blocking` finding always escalates — this project's standing
+review-automation decision, unchanged. An `ESCALATE` resolution escalates
+too: a question for a human is not a change to request.
+
+`Escalation reason` is enforced as conditional in the other direction as
+well: a re-review that recommends `approved` or `changes_requested` and
+carries one is refused. That field states what a human is being asked, and a
+document claiming both "nothing needs doing" and "something is being
+escalated" would otherwise become a durable comment saying both.
+
+### Post-review revalidation
+
+The reviewer read one merge context. Before anything is recorded, the pull
+request is verified again and compared with the target the reviewer was
+given: same pull request, same head, same base branch, same merge base. If
+any of that moved, the outcome is `TARGET_STALE` and **nothing is written** —
+the re-review is real evidence about a state that is no longer current, and
+recording it as though it described the pull request now would be the one
+mislabelling this whole design exists to prevent.
+
+### The recorded comment
+
+```markdown
+## Independent AI Re-Review
+
+Round: 2
+Reviewed head SHA: <pushed fix>
+Fix for: round 1 review of <reviewed head>
+CI integration base: master at <merge base>
+CI verification: READY — .github/workflows/pytest.yml (run 42: success)
+Recommendation: changes_requested
+
+These are two independent facts. …
+
+Original findings: 2
+RESOLVED: F1, F2
+UNRESOLVED: (none)
+ESCALATE: (none)
+
+Fresh Blocking: 0
+Fresh Major: 1
+Fresh Minor: 0
+Fresh findings: 1
+
+Original finding resolutions (round 1):
+
+### RESOLVED — F1
+…
+
+Fresh findings:
+
+### Major — R2.F1
+…
+```
+
+Only validated fields are rendered. Whatever prose the reviewer wrote around
+its block never reaches GitHub. The comment closes by saying what it is: not
+an approval, and not a merge decision.
+
+Note what the counts do **not** do. `Fresh Blocking` / `Fresh Major` /
+`Fresh Minor` count fresh findings only. An unresolved original keeps the
+severity round 1 gave it, and that severity belongs to the round-1 record;
+counting it here would silently re-raise a finding this turn did not
+independently make.
+
+Every severity field in the JSON therefore says `fresh` in its name —
+`fresh_major`, `fresh_major_findings_present`, and so on. A key called
+`major_findings_remain` would read across both collections while counting one
+of them, and would report `false` for a pull request whose original Major
+finding is explicitly `UNRESOLVED`. There is deliberately no field combining
+the two: `unresolved_finding_ids` is the other half, and a consumer asking
+"is anything outstanding?" reads both.
+
+### Identity and idempotency
+
+The same marker as a review record, with two fields carrying the difference:
+
+```text
+head  = the pushed fix SHA   (not the reviewed head)
+round = 2
+role  = independent-re-reviewer
+```
+
+Consequences, all tested:
+
+* A re-review never overwrites, and is never mistaken for, the round-1 review
+  of the commit it followed.
+* A retry of the exact same re-review finds its own record and writes nothing
+  — the check runs before the reviewer, to avoid paying for a review that
+  cannot be posted, and again immediately before the write, which is the one
+  that catches a retry whose earlier `POST` succeeded and whose response was
+  lost.
+* **The same pushed head against a different merge context is not a
+  duplicate.** `base_sha` is part of the identity, so a record of the fix
+  merged onto `B1` does not suppress a re-review of the same fix merged onto
+  `B2`. That is a different integration state, verified by different CI, that
+  nobody has re-reviewed — and it is exactly the bug the review turn's
+  identity model was corrected for.
+* A marker copied into someone else's comment does not suppress anything: a
+  record is a matching marker **from the account this runner would post as**.
+  That rule now lives in one place, `comment_format.find_record`, shared by
+  both turns.
+
+### Failure semantics
+
+| Situation | Outcome | Exit | Comment written |
+| --- | --- | --- | --- |
+| A validated re-review | `RE_REVIEW_VALID` | 0 | one |
+| Already recorded | `COMMENT_ALREADY_EXISTS` | 0 | none |
+| Inputs are not a review + the `PUSH_READY` push of its fix | `RE_REVIEW_INPUT_INVALID` | 80 | none |
+| The pull request moved off the fix, was retargeted, or its CI evidence is stale | `TARGET_NOT_AT_FIX` | 81 | none |
+| CI for the fix is not `READY` now | `TARGET_NOT_READY` | the verification verdict's own | none |
+| The reviewer's directory is not the fix | `REVIEWER_WORKSPACE_INVALID` | 82 | none |
+| The reviewer failed or timed out | `REVIEWER_FAILED` | 83 | none |
+| Unparseable, or a contract rule failed | `RE_REVIEW_MALFORMED` | 84 | none |
+| The response names another commit | `RE_REVIEW_SHA_MISMATCH` | 85 | none |
+| The pull request moved during the reviewer turn | `TARGET_STALE` | 86 | none |
+| Valid, but the `POST` failed | `GITHUB_WRITE_FAILED` | 87 | none |
+| GitHub unreachable | `API_ERROR` | 88 | none |
+
+Two rows are worth reading twice.
+
+**An unresolved original finding is not a failure.** `F1 → UNRESOLVED` with
+no fresh findings is a *valid re-review*: exit 0, one comment, and the fact
+that the fix did not solve the problem recorded as evidence. Nothing is
+retried, no Coding Agent is invoked, and no second fix round starts.
+
+**A fresh finding is not a failure either.** `F1 → RESOLVED` beside a fresh
+Major is exit 0 and one comment carrying both facts. Whether that finding
+gets fixed is a human's decision.
+
+Exit code 0 means *a validated re-review exists for this exact pushed fix*.
+It does not mean the findings were resolved and it does not mean anything may
+merge.
+
+### What a re-review turn does not do
+
+It does not route a second fix, does not invoke a Coding Agent, does not push,
+does not merge, and does not produce a Merge Decision Brief. It does not
+increase the reviewer's authority in any way: the same subprocess contract,
+the same read-only instruction, the same allowlisted environment, no
+credential of its own, no push authority, no GitHub write. The runner
+performs the single write, one issue comment, on the one path that ends in a
+validated re-review.
+
+And it does not decide. `Blocking = 0` and `Major = 0` and every original
+`RESOLVED` are three pieces of evidence. Accepting them, deciding whether an
+unresolved finding gets another attempt, deciding whether a fresh finding is
+worth fixing, and merging are all a human's, and there is no code path here
+that could take any of them.
 
 ## Tests
 
@@ -1633,6 +2131,31 @@ and CI answer a test moves between polls, from an injected `sleep`, so a
 half-hour bounded wait costs no wall-clock time and the timeline under test is
 written out explicitly.
 
+The re-review tests reuse all of that rather than starting a second
+framework: the same GitHub fakes, the same comment reader and writer, the
+same reviewer stand-in, and the same real-git fixtures. The two inputs are
+built as the documents the earlier commands actually emit, so a test that
+changes one field changes exactly one fact. The workspace assertion is the
+one that most needs real git — a re-reviewer that read the *reviewed* commit
+rather than the fix would report every finding unresolved, correctly, about
+the wrong tree — so a real fix commit is published as `refs/pull/N/head`, a
+real detached worktree is prepared, and the reviewer reports the `git
+rev-parse HEAD` and file contents it actually found.
+
+Evidence separation has explicit regression coverage: `F1 → RESOLVED` beside
+a fresh Major asserts both facts independently and asserts that the record
+does not report `F1` as unresolved; `F1 → UNRESOLVED` with no fresh finding
+asserts that nothing is invented.
+
+The provenance chain is tested at both ends and in the middle: the digest's
+own properties (every field changes it, finding order counts, the same id over
+a different finding differs, `ci_evidence` is outside it, and it survives a
+round trip through the handoff), the two mispairings it exists to refuse — the
+same finding ids over different findings, and the same review against a
+different merge context — and, end to end, the *real* push turn run over real
+git with its real `--json` output fed straight into the pairing. No fixture's
+idea of the document stands in for it.
+
 ## Known limitations
 
 * **Scope is coarse, and can refuse legitimate findings.** A reviewer that
@@ -1669,10 +2192,13 @@ written out explicitly.
   A deliberate narrowing, not an oversight — but it means a candidate patch is
   never evidence that the pull request is currently green. `review-loop push`
   re-establishes it, because it writes.
-* **The loop stops at a pushed, green commit.** There is no Independent
-  Re-Review, no judgement about whether the finding is actually resolved, no
-  second fix round, no multi-round loop, no Merge Decision Brief and no merge.
-  `PUSH_READY` means "a re-review could start here", not "this is done".
+* **The loop stops at one re-review.** A fresh Independent Re-Review of the
+  pushed fix now exists, and it reports whether each original finding was
+  resolved and what a fresh review of the current state found. What does not
+  exist is anything that *acts* on that: no second Coding Agent round, no
+  automatic routing of an unresolved or fresh finding, no multi-round loop,
+  no Merge Decision Brief and no merge. `RE_REVIEW_VALID` means "here is
+  evidence about this exact commit", not "this is done".
 * **A run can end with the repository changed and the answer unknown.**
   `PUSH_NOT_VERIFIED` is a real outcome, not a defensive one: a push that
   exits zero and does not read back as the created commit leaves state this
@@ -1719,10 +2245,31 @@ written out explicitly.
   unchanged, but one rewritten so the old divergence point is no longer an
   ancestor yields a different merge base, and therefore a different boundary.
   Nothing detects that; the run would simply be bounded differently.
-* **Only the initial review round.** `Round: 1` is the only accepted value;
-  re-review, finding-resolution tracking across rounds, and the multi-round
-  loop are not implemented. The record identity already includes the round and
-  head SHA so that they can be added without overwriting existing evidence.
+* **Two rounds, and only in one shape.** The review turn accepts `Round: 1`
+  and the re-review turn accepts `Round: 2`, and nothing accepts a third. A
+  second fix routed from a re-review's findings, and the loop that would
+  follow, are not implemented — the numbering and the record identity are
+  designed to extend that way, but no code does it yet.
+* **Whether a fix resolves a finding is a reviewer's judgement, not a
+  mechanised one.** The runner establishes which commit was read, that every
+  original finding was answered exactly once, and that each answer carries
+  evidence. It does not check the answer. A re-reviewer that says `RESOLVED`
+  without looking produces a well-formed record, exactly as a round-1
+  reviewer that invents findings does.
+* **The link between a fix and the findings it answers is structural, not
+  semantic.** The pairing establishes that the fix commit's parent is the
+  reviewed head, in this pull request, with CI verified. Nothing establishes
+  that the patch inside it addresses those findings — which is why the
+  re-review is a real review turn and not a checkbox.
+* **Provenance is carried, not proved.** The push document names the exact
+  validated review whose findings caused the fix — by a digest of the review
+  model, not by its finding ids — plus what git said the fix commit is, and
+  the re-review recomputes the digest and refuses a pair that disagrees. Both
+  documents are still operator-controlled text: an edited pair that agrees
+  with itself is accepted, and nothing distinguishes a commit this pipeline
+  pushed from a hand-written one in the same position. It is a checksum over
+  content, not a signature: it removes accidental mispairing, not a
+  determined one.
 * **A residual race on the write.** GitHub offers no compare-and-set on issue
   comments. The window between the final duplicate check and the `POST` is
   narrow but real; two runners racing on the same target could produce two
@@ -1757,11 +2304,13 @@ written out explicitly.
 ## Scope boundary
 
 This slice ends at "one validated review recorded against one verified pull
-request state, one bounded local fix routed from it, and that fix committed
-and pushed to the pull request's own branch with authoritative CI observed for
-the exact pushed commit". Out of scope here, and left for later slices:
-Independent Re-Review, finding-resolution evaluation, additional fix rounds,
-the multi-round loop, the Merge Decision Brief, automatic merge, force-push
+request state, one bounded local fix routed from it, that fix committed and
+pushed to the pull request's own branch with authoritative CI observed for
+the exact pushed commit, and one fresh Independent Re-Review of that exact
+commit reporting original finding resolution and fresh findings as two
+separate facts". Out of scope here, and left for later slices: a second
+Coding Agent round, automatic routing of an unresolved or fresh finding, the
+multi-round loop, the Merge Decision Brief, automatic merge, force-push
 recovery, general-purpose branch write support, any server or daemon, and any
 persistent state.
 
@@ -1772,24 +2321,33 @@ PR #34
 Validated Finding
 → Candidate Patch
 
-this slice
+PR #35
 Candidate Patch
 → Exact Fix Commit
 → Push
 → Authoritative CI
 
+this slice
+PUSH_READY
+→ Fresh Independent Re-Review
+→ Finding Resolution Evidence
++ Fresh Findings
+
 not implemented
-→ Independent Re-Review
-→ Finding resolution
+→ Automatic additional fix round
 → Multi-round loop
 → Merge Decision Brief
 → Merge
 ```
 
-**The full Finding → Fix → Re-Review loop is not automated.** What is
-automated is routing, bounded local fixing, and now getting a validated fix
-onto the branch with its CI observed — with a human still deciding whether the
-finding was right, whether the fix is right, and whether anything merges.
+**The full Finding → Fix → Re-Review loop is still not automated.** Every
+stage of it now exists, and nothing joins them: a re-review that reports an
+unresolved original finding, or a fresh Blocking one, produces a record and
+stops. What is automated is routing, bounded local fixing, getting a
+validated fix onto the branch with its CI observed, and producing fresh
+independent evidence about that fix — with a human still deciding whether the
+finding was right, whether the fix is right, whether anything gets another
+attempt, and whether anything merges.
 
 That live trial has now happened, on PR #30, and is recorded in
 [`docs/delegated-development/review-loop-live-experiment-1.md`](../../docs/delegated-development/review-loop-live-experiment-1.md).
@@ -1804,8 +2362,12 @@ Structured Findings → Coding Agent routing + Bounded Fix Response is what
 
 Bounded fix → exact fix commit identity → push → wait for authoritative CI is
 what `review-loop push` above now does, and it is the first stage that can
-change this repository. The next slices are fresh-context Independent
-Re-Review, finding resolution across rounds, the multi-round loop and the
-Merge Decision Brief. None of that is here, and the human gate is why: this
-pipeline automates *routing, bounded local fixing, and getting a validated fix
-onto the branch*. It does not automate acceptance.
+change this repository.
+
+`PUSH_READY` → fresh Independent Re-Review → finding resolution evidence is
+what `review-loop re-review` above now does. The next slices are an
+additional fix round routed from a re-review's findings, the multi-round
+loop, and the Merge Decision Brief. None of that is here, and the human gate
+is why: this pipeline automates *routing, bounded local fixing, getting a
+validated fix onto the branch, and producing independent evidence about it*.
+It does not automate acceptance.

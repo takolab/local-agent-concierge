@@ -199,6 +199,52 @@ class Timeline:
             step()
 
 
+def review_sha256_for(
+    *,
+    repo: str,
+    number: int,
+    head_sha: str,
+    base_ref: str,
+    ci_merge_base_sha: str,
+    finding_ids: tuple[str, ...],
+) -> str:
+    """The identity of the review a fix fixture claims to answer.
+
+    Built through the production canonicalisation rather than hard-coded, so
+    a change to the canonical form breaks the fixtures loudly instead of
+    leaving them asserting a digest nothing computes any more.
+    """
+    from review_loop.review_identity import review_sha256
+    from review_loop.review_target import ReviewTarget
+    from review_loop.verdict import Finding, Recommendation, ReviewVerdict, Severity
+
+    return review_sha256(
+        ReviewTarget(
+            repo=repo,
+            number=number,
+            head_sha=head_sha,
+            base_ref=base_ref,
+            ci_merge_base_sha=ci_merge_base_sha,
+        ),
+        ReviewVerdict(
+            round=1,
+            reviewed_head_sha=head_sha,
+            recommendation=Recommendation.CHANGES_REQUESTED,
+            open_findings=tuple(
+                Finding(
+                    finding_id=fid,
+                    severity=Severity.MAJOR,
+                    location="pkg/code.py",
+                    problem="something is wrong",
+                    evidence="the code says so",
+                    required_outcome="it stops being wrong",
+                )
+                for fid in finding_ids
+            ),
+        ),
+    )
+
+
 def fix_json(
     *,
     head_sha: str,
@@ -219,12 +265,27 @@ def fix_json(
     unexpected_ignored: tuple[str, ...] = (),
     patch_refused: str | None = None,
     workspace_head_sha: str | None = None,
+    source_review_sha256: str | None = None,
 ) -> str:
     """A ``review-loop fix --json`` document, in its real shape."""
+    if source_review_sha256 is None:
+        # Derived from this document's own review facts through the real
+        # canonicalisation, so a push fixture and the review it claims to
+        # answer cannot drift apart silently.
+        source_review_sha256 = review_sha256_for(
+            repo=repo,
+            number=number,
+            head_sha=head_sha,
+            base_ref=base_ref,
+            ci_merge_base_sha=ci_merge_base_sha,
+            finding_ids=finding_ids,
+        )
     if responses is None:
+        # One response per routed finding, as a real fix turn produces: the
+        # handoff's finding ids come from the responses, not from the request.
         responses = [
             {
-                "finding_id": finding_ids[0],
+                "finding_id": fid,
                 "target_head_sha": head_sha,
                 "outcome": "fixed",
                 "files_changed": list(changed_paths),
@@ -233,6 +294,7 @@ def fix_json(
                 "reason": None,
                 "scope_notes": None,
             }
+            for fid in finding_ids
         ]
     return json.dumps(
         {
@@ -246,6 +308,7 @@ def fix_json(
             "github_requests_performed": 0,
             "commit_or_push_performed": commit_or_push_performed,
             "patch_path": patch_path,
+            "source_review_sha256": source_review_sha256,
             "target": {
                 "repo": repo,
                 "number": number,

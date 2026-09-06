@@ -75,6 +75,18 @@ class FixHandoff:
     #: digest decides whether a file is the candidate patch, not its name.
     patch_path: str | None
     finding_ids: tuple[str, ...]
+    #: The review round these findings belong to. Pinned to
+    #: :data:`review_loop.verdict.SUPPORTED_ROUND` by the check below, and
+    #: carried explicitly rather than assumed so that the push turn can
+    #: report *which review* caused this fix as a read fact rather than as a
+    #: constant a later reader has to trust.
+    round: int = SUPPORTED_ROUND
+    #: The identity of the validated review whose findings produced this
+    #: patch -- see :mod:`review_loop.review_identity`. Required, because the
+    #: finding ids beside it are labels local to one review turn and do not
+    #: identify the artifact: two independent reviews of the same commit
+    #: routinely both raise ``F1`` and ``F2``.
+    source_review_sha256: str = ""
 
 
 def _require(payload: dict, key: str, *, where: str):
@@ -330,9 +342,10 @@ def load_handoff(document: str, *, expected_repo: str | None = None) -> FixHando
     request = payload.get("request")
     if not isinstance(request, dict):
         raise FixHandoffError("the push input's 'request' is not an object")
-    if request.get("round") != SUPPORTED_ROUND:
+    round_number = request.get("round")
+    if round_number != SUPPORTED_ROUND:
         raise FixHandoffError(
-            f"the push input reports round {request.get('round')!r}; this runner "
+            f"the push input reports round {round_number!r}; this runner "
             f"pushes only the initial round (round {SUPPORTED_ROUND})"
         )
 
@@ -350,6 +363,16 @@ def load_handoff(document: str, *, expected_repo: str | None = None) -> FixHando
     if patch_path is not None and not isinstance(patch_path, str):
         raise FixHandoffError("the push input's 'patch_path' is not a string")
 
+    source_review = _require(payload, "source_review_sha256", where="the push input")
+    if not isinstance(source_review, str) or not DIGEST_PATTERN.match(source_review):
+        raise FixHandoffError(
+            "the push input's 'source_review_sha256' must be a 64-character "
+            f"lowercase SHA-256 digest, got {source_review!r}. Without it nothing "
+            "downstream can tell which validated review this patch answers -- the "
+            "finding ids alone cannot, because they are labels local to one review "
+            "turn"
+        )
+
     return FixHandoff(
         target=target,
         changed_paths=changed,
@@ -357,4 +380,6 @@ def load_handoff(document: str, *, expected_repo: str | None = None) -> FixHando
         patch_bytes=size,
         patch_path=patch_path or None,
         finding_ids=finding_ids,
+        round=round_number,
+        source_review_sha256=source_review,
     )

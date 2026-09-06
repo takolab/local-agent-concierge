@@ -82,29 +82,13 @@ def _existing_record(
 ) -> int | None:
     """Return the id of a comment already recording this identity, if any.
 
-    A record is a matching marker **written by the account this runner would
-    post as**. Neither half is sufficient on its own.
-
-    The heading is not identity: ``## Independent AI Review`` is how every
-    review in this repository has been written by hand, so a human comment
-    must not suppress a real review.
-
-    The marker is not provenance either. Its format is public and
-    deterministic, so anyone who can comment on the pull request can reproduce
-    it -- and a marker copied into someone else's comment would otherwise make
-    this runner report a validated review that was never produced, without
-    even starting a reviewer. Checking the author is not a signature and does
-    not defend against the account itself; it distinguishes this automation's
-    own record from everyone else's text, which is the distinction the
-    duplicate check actually needs.
+    The rule itself lives in :func:`review_loop.comment_format.find_record`,
+    which the re-review turn shares. This wrapper is the review turn's own
+    name for it, and the place the GitHub read happens.
     """
-    for comment in reader.list_comments(number):
-        if not comment_format.body_records(comment.body, identity):
-            continue
-        if comment.author.casefold() != expected_author.casefold():
-            continue
-        return comment.comment_id
-    return None
+    return comment_format.find_record(
+        reader.list_comments(number), identity, expected_author=expected_author
+    )
 
 
 def run_review(

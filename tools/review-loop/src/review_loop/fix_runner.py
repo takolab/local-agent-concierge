@@ -58,7 +58,7 @@ what the agent may edit.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .agent_prompt import build_prompt
 from .agent_workspace import (
@@ -85,6 +85,7 @@ from .fix_response import (
 )
 from .fix_response_parser import parse
 from .fix_validation import ScopeViolation, ValidatedFix, validate
+from .review_identity import review_sha256
 from .review_target import ReviewTarget
 from .reviewer_workspace import DEFAULT_REMOTE, WorkspaceError
 from .verdict import ReviewVerdict
@@ -104,6 +105,10 @@ class FixResult:
     workspace_created: bool = False
     dry_run: bool = False
     patch_path: str | None = None
+    #: The identity of the validated review this turn was routed from. Set on
+    #: every outcome by :func:`run_fix`, so no path can produce a fix document
+    #: that cannot say which review caused it.
+    source_review_sha256: str | None = None
     agent_stdout: str = field(default="", repr=False)
     agent_stderr: str = field(default="", repr=False)
 
@@ -199,7 +204,41 @@ def run_fix(
     git_remote: str = DEFAULT_REMOTE,
     dry_run: bool = False,
 ) -> FixResult:
-    """Route one validated review's findings to one bounded Coding Agent turn."""
+    """Route one validated review's findings to one bounded Coding Agent turn.
+
+    The review's identity is computed here, once, and attached to whatever the
+    turn returns -- the same shape ``run_push`` uses for the resolved patch
+    path, and for the same reason: a fact every outcome must carry is set in
+    one place rather than at thirty construction sites, where one of them
+    would eventually forget.
+    """
+    return replace(
+        _run_fix(
+            agent=agent,
+            workspace=workspace,
+            target=target,
+            verdict=verdict,
+            allow_paths=allow_paths,
+            max_findings=max_findings,
+            git_remote=git_remote,
+            dry_run=dry_run,
+        ),
+        source_review_sha256=review_sha256(target, verdict),
+    )
+
+
+def _run_fix(
+    *,
+    agent,
+    workspace,
+    target: ReviewTarget,
+    verdict: ReviewVerdict,
+    allow_paths: tuple[str, ...],
+    max_findings: int,
+    git_remote: str,
+    dry_run: bool,
+) -> FixResult:
+    """The turn itself, with the review identity attached by the caller."""
 
     # 1. May anything be routed at all? Decided from the verdict alone, so a
     #    verdict nobody can act on costs no fetch, no worktree, no process.

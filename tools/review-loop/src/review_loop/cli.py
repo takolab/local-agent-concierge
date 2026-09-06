@@ -1,6 +1,6 @@
 """Command line front end.
 
-Four commands, one entry point:
+Five commands, one entry point:
 
 * ``review-loop --pr <number> --dry-run`` -- verification only, read-only,
   unchanged from the shape PR #28 shipped.
@@ -14,6 +14,12 @@ Four commands, one entry point:
   reviewed head, pushes it to the pull request's own branch, and waits for
   authoritative CI on the exact pushed commit. It reads GitHub read-only; its
   single write is a fast-forward ``git push`` to one derived ref.
+* ``review-loop re-review --review-json <file> --push-json <file>`` -- one
+  fresh Independent Re-Review turn against that exact pushed commit, run only
+  if it is still the pull request's head with authoritative CI green against
+  the current merge context. It reports which original findings are resolved
+  and what a fresh review of the current state found, as two separate facts,
+  and records them as one pull request comment.
 
 Subcommands are dispatched by name rather than by an argparse subparser so
 that the bare ``--pr`` form keeps working exactly as before, including its
@@ -48,7 +54,8 @@ GitHub: it issues read-only GET requests through the authenticated `gh` CLI.
 To run the review itself, see `review-loop review --help`. To route its
 findings to a bounded Coding Agent turn, see `review-loop fix --help`. To
 commit and push the patch that produces, see `review-loop push --help` -- the
-only command here that can change the repository.
+only command here that can change the repository. To re-review the pushed fix
+with a fresh independent reviewer, see `review-loop re-review --help`.
 """
 
 
@@ -203,6 +210,7 @@ def render_json(evaluation: CiEvaluation, stream: TextIO) -> None:
 REVIEW_COMMAND = "review"
 FIX_COMMAND = "fix"
 PUSH_COMMAND = "push"
+RE_REVIEW_COMMAND = "re-review"
 
 
 def main(
@@ -218,6 +226,18 @@ def main(
     expected_author: str | None = None,
 ) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == RE_REVIEW_COMMAND:
+        from .rereview_cli import rereview_main
+
+        return rereview_main(
+            arguments[1:],
+            client=client,
+            reader=reader,
+            writer=writer,
+            reviewer=reviewer,
+            expected_author=expected_author,
+            stream=stream,
+        )
     if arguments and arguments[0] == PUSH_COMMAND:
         from .push_cli import push_main
 

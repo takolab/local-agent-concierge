@@ -1044,7 +1044,10 @@ containerized runtime. The first entry is
 request's exact head SHA, verifies whether that commit's GitHub Actions CI
 allows a review to start, and — with `review-loop review` — runs one
 Independent AI Review turn against that exact state, recording the validated
-verdict as a single pull request comment. Its first live end-to-end run against a
+verdict as a single pull request comment. `review-loop fix`, `review-loop
+push` and `review-loop re-review` extend that into a bounded fix, a pushed
+fix commit with authoritative CI, and fresh independent evidence about
+whether the fix resolved anything. Its first live end-to-end run against a
 real pull request and a real AI reviewer is recorded in
 [`docs/delegated-development/review-loop-live-experiment-1.md`](delegated-development/review-loop-live-experiment-1.md).
 That run found that the runner bound the verdict to an exact SHA but not the
@@ -1059,19 +1062,24 @@ the reviewed commit, and the Structured Fix Response it returns is validated
 against the working tree the agent actually left. It makes no GitHub request at
 all and produces a patch, not a commit.
 
-The slice after it is now `review-loop push`, and it is **the first stage of
+The slice after it is `review-loop push`, and it is **the first stage of
 this pipeline with authoritative repository write capability**:
 
 ```text
 PR #34
-Validated Finding
-→ Candidate Patch
+Validated Findings
+→ bounded candidate patch
 
-this slice
+PR #35
 Candidate Patch
-→ Exact Fix Commit
-→ Push
-→ Authoritative CI
+→ exact commit
+→ exact PR push
+→ authoritative CI
+
+PR #36
+PUSH_READY
+→ Fresh Independent Re-Review
+→ Finding Resolution Evidence
 ```
 
 The candidate patch's bytes must hash to the digest the fix turn recorded; the
@@ -1085,11 +1093,33 @@ exact commit, against the current merge context. Fork heads, default branches,
 force pushes, tags and arbitrary refspecs are all structurally unreachable,
 and GitHub itself stays read-only — the single write is the `git push`.
 
-**The full Finding → Fix → Re-Review loop is still not automated.** Independent
-Re-Review, finding-resolution evaluation, the multi-round loop, the Merge
-Decision Brief and merge itself all remain out of scope, and the human keeps
-every decision about whether a finding is accepted, whether a fix is right,
-and whether anything merges.
+The slice after *that* is `review-loop re-review`, which turns `PUSH_READY`
+into fresh independent evidence about the fix. It revalidates that the pull
+request is still at the exact pushed fix commit with authoritative CI green
+against the current merge context, then runs a **fresh** reviewer process —
+with no access to the Coding Agent's context — against that exact commit. It
+answers two questions that are deliberately never collapsed into one status:
+whether each original finding was resolved, reported against those exact
+finding ids, and what an independent review of the pull request *as it now
+stands* finds. Both are recorded, separately, as one
+`## Independent AI Re-Review` comment bound to the exact pushed SHA and merge
+context. An unresolved original finding and a newly discovered one are both
+valid outcomes that record evidence and stop.
+
+**The full Finding → Fix → Re-Review loop is still not automated.** Every
+stage now exists and nothing joins them. Specifically unimplemented:
+
+```text
+automatic additional fix round
+multi-round loop
+Merge Decision Brief
+automatic merge
+```
+
+The human keeps every decision about whether a finding is accepted, whether a
+fix is right, whether an unresolved or newly found finding gets another
+attempt, and whether anything merges. `Blocking = 0` and every original
+finding resolved are evidence, not merge authority.
 
 ## Branch Naming
 

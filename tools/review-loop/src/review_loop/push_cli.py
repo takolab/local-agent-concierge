@@ -419,6 +419,7 @@ def render_json(result: PushResult, stream: TextIO) -> None:
     commit = result.commit
     evaluation = result.ci_evaluation
     verified = result.verified_target
+    provenance = result.fix_provenance
     payload = {
         "outcome": result.outcome.value,
         "exit_code": result.exit_code,
@@ -475,6 +476,24 @@ def render_json(result: PushResult, stream: TextIO) -> None:
             "ci_merge_base_sha": evaluation.ci_merge_base_sha,
             "base_tip_at_verification": evaluation.base_tip_at_verification,
             "reasons": list(evaluation.reasons),
+        },
+        # Which validated review caused this fix, and what git said the fix
+        # is. Present whenever the branch is known to hold the fix, on the
+        # created-commit path and the already-pushed path alike -- the next
+        # stage needs the link between a review and a fix, and it is the only
+        # stage that can no longer derive it from git itself.
+        "fix_provenance": None
+        if provenance is None
+        else {
+            "source_review_sha256": provenance.source_review_sha256,
+            "source_round": provenance.source_round,
+            "source_reviewed_head_sha": provenance.source_reviewed_head_sha,
+            "source_ci_merge_base_sha": provenance.source_ci_merge_base_sha,
+            "source_finding_ids": list(provenance.source_finding_ids),
+            "source_patch_sha256": provenance.source_patch_sha256,
+            "fix_sha": provenance.fix_sha,
+            "fix_parent_sha": provenance.fix_parent_sha,
+            "fix_patch_sha256": provenance.fix_patch_sha256,
         },
         # The verified merge context the next stage would re-review, present
         # only when this run established one.
