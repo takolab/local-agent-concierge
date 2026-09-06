@@ -370,3 +370,210 @@ def render_rereview(target: ReviewTarget, request, rereview) -> str:
         marker(rereview_identity_for(target, rereview)),
     ]
     return "\n".join(lines) + "\n"
+
+
+MERGE_BRIEF_HEADING = "## Merge Decision Brief"
+
+#: The role a Merge Decision Brief is recorded in. A third role rather than a
+#: second round: the brief describes the same commit and the same round as the
+#: re-review it is derived from, and is a different artifact about it.
+DECISION_ROLE = "merge-decision-brief"
+
+#: How much of a validated finding's prose the brief reproduces. The brief is
+#: a decision surface, not a second copy of the evidence: the full text is in
+#: the review and re-review comments this one names, and a human who needs it
+#: goes there. Every string truncated here has already been through
+#: :func:`review_loop.verdict_validation.check_text`, so it cannot contain the
+#: marker substrings whatever the reviewer wrote.
+MAX_BRIEF_EXCERPT_CHARS = 200
+
+
+def merge_brief_identity_for(target: ReviewTarget, round_number: int) -> RecordIdentity:
+    """The identity of one recorded Merge Decision Brief.
+
+    Head and base are the pull request's **current** verified state rather
+    than anything a document claimed, because that is what the brief asserts
+    about. Keeping ``base_sha`` in the identity is what makes the regression
+    this stage most needs to avoid impossible: the same head against an
+    advanced base is a different merge context, verified by different CI, and
+    a brief about the old one must not suppress a brief about the new one.
+    """
+    return RecordIdentity(
+        repo=target.repo,
+        number=target.number,
+        head_sha=target.head_sha,
+        base_sha=target.ci_merge_base_sha,
+        round=round_number,
+        role=DECISION_ROLE,
+    )
+
+
+def _excerpt(text: str | None) -> str:
+    if not text:
+        return ""
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= MAX_BRIEF_EXCERPT_CHARS:
+        return collapsed
+    return collapsed[: MAX_BRIEF_EXCERPT_CHARS - 1].rstrip() + "…"
+
+
+def _brief_identity_lines(target: ReviewTarget, request) -> list[str]:
+    """The pull request state and the evidence chain, as the brief states them."""
+    evidence = (
+        ", ".join(
+            f"{path} (run {run_id}: {conclusion})"
+            for path, run_id, conclusion in target.ci_evidence
+        )
+        or "(none recorded)"
+    )
+    return [
+        f"Repository: {target.repo}",
+        f"Pull request: #{target.number}",
+        f"Head SHA: {target.head_sha}",
+        f"Base: {target.base_ref} at {target.ci_merge_base_sha}",
+        f"Authoritative CI: READY — {evidence}",
+        "",
+        "Evidence chain:",
+        "",
+        f"Original review: round {request.original_round} of "
+        f"{request.original_head_sha}",
+        f"Review identity: {request.source_review_sha256}",
+        f"Original recommendation: {request.original_recommendation.value}",
+        f"Fix commit: {request.pushed_fix_sha} (parent {request.original_head_sha})",
+        f"Re-review: round {request.rereview.round} of "
+        f"{request.rereview.reviewed_head_sha}",
+        f"Re-review recommendation: {request.rereview.recommendation.value}",
+    ]
+
+
+def _resolution_summary_lines(request) -> list[str]:
+    """One line per original finding: which, how severe, and what became of it.
+
+    Severity comes from the round-1 record and the resolution from round 2,
+    joined only for display. The line never states a severity for a finding
+    the re-review resolved, because "RESOLVED" is not a severity and a reader
+    scanning a column of them must not be able to read one as the other.
+    """
+    from .rereview import Resolution
+
+    severities = {f.finding_id: f.severity.value for f in request.original_findings}
+    lines: list[str] = []
+    for resolution in request.rereview.resolutions:
+        severity = severities.get(resolution.finding_id, "(unknown severity)")
+        line = f"{resolution.finding_id} — {severity} — {resolution.resolution.value}"
+        if resolution.resolution is not Resolution.RESOLVED:
+            excerpt = _excerpt(resolution.reason)
+            if excerpt:
+                line += f" — {excerpt}"
+        lines.append(line)
+    return lines or ["(none)"]
+
+
+def _fresh_summary_lines(request) -> list[str]:
+    return [
+        f"{finding.finding_id} — {finding.severity.value} — {_excerpt(finding.problem)}"
+        for finding in request.rereview.fresh_findings
+    ] or ["(none)"]
+
+
+def render_merge_brief(target: ReviewTarget, request, facts, classification) -> str:
+    """Render one Merge Decision Brief for a verified, current pull request state.
+
+    Only ever called with evidence the runner has just re-established against
+    GitHub. The stale case has a rendering of its own,
+    :func:`render_stale_brief`, and it carries no marker -- so there is no code
+    path on which a brief that is not current can be recorded as one that is.
+
+    Original and fresh findings are two sections that never share a count.
+    ``F1 — Major — RESOLVED`` above ``R2.F1 — Major — …`` says two true things
+    at once: the fix worked, and the pull request still needs one. A single
+    "Major findings: 1" would say neither.
+    """
+    lines = [
+        MERGE_BRIEF_HEADING,
+        "",
+        f"Round: {request.rereview.round}",
+        *_brief_identity_lines(target, request),
+        "",
+        f"Merge context: current — authoritative CI tested this head merged onto "
+        f"{target.ci_merge_base_sha}, which is still the {target.base_ref} tip",
+        "",
+        f"Original finding resolutions (round {request.original_round}):",
+        "",
+        *_resolution_summary_lines(request),
+        "",
+        f"Fresh findings (round {request.rereview.round}):",
+        "",
+        *_fresh_summary_lines(request),
+        "",
+        f"Unresolved original findings: {_id_list(facts.unresolved_original_finding_ids)}",
+        f"Escalated original findings: {_id_list(facts.escalated_original_finding_ids)}",
+        f"Fresh Blocking: {_id_list(facts.fresh_blocking_finding_ids)}",
+        f"Fresh Major: {_id_list(facts.fresh_major_finding_ids)}",
+        f"Fresh Minor: {_id_list(facts.fresh_minor_finding_ids)}",
+        "Escalation: "
+        + (
+            facts.escalation_reason
+            if facts.escalation_reason
+            else ("requested" if facts.escalated_original_finding_ids
+                  or facts.fresh_blocking_finding_ids else "none")
+        ),
+        "",
+        f"Next action: {classification.next_action.value}",
+        "",
+    ]
+    lines += [f"- {reason}" for reason in classification.reasons]
+    lines += [
+        "",
+        "Human decision required: merge / do not merge / request another fix / "
+        "escalate",
+        "",
+        "---",
+        "",
+        "Recorded automatically by `review-loop merge-brief`. Every fact above was "
+        "re-derived from the review, fix, push and re-review artifacts and "
+        "re-verified against this pull request's current head, base, merge context "
+        "and authoritative CI immediately before this comment was written. The "
+        "next action is a mechanical classification of that evidence, **not an "
+        "approval and not a merge**: nothing here merges anything, starts another "
+        "fix, or invokes a Coding Agent. Merging, declining, requesting another "
+        "fix, accepting or deferring a Minor finding, and escalating all remain a "
+        "human's decision.",
+        "",
+        marker(merge_brief_identity_for(target, request.rereview.round)),
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def render_stale_brief(request, facts) -> str:
+    """Render the diagnostic a stale chain gets instead of a decision brief.
+
+    Deliberately not a Merge Decision Brief with a bad classification inside
+    it. It states what the evidence *was* about and why that is no longer the
+    pull request, and it carries no marker, so it can be printed for an
+    operator without ever becoming a record that a later run would find and
+    treat as this state's decision.
+    """
+    target = request.recorded_target
+    lines = [
+        f"{MERGE_BRIEF_HEADING} — not produced: evidence is not current",
+        "",
+        f"Repository: {target.repo}",
+        f"Pull request: #{target.number}",
+        f"Re-reviewed head SHA: {target.head_sha}",
+        f"Re-reviewed base: {target.base_ref} at {target.ci_merge_base_sha}",
+        f"Review identity: {request.source_review_sha256}",
+        "",
+        "Why this is not decision-ready:",
+        "",
+    ]
+    lines += [f"- {reason}" for reason in facts.evidence_not_current_reasons]
+    lines += [
+        "",
+        "No brief was recorded. The re-review above is still true about the commit "
+        "and merge context it read; it is no longer evidence about the pull "
+        "request's present state, and a decision made from it would be a decision "
+        "about something nobody is looking at. Re-run the loop from the stage the "
+        "change invalidated.",
+    ]
+    return "\n".join(lines) + "\n"

@@ -1,6 +1,6 @@
 """Command line front end.
 
-Five commands, one entry point:
+Six commands, one entry point:
 
 * ``review-loop --pr <number> --dry-run`` -- verification only, read-only,
   unchanged from the shape PR #28 shipped.
@@ -20,6 +20,12 @@ Five commands, one entry point:
   the current merge context. It reports which original findings are resolved
   and what a fresh review of the current state found, as two separate facts,
   and records them as one pull request comment.
+* ``review-loop merge-brief --review-json <file> --push-json <file>
+  --rereview-json <file>`` -- rebuild that whole evidence chain, re-verify it
+  against the pull request's current state, derive the next workflow action
+  from it mechanically, and record the result as one Merge Decision Brief for
+  a human to decide on. It classifies and presents; it does not merge, fix or
+  review.
 
 Subcommands are dispatched by name rather than by an argparse subparser so
 that the bare ``--pr`` form keeps working exactly as before, including its
@@ -55,7 +61,9 @@ To run the review itself, see `review-loop review --help`. To route its
 findings to a bounded Coding Agent turn, see `review-loop fix --help`. To
 commit and push the patch that produces, see `review-loop push --help` -- the
 only command here that can change the repository. To re-review the pushed fix
-with a fresh independent reviewer, see `review-loop re-review --help`.
+with a fresh independent reviewer, see `review-loop re-review --help`. To turn
+that re-review into one compact artifact a human can decide on, see
+`review-loop merge-brief --help`.
 """
 
 
@@ -211,6 +219,7 @@ REVIEW_COMMAND = "review"
 FIX_COMMAND = "fix"
 PUSH_COMMAND = "push"
 RE_REVIEW_COMMAND = "re-review"
+DECISION_COMMAND = "merge-brief"
 
 
 def main(
@@ -226,6 +235,19 @@ def main(
     expected_author: str | None = None,
 ) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == DECISION_COMMAND:
+        from .decision_cli import decision_main
+
+        # No reviewer and no agent are threaded through: this turn starts no
+        # subprocess of any kind. Its only write is one comment.
+        return decision_main(
+            arguments[1:],
+            client=client,
+            reader=reader,
+            writer=writer,
+            expected_author=expected_author,
+            stream=stream,
+        )
     if arguments and arguments[0] == RE_REVIEW_COMMAND:
         from .rereview_cli import rereview_main
 
