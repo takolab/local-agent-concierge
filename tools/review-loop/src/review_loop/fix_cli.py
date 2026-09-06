@@ -341,6 +341,11 @@ def render_text(result: FixResult, stream: TextIO, *, agent_label: str,
             file=stream,
         )
         print(f"HEAD after the run:   {inspection.head_sha}", file=stream)
+        print(
+            "Candidate patch id:   "
+            + (inspection.patch_sha256 or "(no patch captured)"),
+            file=stream,
+        )
         if inspection.residue_paths:
             print(
                 f"Build/test residue:   {len(inspection.residue_paths)} ignored "
@@ -443,6 +448,12 @@ def render_json(result: FixResult, stream: TextIO) -> None:
             "changed_paths": list(inspection.changed_paths),
             "residue_paths": list(inspection.residue_paths),
             "unexpected_ignored": list(inspection.unexpected_ignored),
+            # The candidate patch's identity, carried forward so that the push
+            # stage can prove the patch file it is handed is this one. Without
+            # it the next stage would be committing a file it can only assume
+            # came from here.
+            "patch_sha256": inspection.patch_sha256,
+            "patch_bytes": inspection.patch_bytes,
             "patch_refused": inspection.patch_refused,
         },
         "responses": None

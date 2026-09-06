@@ -79,18 +79,44 @@ ADVANCED_BASE_TIP = "7dc3c2e1ca1977eed14e143457e6b037824af95b"
 DEFAULT_CHANGED_FILES = ("services/orchestrator/src/orchestrator/http_server.py",)
 
 
+#: The repository the fake pull requests belong to, and its default branch.
+#: Both are read from the pull request object rather than configured
+#: separately, exactly as the live API presents them.
+REPO = "takolab/local-agent-concierge"
+DEFAULT_BRANCH = "master"
+
+
 def pull_request_payload(
     number: int = 27,
     head_sha: str = FULL_SHA,
     base_ref: str = "master",
     head_ref: str = "feat/example",
     state: str = "open",
+    head_repo: str | None = REPO,
+    default_branch: str = DEFAULT_BRANCH,
 ) -> dict:
+    """Build a pull request payload in the live API's shape.
+
+    ``head.repo`` and ``base.repo.default_branch`` are present because the
+    push turn derives its one writable ref from them: a fork head and a
+    default-branch head are both refused, and neither refusal is testable
+    against a payload that omits the fields the live API always sends.
+    ``head_repo=None`` reproduces a deleted head repository, which GitHub
+    does report as a null ``repo``.
+    """
     return {
         "number": number,
         "state": state,
-        "head": {"sha": head_sha, "ref": head_ref},
-        "base": {"sha": OTHER_SHA, "ref": base_ref},
+        "head": {
+            "sha": head_sha,
+            "ref": head_ref,
+            "repo": None if head_repo is None else {"full_name": head_repo},
+        },
+        "base": {
+            "sha": OTHER_SHA,
+            "ref": base_ref,
+            "repo": {"full_name": REPO, "default_branch": default_branch},
+        },
         "merge_commit_sha": "6a2f7cfe8cc8cb4af22b7824d1c70e6fce389bb8",
     }
 

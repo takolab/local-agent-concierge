@@ -1,6 +1,6 @@
 """Command line front end.
 
-Three commands, one entry point:
+Four commands, one entry point:
 
 * ``review-loop --pr <number> --dry-run`` -- verification only, read-only,
   unchanged from the shape PR #28 shipped.
@@ -9,6 +9,11 @@ Three commands, one entry point:
 * ``review-loop fix --review-json <file> --agent-command ...`` -- one bounded
   Coding Agent turn routed from that review's validated findings. It makes no
   GitHub request at all, and writes only inside a worktree it prepares.
+* ``review-loop push --fix-json <file> --patch <file>`` -- the one command
+  that can change this repository: it commits that candidate patch on the
+  reviewed head, pushes it to the pull request's own branch, and waits for
+  authoritative CI on the exact pushed commit. It reads GitHub read-only; its
+  single write is a fast-forward ``git push`` to one derived ref.
 
 Subcommands are dispatched by name rather than by an argparse subparser so
 that the bare ``--pr`` form keeps working exactly as before, including its
@@ -41,7 +46,9 @@ Only exit code 0 means a review may be started. This command never writes to
 GitHub: it issues read-only GET requests through the authenticated `gh` CLI.
 
 To run the review itself, see `review-loop review --help`. To route its
-findings to a bounded Coding Agent turn, see `review-loop fix --help`.
+findings to a bounded Coding Agent turn, see `review-loop fix --help`. To
+commit and push the patch that produces, see `review-loop push --help` -- the
+only command here that can change the repository.
 """
 
 
@@ -195,6 +202,7 @@ def render_json(evaluation: CiEvaluation, stream: TextIO) -> None:
 #: Subcommand names, dispatched before argparse sees the arguments.
 REVIEW_COMMAND = "review"
 FIX_COMMAND = "fix"
+PUSH_COMMAND = "push"
 
 
 def main(
@@ -210,6 +218,15 @@ def main(
     expected_author: str | None = None,
 ) -> int:
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == PUSH_COMMAND:
+        from .push_cli import push_main
+
+        # The read-only client is threaded through, and nothing else: the push
+        # turn has no comment reader and no comment writer, so it cannot write
+        # to GitHub even by accident. Its one write is a git push.
+        return push_main(
+            arguments[1:], client=client, workspace=workspace, stream=stream
+        )
     if arguments and arguments[0] == FIX_COMMAND:
         from .fix_cli import fix_main
 

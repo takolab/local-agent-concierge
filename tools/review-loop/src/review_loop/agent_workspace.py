@@ -34,8 +34,10 @@ they are three different facts:
 One more asymmetry is worth naming. **The agent must not commit.** The head
 is re-read afterwards, and a moved ``HEAD`` fails the run: a commit would put
 the fix somewhere ``git status`` no longer reports, which is exactly the
-place a hidden change would hide. Committing, and everything after it, is the
-next slice's decision to make -- with a human in it.
+place a hidden change would hide. Committing is
+:mod:`review_loop.fix_commit`'s job, from the captured patch, with the
+identity checks that belong to a stage that writes -- and with a human
+deciding to run it.
 
 Nothing here is a sandbox, and the inspection does not pretend to be one. It
 establishes what changed *inside the worktree*. An agent that wrote somewhere
@@ -50,6 +52,7 @@ import os
 from dataclasses import dataclass
 
 from .fix_response import MAX_PATCH_BYTES
+from .patch_identity import capture_patch, digest_bytes
 from .reviewer_workspace import (
     DEFAULT_GIT_TIMEOUT_SECONDS,
     DEFAULT_REMOTE,
@@ -110,6 +113,14 @@ class WorkspaceInspection:
     unexpected_ignored: tuple[str, ...]
     #: A unified diff of ``changed_paths``, capturing new files too.
     patch: str = ""
+    #: SHA-256 of that diff, and the identity a later stage commits against.
+    #: Empty when there is no patch, or when one was refused for its size:
+    #: an identity for a patch nobody holds would be a claim about nothing.
+    patch_sha256: str = ""
+    #: Length of the same bytes the digest is over. Recorded here rather than
+    #: recomputed by each caller so that the digest and the size can never
+    #: describe two different encodings of one patch.
+    patch_bytes: int = 0
     #: Set when the diff was larger than a bounded fix should produce.
     patch_refused: str | None = None
 
@@ -196,7 +207,18 @@ def _capture_patch(
             timeout=timeout,
         )
 
-    patch = run_git(["diff", "--binary", "--no-color", "HEAD"], cwd=worktree, timeout=timeout)
+    # The diff is rendered through the canonical argument vector rather than
+    # with plain flags, because these exact bytes become the patch's identity:
+    # the push stage re-derives the same digest from the commit it creates,
+    # and that comparison is only meaningful if neither side inherited a
+    # `diff.*` setting or an abbreviation length from its own repository.
+    #
+    # `capture_patch` rather than a bare `run_git` because it keeps every byte
+    # git produced, including the newline after the final hunk line. Stripping
+    # that -- which `run_git` does by default -- makes `git apply` reject the
+    # result as a corrupt patch, and the captured patch is now what a later
+    # stage applies.
+    patch = capture_patch(worktree, "HEAD", timeout=timeout)
     if len(patch.encode("utf-8", "replace")) > MAX_PATCH_BYTES:
         return "", (
             f"the working tree holds a diff larger than {MAX_PATCH_BYTES} bytes, "
@@ -225,6 +247,7 @@ def inspect_workspace(
     residue = tuple(path for path in ignored if is_residue(path))
     unexpected = tuple(path for path in ignored if not is_residue(path))
     patch, refused = _capture_patch(worktree, changed, timeout)
+    patch_bytes = patch.encode("utf-8") if patch else b""
 
     return WorkspaceInspection(
         head_sha=head,
@@ -233,6 +256,8 @@ def inspect_workspace(
         residue_paths=residue,
         unexpected_ignored=unexpected,
         patch=patch,
+        patch_sha256=digest_bytes(patch_bytes) if patch else "",
+        patch_bytes=len(patch_bytes),
         patch_refused=refused,
     )
 

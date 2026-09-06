@@ -1057,11 +1057,39 @@ That slice is now `review-loop fix`: the validated findings of one review turn
 are routed to one bounded Coding Agent turn in a dedicated writable worktree at
 the reviewed commit, and the Structured Fix Response it returns is validated
 against the working tree the agent actually left. It makes no GitHub request at
-all and produces a patch, not a commit — the human keeps every decision about
-whether the finding is accepted, whether the fix is used, and whether anything
-is pushed. Committing that fix, pushing it and waiting for authoritative CI is
-the next bounded slice; Independent Re-Review, the multi-round loop and the
-Merge Decision Brief come after it.
+all and produces a patch, not a commit.
+
+The slice after it is now `review-loop push`, and it is **the first stage of
+this pipeline with authoritative repository write capability**:
+
+```text
+PR #34
+Validated Finding
+→ Candidate Patch
+
+this slice
+Candidate Patch
+→ Exact Fix Commit
+→ Push
+→ Authoritative CI
+```
+
+The candidate patch's bytes must hash to the digest the fix turn recorded; the
+commit built from it must have the reviewed head as its parent and must
+re-hash to the same digest; the push is a fast-forward of that one commit to
+`refs/heads/<the pull request's own head branch>`, derived from GitHub's pull
+request object rather than from any text an agent or a reviewer produced; and
+the pushed SHA is confirmed by reading the remote ref back rather than by
+trusting `git push`'s exit status. Authoritative CI is then required for that
+exact commit, against the current merge context. Fork heads, default branches,
+force pushes, tags and arbitrary refspecs are all structurally unreachable,
+and GitHub itself stays read-only — the single write is the `git push`.
+
+**The full Finding → Fix → Re-Review loop is still not automated.** Independent
+Re-Review, finding-resolution evaluation, the multi-round loop, the Merge
+Decision Brief and merge itself all remain out of scope, and the human keeps
+every decision about whether a finding is accepted, whether a fix is right,
+and whether anything merges.
 
 ## Branch Naming
 
