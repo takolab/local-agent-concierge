@@ -53,6 +53,7 @@ import shutil
 import subprocess
 import tempfile
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Iterator
 
 #: Git operations here are local except the fetch, which is one small ref.
@@ -79,17 +80,34 @@ def _label(argv: list[str]) -> str:
     return "git " + " ".join(words or argv[:1])
 
 
-def run_git(
-    argv: list[str], *, cwd: str | None, timeout: float, strip: bool = True
-) -> str:
-    """Run one git command with no shell and return its stdout.
+@dataclass(frozen=True)
+class GitResult:
+    """One git invocation's complete result, failure included.
 
-    ``strip`` is on by default because almost every caller wants one line
-    without its newline. It must be turned **off** for ``-z`` output: a
-    ``git status --porcelain`` record begins with a two-character status
-    field whose first character is a space for an unstaged change, and
-    stripping it shifts every path by one character.
+    :func:`run_git` discards stdout when git exits non-zero, which is right
+    for a command whose answer *is* its exit status. It is wrong for a command
+    whose failure output carries the evidence -- ``git push --porcelain``
+    reports per-ref rejection lines on stdout while exiting non-zero, and that
+    report is the only independent evidence of what the remote decided.
     """
+
+    returncode: int
+    stdout: str
+    stderr: str
+
+    @property
+    def ok(self) -> bool:
+        return self.returncode == 0
+
+    @property
+    def failure(self) -> str:
+        return (self.stderr or "").strip() or "(no stderr)"
+
+
+def run_git_capture(
+    argv: list[str], *, cwd: str | None, timeout: float
+) -> GitResult:
+    """Run one git command with no shell and return everything it produced."""
     if shutil.which("git") is None:
         raise WorkspaceError(
             "the 'git' CLI is required to bind the reviewer to the review target "
@@ -110,11 +128,28 @@ def run_git(
     except OSError as exc:
         raise WorkspaceError(f"{_label(argv)} could not be run: {exc}") from exc
 
-    if completed.returncode != 0:
-        stderr = (completed.stderr or "").strip() or "(no stderr)"
-        raise WorkspaceError(f"{_label(argv)} failed: {stderr}")
-    stdout = completed.stdout or ""
-    return stdout.strip() if strip else stdout
+    return GitResult(
+        returncode=completed.returncode,
+        stdout=completed.stdout or "",
+        stderr=completed.stderr or "",
+    )
+
+
+def run_git(
+    argv: list[str], *, cwd: str | None, timeout: float, strip: bool = True
+) -> str:
+    """Run one git command with no shell and return its stdout.
+
+    ``strip`` is on by default because almost every caller wants one line
+    without its newline. It must be turned **off** for ``-z`` output: a
+    ``git status --porcelain`` record begins with a two-character status
+    field whose first character is a space for an unstaged change, and
+    stripping it shifts every path by one character.
+    """
+    result = run_git_capture(argv, cwd=cwd, timeout=timeout)
+    if not result.ok:
+        raise WorkspaceError(f"{_label(argv)} failed: {result.failure}")
+    return result.stdout.strip() if strip else result.stdout
 
 
 def verify_checkout(

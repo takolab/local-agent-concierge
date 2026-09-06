@@ -56,6 +56,8 @@ from dataclasses import dataclass, field, replace
 from typing import Callable
 
 from .fix_commit import (
+    REMOTE_ACCEPTED,
+    REMOTE_REJECTED,
     CandidatePatchError,
     CommitRefused,
     FixCommit,
@@ -143,6 +145,10 @@ class PushResult:
 
 def _result(outcome: PushOutcome, reasons, **kwargs) -> PushResult:
     return PushResult(outcome=outcome, reasons=tuple(reasons), **kwargs)
+
+
+def remote_said_label(remote: str) -> str:
+    return f"the remote {remote!r}"
 
 
 def _commit_message(handoff: FixHandoff) -> str:
@@ -584,15 +590,20 @@ def _commit_and_push(
     # The write. Everything above this line left the pull request branch
     # untouched; everything below it may not have.
     push_failure: str | None = None
+    refspec = push_target.refspec(commit.sha)
     try:
-        push_fix_commit(
+        remote_said = push_fix_commit(
             worktree,
             remote=git_remote,
-            refspec=push_target.refspec(commit.sha),
+            refspec=refspec,
             timeout=git_timeout,
         )
     except PushRefused as exc:
         push_failure = str(exc)
+        # The remote's own per-ref answer, not git's exit status. Only the
+        # first of those can distinguish a rejection the remote sent from an
+        # answer that never arrived.
+        remote_said = exc.report
 
     # Read the ref back from the remote either way. On the failure path this
     # is what distinguishes a rejected push from a lost response: a push whose
@@ -677,25 +688,31 @@ def _commit_and_push(
             commit_created=True,
         )
 
-    if landed is False and push_failure is not None:
-        # The push was refused *and* git proves this run's commit is not in
-        # the branch's history. Where the tip happens to sit is then beside
-        # the point -- it may be the reviewed head, or someone else's later
-        # commit -- because either way nothing of ours is there.
+    if remote_said == REMOTE_REJECTED and landed is not True:
+        # The remote *answered*, and its answer was "no". That is the only
+        # evidence that establishes a no-write after the fact, and it is why
+        # this branch requires it.
+        #
+        # An absent commit does not establish it on its own: a commit can land
+        # and then be erased from the branch's history, and nothing observable
+        # afterwards separates that from a push that never happened. An earlier
+        # version reported `repository_mutated: false` on absence alone, which
+        # was a machine-readable claim of proof that the evidence did not
+        # support.
         return _result(
             PushOutcome.PUSH_FAILED,
             created
             + (
                 f"the push was refused: {push_failure}",
+                f"{remote_said_label(git_remote)} rejected {refspec}, so nothing "
+                "this run created was written. The fix commit existed only in a "
+                "workspace this run removed",
                 f"{push_target.ref} reads back as {observed}"
                 + (
                     " (still the reviewed head)"
                     if observed == target.head_sha
                     else f", which is not the reviewed head {target.head_sha} either"
-                )
-                + f", and {commit.sha} is not in its history, so nothing this run "
-                "created was written. The fix commit existed only in a workspace "
-                "this run removed",
+                ),
             ),
             target=target,
             push_target=push_target,
@@ -703,10 +720,34 @@ def _commit_and_push(
             commit_created=True,
         )
 
-    # Everything else is genuinely unknown, and is reported as unknown: a
-    # push that exited zero without moving the ref, a refused push onto a
-    # branch that has since moved for reasons we cannot attribute, or an
-    # ancestry question git could not answer at all.
+    if remote_said == REMOTE_ACCEPTED:
+        # The remote accepted the ref update and the branch no longer shows
+        # it, and git cannot find it in the history either: it landed and the
+        # branch was rewritten. Mutated, and not present -- both true, and the
+        # report says both.
+        return _result(
+            PushOutcome.CI_STALE_TARGET,
+            created
+            + ((f"the push reported: {push_failure}",) if push_failure else ())
+            + (
+                f"{git_remote} accepted {refspec}, but {push_target.ref} now reads "
+                f"back as {observed} and {commit.sha} is not in its history: the "
+                "push landed and the branch has since been rewritten",
+            ),
+            target=target,
+            push_target=push_target,
+            commit=commit,
+            pushed_sha=commit.sha,
+            push_performed=True,
+            commit_created=True,
+        )
+
+    # Everything else is genuinely unknown, and is reported as unknown: a push
+    # that exited zero without moving the ref, a local hook or a dropped
+    # connection that left the remote with no per-ref answer to give, or an
+    # ancestry question git could not answer at all. In every one of these the
+    # commit may or may not have reached the remote, and saying either would
+    # be a guess wearing a machine-readable field.
     return _result(
         PushOutcome.PUSH_NOT_VERIFIED,
         created
@@ -716,13 +757,19 @@ def _commit_and_push(
             else ("git push reported success",)
         )
         + (
+            f"{git_remote} gave no per-ref answer for {refspec}, so whether it "
+            "reached the remote at all is not established",
+        )
+        + (
             f"{push_target.ref} reads back as {observed}, not the {commit.sha} this "
             "run created"
             + (
-                ", and whether this run's commit reached the remote could not be "
+                ", and whether this run's commit is in its history could not be "
                 "determined"
                 if landed is None
-                else ", and this run's commit is not in its history"
+                else ", and this run's commit is not in its history -- which is "
+                "compatible both with a push that never landed and with one that "
+                "landed and was then erased"
             )
             + ". Remote state is not known: do not re-run blind, read the branch "
             "first",

@@ -34,7 +34,7 @@ import sys
 from typing import Sequence, TextIO
 
 from .fix_handoff import FixHandoff, FixHandoffError, load_handoff
-from .github_client import GitHubApiError, GitHubClient, detect_repository
+from .github_client import GitHubApiError, GitHubClient
 from .model import EXIT_USAGE, short_sha
 from .push_response import (
     DEFAULT_CI_POLL_SECONDS,
@@ -65,10 +65,13 @@ exit codes:
                               does not apply, or produced something else
   64  COMMIT_REFUSED          the workspace was not a clean reviewed head, or
                               the commit is not exactly the candidate patch
-  65  PUSH_FAILED             the push was refused and git confirms the
-                              created commit is not in the branch's history
-  66  PUSH_NOT_VERIFIED       the push ran and the branch does not read back as
-                              the created commit; REMOTE STATE IS NOT KNOWN
+  65  PUSH_FAILED             the remote's own --porcelain report rejected the
+                              ref, so nothing was written
+  66  PUSH_NOT_VERIFIED       the remote gave no per-ref answer and the branch
+                              does not read back as the created commit; an
+                              absent commit proves nothing, because a commit
+                              can land and then be erased. REMOTE STATE IS NOT
+                              KNOWN
   67  CI_FAILED               authoritative CI for the pushed commit failed
   68  CI_PENDING              CI had not finished within --ci-timeout
   69  CI_STALE_TARGET         the pull request moved off the pushed commit, its
@@ -91,9 +94,15 @@ branch>, over your existing git credential for the remote. It never forces,
 never writes a tag, never creates a branch that does not exist, never pushes
 to a default branch or a fork, and never merges. The branch name comes from
 GitHub's pull request object alone; there is no flag that can change it. The
-destination repository is checked too: every URL git reports for --git-remote
-must name the repository the fix handoff describes, so a mirror holding the
-same branch at the same commit is refused rather than pushed to.
+destination repository is checked too: EVERY URL git reports for --git-remote
+-- fetch and push, read with --all, because a push writes to every configured
+push URL -- must name the repository the fix handoff describes, so a mirror
+holding the same branch at the same commit is refused rather than pushed to.
+
+The GitHub side has the same single authority: the client is scoped from the
+validated handoff, never from the current directory, and the pull request must
+be a pull request in that repository at both its head and its base. --repo is
+an assertion about the handoff, not a selector.
 
 That guarantee is about the git argument vectors this command constructs. Your
 `pre-commit`, `prepare-commit-msg` and `pre-push` hooks still run -- they are
@@ -144,7 +153,12 @@ def build_push_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--repo",
         default=None,
-        help="expected repository as owner/name; the push input must describe it",
+        help=(
+            "assert that the push input describes this repository, as "
+            "owner/name. It is a check, not a selector: the repository this "
+            "command reads from GitHub and pushes to always comes from the "
+            "validated fix handoff."
+        ),
     )
     parser.add_argument(
         "--repo-root",
@@ -463,8 +477,16 @@ def push_main(
     repo_root = args.repo_root or os.getcwd()
 
     if client is None:
+        # Scoped from the **validated handoff**, never from the current
+        # directory. `detect_repository()` would read the repository out of
+        # whatever clone the operator happens to be standing in, which would
+        # give the GitHub side of this command a different authority from the
+        # git side -- and the whole point of the slice is that they are one.
+        # `--repo` remains an assertion about the handoff (`load_handoff`
+        # above refuses a document that describes anything else), not a
+        # competing source of truth.
         try:
-            client = GitHubClient(args.repo or detect_repository())
+            client = GitHubClient(handoff.target.repo)
         except (GitHubApiError, ValueError) as exc:
             return _failure(PushOutcome.PUSH_API_ERROR, str(exc), out, args.json)
 

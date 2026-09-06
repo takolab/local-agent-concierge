@@ -15,11 +15,14 @@ So the derivation is: ``pulls/{n}`` -> ``head.ref``, and then a series of
 refusals rather than a series of allowances.
 
 * **The pull request must be open.** A closed one is not a thing to push to.
-* **The head must live in this repository.** A fork's ``head.ref`` names a
+* **Both ends must live in this repository.** A fork's ``head.ref`` names a
   branch in *someone else's* repository, and pushing that name to ``origin``
   would create or move a same-named branch here instead -- a write to a ref
   the pull request never referred to. Fork pull requests are refused, not
-  redirected.
+  redirected. The *base* repository is checked for the same reason from the
+  other direction: a pull request in another repository whose head happens to
+  live here would otherwise satisfy the head check alone, and the branch named
+  in it is not a branch this fix may be pushed to.
 * **The head must not be the base**, and **must not be the repository's
   default branch**. Either would mean the "pull request branch" is the branch
   the pull request is merging into. GitHub does not create such a pull
@@ -220,6 +223,19 @@ def resolve(payload: dict, *, repo: str, number: int) -> PushTarget:
         raise BranchAuthorityError(
             f"pull request #{number} reports the same branch {branch!r} as head and "
             "base; pushing to it would write the branch being merged into"
+        )
+
+    base_repo = (base.get("repo") or {}).get("full_name")
+    if not isinstance(base_repo, str) or not base_repo:
+        raise BranchAuthorityError(
+            f"pull request #{number} does not say which repository it targets, so "
+            "it cannot be shown to be a pull request in {repo}".format(repo=repo)
+        )
+    if base_repo != repo:
+        raise BranchAuthorityError(
+            f"pull request #{number} targets {base_repo}, not {repo}. It is a pull "
+            "request in another repository, and the branch named in it is not a "
+            "branch this fix may be pushed to"
         )
 
     default_branch = (base.get("repo") or {}).get("default_branch")

@@ -364,7 +364,10 @@ def test_the_git_subcommands_the_push_path_runs_are_exactly_these():
         for node in ast.walk(tree):
             if not isinstance(node, ast.Call):
                 continue
-            if not (isinstance(node.func, ast.Name) and node.func.id == "run_git"):
+            if not (
+                isinstance(node.func, ast.Name)
+                and node.func.id in {"run_git", "run_git_capture"}
+            ):
                 continue
             first = node.args[0] if node.args else None
             if isinstance(first, ast.List) and first.elts:
@@ -461,3 +464,45 @@ def test_only_outcomes_after_a_verified_push_report_a_mutation():
             assert mutated is None
         else:
             assert mutated is (outcome in PUSHED_OUTCOMES)
+
+
+def test_the_github_client_is_scoped_from_the_handoff_not_the_directory(
+    tmp_path, live, monkeypatch
+):
+    """The git side and the GitHub side must have one authority, not two.
+
+    `detect_repository()` reads the repository out of whatever clone the
+    operator is standing in. Using it would let this command read a pull
+    request and its CI from one repository while pushing to another.
+    """
+    constructed = []
+
+    class RecordingClient:
+        def __init__(self, repo, **kwargs):
+            constructed.append(repo)
+            raise ValueError("stop here; the constructor is what is under test")
+
+    def forbidden():  # pragma: no cover - the assertion is that it is not called
+        raise AssertionError("detect_repository() must not decide the repository")
+
+    monkeypatch.setattr(push_cli, "GitHubClient", RecordingClient)
+    monkeypatch.setattr(push_cli, "detect_repository", forbidden, raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    code, out = run(
+        ["--fix-json", write_fix_json(tmp_path, live), "--repo-root", str(live.clone)]
+    )
+
+    assert constructed == ["takolab/local-agent-concierge"]
+    assert code == PUSH_EXIT_CODES[PushOutcome.PUSH_API_ERROR]
+
+
+def test_the_push_command_cannot_detect_a_repository_from_the_directory():
+    """Structural: the module does not import the cwd-based detector at all."""
+    tree = ast.parse(_module_path("push_cli").read_text())
+    imported = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            imported.update(alias.name for alias in node.names)
+
+    assert "detect_repository" not in imported

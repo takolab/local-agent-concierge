@@ -352,6 +352,10 @@ def test_a_non_fast_forward_push_is_refused_and_reported_as_no_write(scenario):
     # says so rather than reporting an unknown state.
     assert scenario.remote_tip() != theirs_before
     assert result.commit.sha != scenario.remote_tip()
+    # And the no-write claim rests on the remote's own answer: a real
+    # `git push --porcelain` against a real remote produced a per-ref
+    # rejection line, which is the only evidence that establishes it.
+    assert "rejected" in " ".join(result.reasons)
 
 
 def test_a_push_whose_readback_disagrees_is_reported_as_unknown(scenario, monkeypatch):
@@ -773,3 +777,118 @@ def test_an_unanswerable_ancestry_question_stays_unknown(scenario, monkeypatch):
     assert result.outcome is PushOutcome.PUSH_NOT_VERIFIED
     assert result.repository_mutated is None
     assert "could not be determined" in " ".join(result.reasons)
+
+
+# --------------------------------------------------------------------------
+# Regressions from PR #35's second review round
+# --------------------------------------------------------------------------
+
+
+def test_a_second_push_url_naming_another_repository_is_refused(tmp_path, scenario):
+    """`git push` writes to EVERY push URL; the check must read every one.
+
+    `git remote get-url --push` without `--all` reports only the first, so a
+    remote configured with two push URLs passed the earlier check while the
+    push itself reached both repositories.
+    """
+    other = tmp_path / "someone" / "other-repo.git"
+    other.mkdir(parents=True)
+    git(other, "init", "--quiet", "--bare")
+    git(scenario.clone, "remote", "set-url", "--add", "--push", "origin", str(scenario.origin))
+    git(scenario.clone, "remote", "set-url", "--add", "--push", "origin", str(other))
+
+    # The fixture really does configure two push URLs, only one of which the
+    # un-`--all` form would have reported.
+    assert len(git(scenario.clone, "remote", "get-url", "--push", "--all", "origin").splitlines()) == 2
+
+    result = push(scenario)
+
+    assert result.outcome is PushOutcome.PUSH_BRANCH_REFUSED
+    assert result.repository_mutated is False
+    assert "someone/other-repo" in " ".join(result.reasons)
+    # Neither repository was written to.
+    assert scenario.remote_tip() == scenario.head_sha
+    assert git(other, "for-each-ref", "--format=%(refname)") == ""
+
+
+def test_a_pull_request_in_another_repository_is_refused(scenario):
+    """A cross-repository pull request whose head happens to live here.
+
+    `head.repo` alone does not establish that this is a pull request *in* the
+    target repository, and the branch named in one that is not is not a branch
+    this fix may be pushed to.
+    """
+    client = client_for(scenario)
+    payload = client.get_pull_request(scenario.number)
+    payload["base"]["repo"]["full_name"] = "someone/other-repo"
+    client.get_pull_request = lambda number: payload
+
+    result = push(scenario, client=client)
+
+    assert result.outcome is PushOutcome.PUSH_BRANCH_REFUSED
+    assert "someone/other-repo" in " ".join(result.reasons)
+    assert scenario.remote_tip() == scenario.head_sha
+
+
+def test_a_silent_push_failure_is_unknown_not_a_verified_no_write(scenario, monkeypatch):
+    """A local hook refusal and a lost response look identical afterwards.
+
+    Neither produces a per-ref answer from the remote, and an absent commit
+    does not prove no-write -- a commit can land and then be erased. So the
+    honest report is "unknown", not `repository_mutated: false`.
+    """
+    from review_loop import fix_commit, push_runner
+
+    def silent_failure(worktree, *, remote, refspec, timeout=300.0):
+        raise fix_commit.PushRefused(
+            "git push failed: hook says no", fix_commit.REMOTE_SILENT
+        )
+
+    monkeypatch.setattr(push_runner, "push_fix_commit", silent_failure)
+
+    result = push(scenario)
+
+    assert result.outcome is PushOutcome.PUSH_NOT_VERIFIED
+    assert result.exit_code == 66
+    assert result.repository_mutated is None
+    assert "no per-ref answer" in " ".join(result.reasons)
+    # Nothing actually reached the remote in this fixture, but the runner does
+    # not claim to know that -- which is the point.
+    assert scenario.remote_tip() == scenario.head_sha
+
+
+def test_a_remote_rejection_is_reported_as_a_verified_no_write(scenario, monkeypatch):
+    from review_loop import fix_commit, push_runner
+
+    def rejected(worktree, *, remote, refspec, timeout=300.0):
+        raise fix_commit.PushRefused(
+            "git push failed: non-fast-forward", fix_commit.REMOTE_REJECTED
+        )
+
+    monkeypatch.setattr(push_runner, "push_fix_commit", rejected)
+
+    result = push(scenario)
+
+    assert result.outcome is PushOutcome.PUSH_FAILED
+    assert result.exit_code == 65
+    assert result.repository_mutated is False
+    assert "rejected" in " ".join(result.reasons)
+
+
+def test_a_remote_that_accepted_a_since_rewritten_ref_is_reported_as_pushed(
+    scenario, monkeypatch
+):
+    """Accepted by the remote, then erased from the branch: mutated, absent."""
+    from review_loop import fix_commit, push_runner
+
+    def accepted_then_gone(worktree, *, remote, refspec, timeout=300.0):
+        return fix_commit.REMOTE_ACCEPTED
+
+    monkeypatch.setattr(push_runner, "push_fix_commit", accepted_then_gone)
+
+    result = push(scenario)
+
+    assert result.outcome is PushOutcome.CI_STALE_TARGET
+    assert result.repository_mutated is True
+    assert result.push_performed is True
+    assert "rewritten" in " ".join(result.reasons)

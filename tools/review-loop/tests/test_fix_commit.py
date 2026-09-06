@@ -352,27 +352,20 @@ def test_the_push_argument_vector_carries_no_force_and_no_tag(monkeypatch, scena
     """The refusal above is the property; this is the argv that produces it."""
     from review_loop import fix_commit
 
+    from review_loop.reviewer_workspace import GitResult
+
     seen = {}
+    refspec = f"{scenario.head_sha}:refs/heads/{scenario.branch}"
 
-    def record(argv, *, cwd, timeout, strip=True):
+    def record(argv, *, cwd, timeout):
         seen["argv"] = list(argv)
-        return ""
+        return GitResult(returncode=0, stdout=f"To x\n\t{refspec}\told..new\nDone\n", stderr="")
 
-    monkeypatch.setattr(fix_commit, "run_git", record)
-    push_fix_commit(
-        str(scenario.clone),
-        remote="origin",
-        refspec=f"{scenario.head_sha}:refs/heads/{scenario.branch}",
-    )
+    monkeypatch.setattr(fix_commit, "run_git_capture", record)
+    push_fix_commit(str(scenario.clone), remote="origin", refspec=refspec)
 
     argv = seen["argv"]
-    assert argv == [
-        "push",
-        "--quiet",
-        "--",
-        "origin",
-        f"{scenario.head_sha}:refs/heads/{scenario.branch}",
-    ]
+    assert argv == ["push", "--porcelain", "--", "origin", refspec]
     assert not any(word.startswith("--force") for word in argv)
     assert not any(word.startswith("+") for word in argv)
     assert not any("refs/tags" in word for word in argv)
@@ -561,3 +554,72 @@ def test_the_pinned_settings_are_the_ones_the_module_claims(worktree, scenario):
         assert capture_patch(worktree, "HEAD", timeout=60) == baseline, setting
 
     assert patch_digest(baseline) == scenario.patch_sha256
+
+
+@pytest.mark.parametrize(
+    "stdout,expected",
+    [
+        ("To /x\n!\tSPEC\t[rejected] (non-fast-forward)\nDone\n", "rejected"),
+        ("To /x\n!\tSPEC\t[remote rejected] (pre-receive hook)\nDone\n", "rejected"),
+        ("To /x\n\tSPEC\tabc..def\nDone\n", "accepted"),
+        ("To /x\n*\tSPEC\t[new branch]\nDone\n", "accepted"),
+        ("To /x\n=\tSPEC\t[up to date]\nDone\n", "accepted"),
+        # No line for our ref at all: a local hook refusal and a lost response
+        # look exactly like this, and they are not the same fact.
+        ("", "silent"),
+        ("To /x\n!\tother:refs/heads/x\t[rejected]\nDone\n", "silent"),
+        ("garbage\n", "silent"),
+    ],
+)
+def test_the_remotes_own_answer_is_read_from_the_porcelain_report(stdout, expected):
+    from review_loop.fix_commit import read_push_report
+
+    spec = "abc123:refs/heads/feat"
+    assert read_push_report(stdout.replace("SPEC", spec), refspec=spec) == expected
+
+
+def test_a_real_rejected_push_carries_the_remotes_answer(worktree, scenario):
+    """End to end, against a real remote that really refuses the update."""
+    from review_loop.fix_commit import REMOTE_REJECTED
+
+    commit = commit_the_patch(worktree, scenario)
+    git(scenario.seed, "commit", "--quiet", "--allow-empty", "-m", "theirs")
+    git(scenario.seed, "push", "--quiet", "origin", f"HEAD:refs/heads/{scenario.branch}")
+
+    with pytest.raises(PushRefused) as error:
+        push_fix_commit(
+            worktree,
+            remote="origin",
+            refspec=f"{commit.sha}:refs/heads/{scenario.branch}",
+        )
+
+    assert error.value.report == REMOTE_REJECTED
+
+
+def test_a_real_accepted_push_carries_the_remotes_answer(worktree, scenario):
+    from review_loop.fix_commit import REMOTE_ACCEPTED
+
+    commit = commit_the_patch(worktree, scenario)
+
+    report = push_fix_commit(
+        worktree, remote="origin", refspec=f"{commit.sha}:refs/heads/{scenario.branch}"
+    )
+
+    assert report == REMOTE_ACCEPTED
+    assert scenario.remote_tip() == commit.sha
+
+
+def test_every_push_url_is_read_not_only_the_first(tmp_path, scenario):
+    """`--all`, because `git push` writes to every configured push URL."""
+    from review_loop.fix_commit import read_remote_urls
+
+    other = tmp_path / "someone" / "other-repo.git"
+    other.mkdir(parents=True)
+    git(other, "init", "--quiet", "--bare")
+    git(scenario.clone, "remote", "set-url", "--add", "--push", "origin", str(scenario.origin))
+    git(scenario.clone, "remote", "set-url", "--add", "--push", "origin", str(other))
+
+    urls = read_remote_urls(str(scenario.clone), remote="origin")
+
+    assert str(other) in urls
+    assert str(scenario.origin) in urls

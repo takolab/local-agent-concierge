@@ -40,7 +40,21 @@ from dataclasses import dataclass
 from .agent_workspace import _ignored_paths, _status_paths, is_residue
 from .model import FULL_SHA_PATTERN
 from .patch_identity import capture_patch, digest_bytes, patch_digest
-from .reviewer_workspace import DEFAULT_GIT_TIMEOUT_SECONDS, WorkspaceError, run_git
+from .reviewer_workspace import (
+    DEFAULT_GIT_TIMEOUT_SECONDS,
+    WorkspaceError,
+    run_git,
+    run_git_capture,
+)
+
+
+#: What the remote itself said about our ref, read from ``--porcelain``.
+#: Defined here rather than beside the push, because :class:`PushRefused`
+#: carries one as a default argument and a default is evaluated when the
+#: class body runs.
+REMOTE_ACCEPTED = "accepted"
+REMOTE_REJECTED = "rejected"
+REMOTE_SILENT = "silent"
 
 
 class CandidatePatchError(Exception):
@@ -59,7 +73,17 @@ class CommitRefused(Exception):
 
 
 class PushRefused(Exception):
-    """The push did not happen, and the remote ref is where it was."""
+    """``git push`` exited non-zero. What that means is a separate question.
+
+    ``report`` carries the remote's own per-ref answer, because the exit
+    status does not distinguish "the remote refused this ref" from "the
+    answer never arrived" -- and only the first of those proves that nothing
+    was written.
+    """
+
+    def __init__(self, message: str, report: str = REMOTE_SILENT) -> None:
+        super().__init__(message)
+        self.report = report
 
 
 class PushNotVerified(Exception):
@@ -345,17 +369,29 @@ def read_remote_urls(
 ) -> tuple[str, ...]:
     """Every URL git would use for ``remote``: fetch and push, deduplicated.
 
-    Both are read because a remote can carry a separate ``pushurl``, and the
-    URL that decides where a push lands is not the one that decides where a
-    fetch comes from. ``git remote get-url`` reports the *effective* URL --
-    any ``url.<base>.insteadOf`` rewriting is already applied -- so what comes
-    back is where git will actually go, not what someone typed into the
-    config.
+    Three things about this are load-bearing, and each was got wrong before it
+    was got right.
+
+    **Both directions.** A remote can carry a separate ``pushurl``, and the URL
+    that decides where a push lands is not the one that decides where a fetch
+    comes from.
+
+    **``--all``, not the first one.** A remote may have *several* push URLs,
+    and ``git push`` writes to **every** one of them while
+    ``git remote get-url --push`` without ``--all`` reports only the first.
+    Checking that first URL and pushing to all of them is not a check; it is
+    the appearance of one. An operator with
+    ``origin`` pointing at this repository *and* at another would have passed
+    the earlier version and written to both.
+
+    **The effective URL.** ``git remote get-url`` applies any
+    ``url.<base>.insteadOf`` rewriting before answering, so what comes back is
+    where git will actually go rather than what someone typed into the config.
     """
     urls: list[str] = []
     for argv in (
-        ["remote", "get-url", "--", remote],
-        ["remote", "get-url", "--push", "--", remote],
+        ["remote", "get-url", "--all", "--", remote],
+        ["remote", "get-url", "--push", "--all", "--", remote],
     ):
         try:
             value = run_git(argv, cwd=repo_root, timeout=timeout)
@@ -409,13 +445,38 @@ def contains_commit(
     return completed == ""
 
 
+def read_push_report(stdout: str, *, refspec: str) -> str:
+    """What did the remote say about *our* ref?
+
+    ``git push --porcelain`` writes one machine-readable line per ref, on
+    stdout, whether the push succeeded or failed::
+
+        To <url>
+        !\t<sha>:refs/heads/b\t[rejected] (non-fast-forward)
+        Done
+
+    A leading ``!`` is a rejection the remote *answered with*, which is the
+    only after-the-fact evidence that a push definitely did not land -- an
+    absent commit is not, because a commit can land and then be erased.
+    Anything with no line for our ref is :data:`REMOTE_SILENT`: git never got
+    a per-ref answer, which is what both a local hook refusal and a lost
+    response look like, and those are not the same fact.
+    """
+    for line in stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) < 3 or fields[1] != refspec:
+            continue
+        return REMOTE_REJECTED if fields[0].startswith("!") else REMOTE_ACCEPTED
+    return REMOTE_SILENT
+
+
 def push_fix_commit(
     worktree: str,
     *,
     remote: str,
     refspec: str,
     timeout: float = DEFAULT_GIT_TIMEOUT_SECONDS,
-) -> None:
+) -> str:
     """Push one commit to one branch, with ordinary fast-forward semantics.
 
     No ``--force``, no ``+`` in the refspec, no ``--force-with-lease``, and no
@@ -427,12 +488,18 @@ def push_fix_commit(
     own configuration on the operator's own machine, and a runner that gained
     push authority this week is not the thing that should start ignoring it.
     A hook that refuses the push is a refusal, reported as one.
+
+    Returns what the remote said about our ref -- see :func:`read_push_report`
+    -- and raises :class:`PushRefused` carrying the same, because git's exit
+    status alone cannot tell a rejection the remote sent from an answer that
+    never arrived.
     """
-    try:
-        run_git(
-            ["push", "--quiet", "--", remote, refspec],
-            cwd=worktree,
-            timeout=timeout,
-        )
-    except WorkspaceError as exc:
-        raise PushRefused(str(exc)) from exc
+    result = run_git_capture(
+        ["push", "--porcelain", "--", remote, refspec],
+        cwd=worktree,
+        timeout=timeout,
+    )
+    report = read_push_report(result.stdout, refspec=refspec)
+    if not result.ok:
+        raise PushRefused(f"git push failed: {result.failure}", report)
+    return report

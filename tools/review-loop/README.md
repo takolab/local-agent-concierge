@@ -1178,9 +1178,22 @@ GitHub's own pull request object and from nothing else.
 
 **The repository is checked too, not just the ref name.** A ref name is half a
 destination; `--git-remote` supplies the other half, and it *is* operator
-controlled. So every URL git reports for that remote — the fetch URL and the
-push URL, which can differ — must name the repository the validated handoff
-describes:
+controlled. So **every** URL git reports for that remote must name the
+repository the validated handoff describes — read with `--all`, in both
+directions:
+
+```bash
+git remote get-url --all <remote>
+git remote get-url --push --all <remote>
+```
+
+`--all` is not thoroughness for its own sake. A remote may have several push
+URLs and `git push` writes to **every** one of them, while
+`git remote get-url --push` without `--all` reports only the first. Checking
+that first URL while pushing to all of them is not a check; it is the
+appearance of one.
+
+The rule each URL must satisfy:
 
 * a URL with a **host** must be a GitHub host, and its `owner/name` must be
   the target repository. `--git-remote upstream` pointing at `someone/fork`,
@@ -1210,6 +1223,19 @@ machine-generated commit landing under a human's name is a fact worth being
 visible in `git log`, not one to paper over with a synthetic identity. A
 missing identity, or a signing configuration that cannot sign, is
 `COMMIT_REFUSED` with git's own message — reported, never bypassed.
+
+**One repository, one authority.** The GitHub client is constructed from
+`handoff.target.repo` — never from `detect_repository()`, which would read the
+repository out of whatever clone you happen to be standing in and give the
+GitHub side of this command a different authority from the git side. `--repo`
+is an *assertion* that the handoff describes that repository, not a selector.
+A test asserts the module does not even import the directory-based detector.
+
+For the same reason the pull request must be a pull request **in** that
+repository at both ends: `head.repo.full_name` and `base.repo.full_name` must
+both equal it. Checking only the head would admit a cross-repository pull
+request in someone else's repository whose head happens to live here, and the
+branch named in one of those is not a branch this fix may be pushed to.
 
 **Who controls what.**
 
@@ -1313,27 +1339,51 @@ read-back shows our commit is reported as a push that landed, not as a
 failure.
 
 A read-back that is *neither* our commit nor obviously unchanged is not
-self-explanatory, and it is not treated as if it were. "The push was refused
-and the ref is not ours" is compatible with two opposite histories — the push
-never landed, or it landed and someone pushed a child on top before the
-read-back — so git is asked which one:
+self-explanatory, and it is not treated as if it were. Two independent
+questions are asked, because neither alone is enough.
+
+**What did the remote say?** The push runs with `--porcelain`, which writes
+one machine-readable line per ref on stdout whether it succeeded or failed:
+
+```text
+To <url>
+!	<sha>:refs/heads/<branch>	[rejected] (non-fast-forward)
+Done
+```
+
+A leading `!` is a rejection *the remote answered with*. That is the only
+after-the-fact evidence that a push definitely did not land — and it is why
+`PUSH_FAILED` requires it. **An absent commit does not establish a no-write**,
+because a commit can land and then be erased from the branch's history, and
+nothing observable afterwards separates that from a push that never happened.
+A local `pre-push` hook refusal and a dropped connection both produce *no*
+per-ref line, and those two are not the same fact, so neither is reported as
+though it were.
+
+**Is our commit in the branch's history?**
 
 ```text
 git rev-list --max-count=1 <our commit> ^<observed tip>
 ```
 
 Empty means our commit is an ancestor of what the branch now holds, so the
-push **did** land and the branch has moved on: that is `CI_STALE_TARGET` with
-`repository_mutated: true`, not a no-write. Non-empty, together with a
-reported push failure, is a *verified* no-write regardless of where the tip
-sits. And if the question cannot be answered at all — the branch will not
-fetch — the run ends `PUSH_NOT_VERIFIED`, because "I could not tell" is an
-answer that must not be rounded to either certainty.
+push **did** land and the branch has moved on.
 
-The one case this does not distinguish is a push that landed and was then
-force-pushed away entirely, leaving no trace in the branch's history. Nothing
-observable afterwards separates that from a push that never landed, and this
-runner does not pretend otherwise.
+Together:
+
+| Remote's answer | Commit in history | Outcome |
+| --- | --- | --- |
+| — | the ref *is* our commit | pushed; CI wait begins |
+| rejected | no | `PUSH_FAILED` — verified no-write, on the remote's own word |
+| any | yes | `CI_STALE_TARGET` — landed, branch moved on |
+| accepted | no | `CI_STALE_TARGET` — landed, branch since rewritten |
+| silent | no, or unknown | `PUSH_NOT_VERIFIED` — genuinely unknown |
+
+The last row is the honest one and the reason the table exists: after a push
+that produced no per-ref answer, an absent commit is compatible both with a
+push that never landed and with one that landed and was erased. The runner
+reports that it does not know, rather than putting a guess in a
+machine-readable field.
 
 ### Authoritative CI, bound to the pushed commit
 
@@ -1376,11 +1426,11 @@ alongside anything else.
 | 62 | `PUSH_TARGET_STALE` | Not written. The head moved, or the branch is somewhere unaccounted for. |
 | 63 | `PATCH_IDENTITY_MISMATCH` | Not written. |
 | 64 | `COMMIT_REFUSED` | Not written. |
-| 65 | `PUSH_FAILED` | Not written, **verified**: the ref was read back and git confirms the commit is not in its history. |
-| 66 | `PUSH_NOT_VERIFIED` | **Unknown.** Read the branch before doing anything else. |
+| 65 | `PUSH_FAILED` | Not written, **verified**: the remote's own `--porcelain` report rejected the ref. |
+| 66 | `PUSH_NOT_VERIFIED` | **Unknown.** The remote gave no per-ref answer, so an absent commit proves nothing. Read the branch before doing anything else. |
 | 67 | `CI_FAILED` | **Pushed.** CI for the exact commit failed. |
 | 68 | `CI_PENDING` | **Pushed.** CI had not finished within `--ci-timeout`. |
-| 69 | `CI_STALE_TARGET` | **Pushed.** The head moved off it, its merge context is stale, or a lost response hid a push that landed under a later commit. |
+| 69 | `CI_STALE_TARGET` | **Pushed.** The head moved off it, its merge context is stale, or a lost response hid a push that landed — under a later commit, or under a rewrite. |
 | 70 | `CI_AMBIGUOUS` | **Pushed.** CI state undecidable. |
 | 71 | `PUSH_WORKSPACE_INVALID` | Not written. |
 | 72 | `PUSH_API_ERROR` | Not written. GitHub unreachable before the push. |
@@ -1426,7 +1476,7 @@ built on.
 
 | | |
 | --- | --- |
-| **Enforced by this runner** | The patch's bytes hash to the fix turn's digest. The applied tree and the created commit both re-hash to it. The commit's parent is the reviewed head and it is exactly one commit. The branch comes from GitHub's pull request object and cannot be a fork, a base or a default branch. Every URL for the chosen remote names the target repository. The push is fast-forward and carries no force flag. The pushed ref is read back from the remote. CI evidence belongs to the exact pushed commit, from the authoritative event, against the current merge context. |
+| **Enforced by this runner** | The patch's bytes hash to the fix turn's digest. The applied tree and the created commit both re-hash to it. The commit's parent is the reviewed head and it is exactly one commit. The branch comes from GitHub's pull request object — read for the repository the handoff names, at both ends of the pull request — and cannot be a fork, a base or a default branch. Every URL for the chosen remote, fetch and push, names the target repository. The push is fast-forward and carries no force flag. A no-write is claimed only on the remote's own rejection. The pushed ref is read back from the remote. CI evidence belongs to the exact pushed commit, from the authoritative event, against the current merge context. |
 | **Not enforced, and not claimed** | That the fix is *correct*. That it resolves the finding. That the pull request should be merged. That your git hooks do nothing else — they run, deliberately, and are trusted. That a digest survives configuration this module does not pin. That a push which landed and was then force-pushed away can be detected. Whether a `pre-push` hook, a signing configuration or a branch protection rule refuses the push — those are the remote's and the operator's decisions, reported rather than bypassed. |
 
 ## Tests
@@ -1519,8 +1569,9 @@ written out explicitly.
   no code path here that could take one.
 * **Push authority is only as narrow as the pull request object.** The branch
   is derived from GitHub's `head.ref` for the target pull request, with fork,
-  base and default-branch heads refused, and the remote's URLs must name the
-  same repository. That is a strong bound, but it does rest on GitHub
+  base and default-branch heads refused, both ends of the pull request
+  required to be in the target repository, and every one of the remote's URLs
+  required to name it. That is a strong bound, but it does rest on GitHub
   returning a truthful pull request object for a number the operator supplied
   in the handoff — and, for a hostless remote URL, on a local path that ends
   in `<owner>/<name>.git` actually being that repository.
@@ -1530,10 +1581,13 @@ written out explicitly.
   structural write guarantee covers the argv this runner constructs, not
   arbitrary configured hook behaviour. A hook that edits files is still caught
   by the post-commit digest check.
-* **A landed-then-force-pushed commit is indistinguishable from one that never
-  landed.** The post-push ancestry check separates "never landed" from "landed
-  and the branch moved on", but a push that landed and was then erased from
-  the branch's history entirely leaves nothing to observe.
+* **A silent push failure leaves remote state genuinely unknown.** When the
+  remote gives no per-ref answer — a local `pre-push` hook refusal, a dropped
+  connection — an absent commit proves nothing, because a commit can land and
+  then be erased. The run reports `PUSH_NOT_VERIFIED` rather than guessing,
+  which means an operator has to look at the branch themselves. That is the
+  intended direction, but it does mean an ordinary local hook refusal reports
+  as "unknown" rather than as the no-write it almost certainly was.
 * **A `--commit-cwd` directory is written to and committed in.** It is
   verified to be a clean checkout of the reviewed head first, but the fix
   commit is created there and pushed from there. The prepared worktree is the

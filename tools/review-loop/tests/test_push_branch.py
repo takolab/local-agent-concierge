@@ -266,3 +266,23 @@ def test_a_remote_that_is_not_the_target_repository_is_refused(urls, fragment):
         check_remote_repository(urls, expected_repo=TARGET, remote="origin")
 
     assert fragment in str(error.value)
+
+
+def test_a_pull_request_whose_base_is_another_repository_is_refused():
+    """`head.repo` alone does not make this a pull request in this repository."""
+    foreign = payload()
+    foreign["base"]["repo"] = {
+        "full_name": "someone/other-repo",
+        "default_branch": "master",
+    }
+
+    with pytest.raises(BranchAuthorityError, match="targets someone/other-repo"):
+        resolve(foreign, repo=REPO, number=NUMBER)
+
+
+def test_a_pull_request_without_a_base_repository_is_refused():
+    broken = payload()
+    broken["base"]["repo"] = {"default_branch": "master"}
+
+    with pytest.raises(BranchAuthorityError, match="which repository it targets"):
+        resolve(broken, repo=REPO, number=NUMBER)
