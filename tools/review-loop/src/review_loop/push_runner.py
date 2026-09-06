@@ -415,14 +415,22 @@ def _commit_and_push(
     """Everything that happens while the bound worktree exists."""
     target = handoff.target
 
+    def refused(outcome: PushOutcome, reason: str) -> PushResult:
+        return _result(
+            outcome, (reason,), target=target, push_target=push_target
+        )
+
+    # A `WorkspaceError` on any of the three steps below is a git command
+    # failing inside a workspace that was already prepared and verified, so it
+    # is reported as a refusal to commit rather than as an invalid workspace.
+    # Both are no-write outcomes; the difference is which one an operator goes
+    # and looks at.
     try:
         require_clean_target(
             worktree, reviewed_head_sha=target.head_sha, timeout=git_timeout
         )
-    except CommitRefused as exc:
-        return _result(
-            PushOutcome.COMMIT_REFUSED, (str(exc),), target=target, push_target=push_target
-        )
+    except (CommitRefused, WorkspaceError) as exc:
+        return refused(PushOutcome.COMMIT_REFUSED, str(exc))
 
     try:
         apply_candidate_patch(
@@ -433,11 +441,11 @@ def _commit_and_push(
             timeout=git_timeout,
         )
     except CandidatePatchError as exc:
-        return _result(
-            PushOutcome.PATCH_IDENTITY_MISMATCH,
-            (str(exc),),
-            target=target,
-            push_target=push_target,
+        return refused(PushOutcome.PATCH_IDENTITY_MISMATCH, str(exc))
+    except WorkspaceError as exc:
+        return refused(
+            PushOutcome.COMMIT_REFUSED,
+            f"the candidate patch could not be applied: {exc}",
         )
 
     if dry_run:
@@ -462,13 +470,8 @@ def _commit_and_push(
             expected_paths=handoff.changed_paths,
             timeout=git_timeout,
         )
-    except CommitRefused as exc:
-        return _result(
-            PushOutcome.COMMIT_REFUSED,
-            (str(exc),),
-            target=target,
-            push_target=push_target,
-        )
+    except (CommitRefused, WorkspaceError) as exc:
+        return refused(PushOutcome.COMMIT_REFUSED, str(exc))
 
     created = (
         f"created {commit.sha} on top of {commit.parent_sha}, containing exactly "

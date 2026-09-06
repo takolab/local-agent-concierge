@@ -248,6 +248,46 @@ def test_an_unrelated_workspace_change_prevents_the_commit(scenario, tmp_path):
     assert_branch_untouched(scenario, result)
 
 
+def test_a_git_failure_inside_the_prepared_workspace_refuses_the_commit(
+    scenario, monkeypatch
+):
+    """Already prepared and verified, so a git failure here is not the workspace.
+
+    Both are no-write outcomes; the difference is which one an operator goes
+    and looks at, and "the workspace could not be prepared" would send them to
+    the wrong place.
+    """
+    from review_loop import push_runner
+
+    def broken(worktree, *, reviewed_head_sha, timeout=300.0):
+        raise WorkspaceError("git status could not be run")
+
+    monkeypatch.setattr(push_runner, "require_clean_target", broken)
+
+    result = push(scenario)
+
+    assert result.outcome is PushOutcome.COMMIT_REFUSED
+    assert result.exit_code == 64
+    assert_branch_untouched(scenario, result)
+
+
+def test_a_git_failure_while_applying_is_not_a_patch_identity_problem(
+    scenario, monkeypatch
+):
+    from review_loop import push_runner
+
+    def broken(worktree, **kwargs):
+        raise WorkspaceError("git apply could not be run")
+
+    monkeypatch.setattr(push_runner, "apply_candidate_patch", broken)
+
+    result = push(scenario)
+
+    assert result.outcome is PushOutcome.COMMIT_REFUSED
+    assert "could not be applied" in " ".join(result.reasons)
+    assert_branch_untouched(scenario, result)
+
+
 def test_a_workspace_that_cannot_be_prepared_writes_nothing(scenario):
     class Broken:
         def open(self, head_sha):
