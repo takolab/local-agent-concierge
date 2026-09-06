@@ -43,6 +43,11 @@ class Scenario:
         return line.split("\t")[0] if line else ""
 
 
+def _configure(repo: Path) -> None:
+    git(repo, "config", "user.email", "test@example.invalid")
+    git(repo, "config", "user.name", "Test")
+
+
 def _default_edits(worktree: Path) -> None:
     (worktree / "pkg" / "code.py").write_text("value = 2\n")
     (worktree / "pkg" / "new.py").write_text("added = True\n")
@@ -63,6 +68,7 @@ def build_scenario(tmp_path, edits, *, branch: str = DEFAULT_BRANCH_NAME,
     seed = tmp_path / "seed"
     seed.mkdir()
     git(seed, "init", "--quiet")
+    _configure(seed)
     (seed / "README.md").write_text("first\n")
     (seed / ".gitignore").write_text(".env\ncredentials.json\n__pycache__/\n*.pyc\n")
     (seed / "pkg").mkdir()
@@ -82,6 +88,12 @@ def build_scenario(tmp_path, edits, *, branch: str = DEFAULT_BRANCH_NAME,
 
     clone = tmp_path / "clone"
     git(tmp_path, "clone", "--quiet", str(bare), str(clone))
+    # Repository-local, because the code under test commits through plain
+    # `git commit` with the invoking user's environment. Configuring the
+    # fixture repositories rather than relying on the machine's global identity
+    # keeps the suite passing on a CI runner that has none -- and keeps it
+    # honest about the fact that a real run does need one.
+    _configure(clone)
 
     patch_path, digest, size, changed = capture_candidate_patch(
         clone, head_sha, edits, tmp_path / "candidate.patch"

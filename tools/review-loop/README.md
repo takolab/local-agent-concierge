@@ -1170,6 +1170,14 @@ comment, label, review, dispatch or merge is written, and a source-level test
 asserts that no push-path module imports the comment writer or names a write
 HTTP method.
 
+**Your git identity authors the commit.** `git commit` runs with your
+environment, so `user.name` and `user.email` must be configured, and the fix
+commit is authored as you. That is deliberate rather than incidental: a
+machine-generated commit landing under a human's name is a fact worth being
+visible in `git log`, not one to paper over with a synthetic identity. A
+missing identity, or a signing configuration that cannot sign, is
+`COMMIT_REFUSED` with git's own message — reported, never bypassed.
+
 **Who controls what.**
 
 | Input | Controlled by | Treated as |
