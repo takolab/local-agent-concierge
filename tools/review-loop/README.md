@@ -1589,6 +1589,13 @@ runs — the committer timestamp differs — so they are not what is compared.
 `already_pushed: true` in the JSON, and "was already on the branch" in the
 text, say which row was taken.
 
+Both of the first two rows establish the same two git facts — parent and diff
+digest — and both therefore report the same `fix_provenance` block, pairing
+them with the routed review's round, reviewed head and finding ids. That block
+is what lets `review-loop re-review` tell a fix for one finding set from a fix
+for another; it is emitted from the already-pushed row as well precisely so
+that `commit_created: false` does not quietly drop it.
+
 A local commit in a prepared worktree is never reused, because the worktree
 does not survive the run. `--commit-cwd` is the exception an operator opts
 into, and it is verified to be a clean checkout of the reviewed head first — a
@@ -1700,23 +1707,68 @@ the invariants that produced them:
   commit, and tested against what was then the base tip.
 
 They must describe the same repository, the same pull request, and the same
-reviewed head. When the push document reports a commit it created, its parent
-must be exactly the reviewed head.
+reviewed head.
 
-That last check is the tightest mechanical link this pipeline has between a
-fix and the review it answers, and it is worth being explicit about its
-limit: it establishes that the fix commit sits directly on the reviewed
-commit, in this pull request, with CI verified against the current merge.
-**It does not establish that the patch addresses those findings.** Nothing
-mechanical can. That is the question the fresh re-review exists to answer,
-and asserting it in the handoff would make the re-review ceremonial.
+### Which review caused this fix
 
-Both documents are operator-controlled input, exactly as the earlier handoffs
-are. Anyone who can write them can choose which review and which push are
-paired — but they cannot make a reviewer read a commit that is not the pull
-request's head, because the runner re-derives that from GitHub and the
-workspace resolves `refs/pull/N/head` from the remote. The files select; git
-and GitHub decide.
+Commit identity is not enough to pair them, and the gap is easy to reach by
+accident. Two reviews of the same commit — a second round against a different
+merge context, or a `--dry-run` review nobody recorded — raise different
+findings against the same head:
+
+```text
+Review A of H1: F1, F2      Review B of H1: F3
+Push A: H1 -> H2
+```
+
+`review-B.json` paired with `push-A.json` agrees on repository, pull request,
+reviewed head and pushed head. Every check that looks only at commit identity
+accepts it, and the re-review would then ask a fresh reviewer to resolve `F3`
+against a commit produced to fix `F1` and `F2`. The commit under review would
+be correctly bound; the *history* recorded about it would be false.
+
+So `review-loop push` reports a `fix_provenance` block, and this stage
+requires it:
+
+```json
+"fix_provenance": {
+  "source_round": 1,
+  "source_reviewed_head_sha": "…",
+  "source_finding_ids": ["F1", "F2"],
+  "source_patch_sha256": "…",
+  "fix_sha": "…",
+  "fix_parent_sha": "…",
+  "fix_patch_sha256": "…"
+}
+```
+
+The `source_*` half names the review whose findings were routed; the `fix_*`
+half is what **git** said about the commit now on the branch. The re-review
+requires the round, the reviewed head and the *whole finding set* to match the
+review document, `fix_sha` to be the pushed commit, `fix_parent_sha` to be the
+reviewed head, and `fix_patch_sha256` to equal the candidate patch digest.
+
+The block is emitted on **both** paths to `PUSH_READY`, and that matters more
+than it looks. The already-pushed path — a retry that finds the fix already on
+the branch and reports no `commit` of its own — identifies the remote tip by
+checking that its parent is the reviewed head *and* that its diff is exactly
+the candidate patch. Those are the same two facts the created-commit path
+establishes. An earlier version of this stage checked the parent only when a
+`commit` block was present, so `commit_created: false` silently meant *the
+provenance is gone*.
+
+What this is **not** is a signature. Both documents remain operator-controlled
+input, exactly as the earlier handoffs are, and someone who edits them can
+still make them agree. What it removes is the silent mispairing — the one an
+operator hits without meaning to. And it still does not establish that the
+patch *addresses* those findings; nothing mechanical can, which is the
+question the fresh re-review exists to answer. Asserting it in the handoff
+would make the re-review ceremonial.
+
+The deeper limit is unchanged: they cannot make a reviewer read a commit that
+is not the pull request's head, because the runner re-derives that from GitHub
+and the workspace resolves `refs/pull/N/head` from the remote. The files
+select; git and GitHub decide.
 
 ### Round semantics
 
@@ -1845,6 +1897,12 @@ A fresh `Blocking` finding always escalates — this project's standing
 review-automation decision, unchanged. An `ESCALATE` resolution escalates
 too: a question for a human is not a change to request.
 
+`Escalation reason` is enforced as conditional in the other direction as
+well: a re-review that recommends `approved` or `changes_requested` and
+carries one is refused. That field states what a human is being asked, and a
+document claiming both "nothing needs doing" and "something is being
+escalated" would otherwise become a durable comment saying both.
+
 ### Post-review revalidation
 
 The reviewer read one merge context. Before anything is recorded, the pull
@@ -1899,6 +1957,14 @@ Note what the counts do **not** do. `Fresh Blocking` / `Fresh Major` /
 severity round 1 gave it, and that severity belongs to the round-1 record;
 counting it here would silently re-raise a finding this turn did not
 independently make.
+
+Every severity field in the JSON therefore says `fresh` in its name —
+`fresh_major`, `fresh_major_findings_present`, and so on. A key called
+`major_findings_remain` would read across both collections while counting one
+of them, and would report `false` for a pull request whose original Major
+finding is explicitly `UNRESOLVED`. There is deliberately no field combining
+the two: `unresolved_finding_ids` is the other half, and a consumer asking
+"is anything outstanding?" reads both.
 
 ### Identity and idempotency
 
@@ -2138,12 +2204,13 @@ asserts that nothing is invented.
   reviewed head, in this pull request, with CI verified. Nothing establishes
   that the patch inside it addresses those findings — which is why the
   re-review is a real review turn and not a checkbox.
-* **A re-review of a fix pushed by someone else is indistinguishable.** The
-  push document selects which commit is called "the fix"; git and GitHub
-  confirm it is the pull request's head with the reviewed head as its parent,
-  and nothing distinguishes a commit this pipeline pushed from a hand-written
-  one in the same position. That is usually what you want, and it does mean
-  `PUSH_READY` provenance is a claim of the document, not of the commit.
+* **Provenance is carried, not proved.** The push document states which
+  review's findings caused the fix and what git said the fix commit is, and
+  the re-review refuses a pair that disagrees. Both documents are still
+  operator-controlled text: an edited pair that agrees with itself is
+  accepted, and nothing distinguishes a commit this pipeline pushed from a
+  hand-written one in the same position. The check removes accidental
+  mispairing, not a determined one.
 * **A residual race on the write.** GitHub offers no compare-and-set on issue
   comments. The window between the final duplicate check and the `POST` is
   narrow but real; two runners racing on the same target could produce two

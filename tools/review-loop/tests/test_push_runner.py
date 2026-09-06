@@ -439,6 +439,63 @@ def test_a_retry_after_a_successful_push_creates_no_second_commit(scenario):
     assert git(scenario.clone, "rev-list", "--count", f"{scenario.head_sha}..{pushed}") == "1"
 
 
+def test_the_fix_provenance_is_established_on_both_paths_to_push_ready(scenario):
+    """The same evidence whether this run created the commit or found it.
+
+    The already-pushed path identifies the remote tip by checking that its
+    parent is the reviewed head *and* that its diff is the candidate patch --
+    exactly the two facts the created-commit path establishes. Reporting them
+    only when ``commit_created`` was true is what made the next stage lose the
+    link between a review and its fix.
+    """
+    client = client_for(scenario)
+    first = push(
+        scenario,
+        client=client,
+        timeline=Timeline({1: green(scenario, client, sha_getter=scenario.remote_tip)}),
+    )
+    second = push(scenario, client=client, timeline=Timeline())
+
+    assert first.commit_created is True
+    assert second.commit is None and second.already_pushed is True
+
+    for result in (first, second):
+        provenance = result.fix_provenance
+        assert provenance is not None
+        assert provenance.fix_sha == result.pushed_sha
+        assert provenance.fix_parent_sha == scenario.head_sha
+        assert provenance.fix_patch_sha256 == scenario.patch_sha256
+        assert provenance.source_reviewed_head_sha == scenario.head_sha
+        assert provenance.source_patch_sha256 == scenario.patch_sha256
+        assert provenance.source_round == 1
+
+    assert first.fix_provenance == second.fix_provenance
+
+
+def test_the_provenance_names_the_findings_the_fix_turn_answered(scenario):
+    client = client_for(scenario)
+    result = push(
+        scenario,
+        client=client,
+        handoff=handoff_for(scenario, finding_ids=("F1", "F2")),
+        timeline=Timeline({1: green(scenario, client, sha_getter=scenario.remote_tip)}),
+    )
+
+    assert result.outcome is PushOutcome.PUSH_READY
+    assert result.fix_provenance.source_finding_ids == ("F1", "F2")
+
+
+def test_no_provenance_is_reported_when_nothing_was_pushed(scenario):
+    git(scenario.seed, "commit", "--quiet", "--allow-empty", "-m", "unrelated")
+    theirs = git(scenario.seed, "rev-parse", "HEAD")
+    git(scenario.seed, "push", "--quiet", "origin", f"HEAD:refs/heads/{scenario.branch}")
+
+    result = push(scenario, client=client_for(scenario, head_sha=theirs))
+
+    assert result.outcome is PushOutcome.PUSH_TARGET_STALE
+    assert result.fix_provenance is None
+
+
 def test_a_retry_after_a_push_whose_ci_was_never_observed_resumes_at_ci(scenario):
     """The first run pushes and times out waiting; the second finds the state."""
     client = client_for(scenario)

@@ -417,7 +417,7 @@ def test_case_3_a_resolved_original_and_a_fresh_major_stay_separate_facts():
     ]
     assert rereview.unresolved_finding_ids == ()
     assert [f.finding_id for f in rereview.fresh_findings] == ["R2.F1"]
-    assert rereview.major_findings_remain
+    assert rereview.fresh_major_findings_present
 
     body = writer.posted[0][1]
     assert "RESOLVED: F1, F2" in body
@@ -439,7 +439,7 @@ def test_case_4_all_resolved_with_fresh_minor_findings_preserves_them():
 
     assert result.outcome is ReReviewOutcome.RE_REVIEW_VALID
     assert result.rereview.count(Severity.MINOR) == 1
-    assert not result.rereview.major_findings_remain
+    assert not result.rereview.fresh_major_findings_present
     assert "R2.F1" in writer.posted[0][1]
 
 
@@ -456,7 +456,7 @@ def test_a_fresh_blocking_finding_is_recorded_as_evidence_not_acted_on():
     result, _, writer = _run(reviewer=reviewer)
 
     assert result.outcome is ReReviewOutcome.RE_REVIEW_VALID
-    assert result.rereview.blocking_findings_remain
+    assert result.rereview.fresh_blocking_findings_present
     assert len(writer.posted) == 1
 
 

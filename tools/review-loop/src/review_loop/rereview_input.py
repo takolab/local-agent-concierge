@@ -18,14 +18,22 @@ What the pairing can and cannot establish is worth stating plainly, because
 the difference is the honest limit of this stage:
 
 * It **can** establish that the pushed commit sits in this pull request, that
-  its parent is exactly the commit this review was written against, that
-  authoritative CI verified it against the current merge context, and that
-  the push wrote only the one ref it was authorised to.
+  its parent is exactly the commit this review was written against, that its
+  diff is exactly the candidate patch the fix turn validated, that the fix
+  turn was answering *this review's* finding set, that authoritative CI
+  verified it against the current merge context, and that the push wrote only
+  the one ref it was authorised to.
 * It **cannot** establish that the patch inside that commit actually
   addresses those findings. Nothing mechanical can. That is precisely the
   question the fresh Independent Re-Review is being run to answer, and
   pretending the handoff already answered it would make the re-review
   ceremonial.
+
+The finding-set link is not decoration. Two reviews of the same commit raise
+different findings against the same head, and every check that looks only at
+commit identity accepts either one paired with the same push -- so without it
+a re-review can record a fix for ``F1, F2`` as though it answered ``F3``.
+:func:`_check_provenance` is where that is refused.
 
 As with every other handoff here, the documents are operator-controlled
 input. Anyone who can write them can choose which review and which push are
@@ -40,6 +48,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 
+from .fix_handoff import DIGEST_PATTERN
 from .model import FULL_SHA_PATTERN
 from .push_response import BOUNDARY_CLEAN
 from .review_target import ReviewTarget
@@ -113,6 +122,15 @@ def _object(payload: dict, key: str, *, where: str) -> dict:
     if not isinstance(value, dict):
         raise ReReviewInputError(f"{where}'s {key!r} is not an object")
     return value
+
+
+def _digest(payload: dict, key: str, *, where: str) -> str:
+    if not isinstance(payload.get(key), str) or not DIGEST_PATTERN.match(payload[key]):
+        raise ReReviewInputError(
+            f"{where}: {key!r} must be a 64-character lowercase SHA-256 digest, "
+            f"got {payload.get(key)!r}"
+        )
+    return payload[key]
 
 
 def _true(payload: dict, key: str, *, where: str) -> None:
@@ -231,35 +249,139 @@ def _check_ci(payload: dict, *, pushed_sha: str, merge_base_sha: str) -> None:
         )
 
 
-def _check_commit(payload: dict, *, pushed_sha: str, reviewed_head_sha: str) -> None:
-    """Check the created commit, when this push document reports one.
+def _check_provenance(
+    payload: dict,
+    *,
+    pushed_sha: str,
+    reviewed_head_sha: str,
+    round_number: int,
+    finding_ids: tuple[str, ...],
+) -> None:
+    """Require the pushed fix to have been produced for *this* finding set.
 
-    A push that found the fix already on the branch reports no commit, and
-    that is a legitimate PUSH_READY. When there *is* one, its parent is the
-    tightest mechanical link this pipeline has between a fix and the review it
-    answers: the fix commit sits directly on the commit that was reviewed.
+    Repository, pull request, reviewed head and pushed head all lining up is
+    not enough, and the gap is easy to reach by accident. Two reviews of the
+    same commit -- a second round against a different merge context, or a
+    ``--dry-run`` review nobody recorded -- raise different findings against
+    the same head, and one fix was pushed for one of them:
+
+    ```text
+    Review A of H1: F1, F2      Review B of H1: F3
+    Push A: H1 -> H2
+    ```
+
+    Pairing ``review-B.json`` with ``push-A.json`` satisfies every check that
+    looks only at commit identity, and the re-review would then ask a fresh
+    reviewer to resolve ``F3`` against a commit produced to fix ``F1`` and
+    ``F2``. The commit under review would be correctly bound and the
+    *history* recorded about it would be false.
+
+    The push turn already knew better: it establishes, from git, that the
+    pushed commit's parent is the reviewed head and that its diff is exactly
+    the validated candidate patch -- on the path that created the commit
+    *and* on the path that found it already pushed. That evidence is carried
+    forward in ``fix_provenance`` and re-checked here against the review
+    document, so the two documents have to agree about which findings caused
+    this fix to exist.
+
+    What this is not: a signature. Both documents remain operator-controlled,
+    and someone who edits them can still make them agree -- the same limit
+    every handoff in this pipeline has, and the reason git and GitHub, not
+    the files, decide which commit is read. What it removes is the *silent*
+    mispairing, which is the one an operator hits without meaning to.
     """
-    commit = payload.get("commit")
-    if commit is None:
-        return
-    if not isinstance(commit, dict):
-        raise ReReviewInputError("the push input's 'commit' is not an object")
+    provenance = _object(payload, "fix_provenance", where="the push input")
 
-    sha = _sha(_require(commit, "sha", where="the push input's commit"), "sha",
-               where="the push input's commit")
-    if sha != pushed_sha:
+    if provenance.get("source_round") != round_number:
         raise ReReviewInputError(
-            f"the push input created commit {sha} but reports pushing {pushed_sha}"
+            f"the push input fixes findings from round "
+            f"{provenance.get('source_round')!r}, but the review it is paired with "
+            f"is round {round_number}"
+        )
+
+    source_head = _sha(
+        _require(provenance, "source_reviewed_head_sha", where="the push provenance"),
+        "source_reviewed_head_sha",
+        where="the push provenance",
+    )
+    if source_head != reviewed_head_sha:
+        raise ReReviewInputError(
+            f"the push input fixes a review of {source_head}, not of "
+            f"{reviewed_head_sha}"
+        )
+
+    raw_ids = _require(provenance, "source_finding_ids", where="the push provenance")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        raise ReReviewInputError(
+            "the push input's provenance lists no finding id, so nothing says which "
+            "review caused this fix"
+        )
+    if not all(isinstance(entry, str) for entry in raw_ids):
+        raise ReReviewInputError(
+            "the push input's provenance lists a finding id that is not a string"
+        )
+    fixed = tuple(entry.strip() for entry in raw_ids)
+    if len(set(fixed)) != len(fixed):
+        raise ReReviewInputError(
+            "the push input's provenance lists the same finding id more than once"
+        )
+    if set(fixed) != set(finding_ids):
+        missing = sorted(set(finding_ids) - set(fixed))
+        extra = sorted(set(fixed) - set(finding_ids))
+        raise ReReviewInputError(
+            "the push input fixes a different finding set than the review it is "
+            "paired with"
+            + (f"; not fixed: {', '.join(missing)}" if missing else "")
+            + (f"; fixed but not in this review: {', '.join(extra)}" if extra else "")
+        )
+
+    candidate_digest = _digest(
+        provenance, "source_patch_sha256", where="the push provenance"
+    )
+
+    # The git-established half. Present on both paths to PUSH_READY, so a run
+    # that found the fix already on the branch is checked exactly as strictly
+    # as one that created the commit.
+    fix_sha = _sha(
+        _require(provenance, "fix_sha", where="the push provenance"),
+        "fix_sha",
+        where="the push provenance",
+    )
+    if fix_sha != pushed_sha:
+        raise ReReviewInputError(
+            f"the push input's provenance describes {fix_sha}, not the pushed fix "
+            f"{pushed_sha}"
         )
     parent = _sha(
-        _require(commit, "parent_sha", where="the push input's commit"),
-        "parent_sha",
-        where="the push input's commit",
+        _require(provenance, "fix_parent_sha", where="the push provenance"),
+        "fix_parent_sha",
+        where="the push provenance",
     )
     if parent != reviewed_head_sha:
         raise ReReviewInputError(
             f"the fix commit's parent is {parent}, not the reviewed head "
             f"{reviewed_head_sha}; it is not a fix for this review"
+        )
+    fix_digest = _digest(provenance, "fix_patch_sha256", where="the push provenance")
+    if fix_digest != candidate_digest:
+        raise ReReviewInputError(
+            f"the pushed commit's diff hashes to {fix_digest}, not to the candidate "
+            f"patch {candidate_digest} the fix turn validated"
+        )
+
+    # The optional 'commit' block, when present, must agree with all of it.
+    # It reports the same commit from the same run; a document where the two
+    # disagree describes no single push.
+    commit = payload.get("commit")
+    if commit is None:
+        return
+    if not isinstance(commit, dict):
+        raise ReReviewInputError("the push input's 'commit' is not an object")
+    if commit.get("sha") != pushed_sha or commit.get("parent_sha") != parent:
+        raise ReReviewInputError(
+            f"the push input's 'commit' ({commit.get('sha')!r} on "
+            f"{commit.get('parent_sha')!r}) disagrees with its own provenance "
+            f"({pushed_sha} on {parent})"
         )
 
 
@@ -346,7 +468,13 @@ def load_request(
 
     target = _verified_target(payload, repo=repo, number=number, pushed_sha=pushed_sha)
     _check_ci(payload, pushed_sha=pushed_sha, merge_base_sha=target.ci_merge_base_sha)
-    _check_commit(payload, pushed_sha=pushed_sha, reviewed_head_sha=reviewed_head)
+    _check_provenance(
+        payload,
+        pushed_sha=pushed_sha,
+        reviewed_head_sha=reviewed_head,
+        round_number=verdict.round,
+        finding_ids=tuple(f.finding_id for f in verdict.open_findings),
+    )
 
     return ReReviewRequest(
         target=target,

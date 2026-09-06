@@ -162,16 +162,111 @@ def test_an_explicit_repo_that_matches_neither_document_is_refused():
 
 
 def test_a_fix_commit_whose_parent_is_not_the_reviewed_head_is_refused():
-    document = push_document(commit_parent=LATER_SHA)
+    document = push_document(fix_parent_sha=LATER_SHA, commit_parent=LATER_SHA)
     with pytest.raises(ReReviewInputError, match="not a fix for this review"):
         _load(push=document)
 
 
-def test_a_commit_that_is_not_the_commit_reported_as_pushed_is_refused():
+def test_a_commit_block_disagreeing_with_the_provenance_is_refused():
     document = json.loads(push_document())
     document["commit"]["sha"] = LATER_SHA
-    with pytest.raises(ReReviewInputError, match="but reports pushing"):
+    with pytest.raises(ReReviewInputError, match="disagrees with its own provenance"):
         _load(push=json.dumps(document))
+
+
+def test_a_commit_parent_disagreeing_with_the_provenance_is_refused():
+    with pytest.raises(ReReviewInputError, match="disagrees with its own provenance"):
+        _load(push=push_document(commit_parent=LATER_SHA))
+
+
+# --- provenance: which review caused this fix -----------------------------
+
+
+def test_the_pushed_fixs_provenance_is_required():
+    # A push document from a build that does not report it cannot be paired:
+    # nothing in it says which review caused the fix to exist.
+    with pytest.raises(ReReviewInputError, match="fix_provenance"):
+        _load(push=push_document(include_provenance=False))
+
+
+def test_the_parent_check_survives_a_push_that_created_no_commit():
+    # The regression this exists for: PUSH_READY with commit == null used to
+    # skip the parent check entirely, even though that path establishes it.
+    document = push_document(include_commit=False, fix_parent_sha=LATER_SHA)
+    with pytest.raises(ReReviewInputError, match="not a fix for this review"):
+        _load(push=document)
+
+
+def test_an_already_pushed_fix_still_binds_to_this_reviews_findings():
+    document = push_document(include_commit=False, source_finding_ids=("F9",))
+    with pytest.raises(ReReviewInputError, match="different finding set"):
+        _load(push=document)
+
+
+def test_a_push_that_fixed_another_reviews_findings_is_refused():
+    # Review A of H1 raises F1 and F2; review B of H1 raises F3. Pairing
+    # review B with the push of A's fix lines up on repo, PR, reviewed head
+    # and pushed head -- and is still the wrong pairing.
+    review_b = review_document(
+        findings=(
+            {
+                "finding_id": "F3",
+                "severity": "Minor",
+                "location": "README.md",
+                "problem": "A different problem entirely.",
+                "evidence": "The file says so.",
+                "required_outcome": "It stops saying so.",
+                "scope_boundary": None,
+            },
+        )
+    )
+    with pytest.raises(ReReviewInputError, match="not fixed: F3"):
+        _load(review=review_b, push=push_document())
+
+
+def test_a_push_fixing_only_some_of_this_reviews_findings_is_refused():
+    with pytest.raises(ReReviewInputError, match="not fixed: F2"):
+        _load(push=push_document(source_finding_ids=("F1",)))
+
+
+def test_a_push_fixing_a_finding_this_review_never_raised_is_refused():
+    with pytest.raises(ReReviewInputError, match="fixed but not in this review: F9"):
+        _load(push=push_document(source_finding_ids=("F1", "F2", "F9")))
+
+
+def test_a_provenance_listing_no_finding_id_is_refused():
+    with pytest.raises(ReReviewInputError, match="lists no finding id"):
+        _load(push=push_document(source_finding_ids=()))
+
+
+def test_a_provenance_repeating_a_finding_id_is_refused():
+    with pytest.raises(ReReviewInputError, match="more than once"):
+        _load(push=push_document(source_finding_ids=("F1", "F2", "F2")))
+
+
+def test_a_provenance_for_another_round_is_refused():
+    with pytest.raises(ReReviewInputError, match="round"):
+        _load(push=push_document(source_round=2))
+
+
+def test_a_provenance_naming_another_reviewed_head_is_refused():
+    with pytest.raises(ReReviewInputError, match="fixes a review of"):
+        _load(push=push_document(source_head_sha=LATER_SHA))
+
+
+def test_a_provenance_describing_another_commit_is_refused():
+    with pytest.raises(ReReviewInputError, match="not the pushed fix"):
+        _load(push=push_document(fix_sha=LATER_SHA))
+
+
+def test_a_pushed_commit_whose_diff_is_not_the_candidate_patch_is_refused():
+    with pytest.raises(ReReviewInputError, match="not to the candidate patch"):
+        _load(push=push_document(fix_patch_sha256="c" * 64))
+
+
+def test_a_malformed_patch_digest_is_refused():
+    with pytest.raises(ReReviewInputError, match="SHA-256 digest"):
+        _load(push=push_document(source_patch_sha256="not-a-digest"))
 
 
 # --- the CI evidence the push recorded -------------------------------------
@@ -220,3 +315,105 @@ def test_a_push_document_that_is_not_json_is_refused():
 def test_a_push_document_that_is_not_an_object_is_refused():
     with pytest.raises(ReReviewInputError, match="not a JSON object"):
         _load(push="[1, 2, 3]")
+
+
+# --- the real document, not a fixture's idea of one -----------------------
+
+
+def test_a_real_push_document_pairs_with_its_own_review(tmp_path):
+    """End to end against the document `review-loop push` actually emits.
+
+    Every other test here builds the push JSON from a helper, which proves
+    the pairing rules and nothing about whether the previous stage emits what
+    they require. This runs the real push turn over real git and feeds its
+    real `--json` output straight into the pairing -- so a field the push
+    stage stops emitting, or renames, fails here rather than in production.
+    """
+    import io
+    import json as _json
+
+    from conftest import build_scenario
+    from push_fakes import PushGitHubClient, Timeline, fix_json, git
+    from review_loop.push_cli import push_main
+    from review_loop.reviewer_workspace import PreparedWorkspace
+
+    def edits(worktree):
+        (worktree / "pkg" / "code.py").write_text("value = 2\n")
+
+    live = build_scenario(tmp_path, edits)
+    fix_path = tmp_path / "fix.json"
+    fix_path.write_text(
+        fix_json(
+            head_sha=live.head_sha,
+            changed_paths=live.changed_paths,
+            patch_sha256=live.patch_sha256,
+            patch_bytes=live.patch_bytes,
+            patch_path=live.patch_path,
+            number=live.number,
+            finding_ids=("F1", "F2"),
+        )
+    )
+
+    timeline = Timeline()
+    client = PushGitHubClient(
+        number=live.number, head_sha=live.head_sha, branch=live.branch
+    )
+
+    def observe_ci():
+        pushed = live.remote_tip()
+        client.head_sha = pushed
+        client.ci[pushed] = "success"
+
+    timeline.steps[1] = observe_ci
+
+    out = io.StringIO()
+    code = push_main(
+        [
+            "--fix-json", str(fix_path),
+            "--repo-root", str(live.clone),
+            "--json",
+        ],
+        client=client,
+        workspace=PreparedWorkspace(
+            str(live.clone), live.number, remote="origin", role="fix commit"
+        ),
+        stream=out,
+        clock=timeline.clock,
+        sleep=timeline.sleep,
+    )
+    push_json = out.getvalue()
+    assert code == 0, push_json
+    assert _json.loads(push_json)["outcome"] == "PUSH_READY"
+
+    pushed = live.remote_tip()
+    review = review_document(
+        head_sha=live.head_sha,
+        number=live.number,
+        findings=(
+            {
+                "finding_id": "F1",
+                "severity": "Major",
+                "location": "pkg/code.py",
+                "problem": "The value is wrong.",
+                "evidence": "It is 1 and should be 2.",
+                "required_outcome": "It is 2.",
+                "scope_boundary": None,
+            },
+            {
+                "finding_id": "F2",
+                "severity": "Minor",
+                "location": "pkg/code.py",
+                "problem": "And it is undocumented.",
+                "evidence": "No comment explains it.",
+                "required_outcome": "It is explained.",
+                "scope_boundary": None,
+            },
+        ),
+    )
+
+    request = load_request(review, push_json)
+
+    assert request.pushed_fix_sha == pushed
+    assert request.original_head_sha == live.head_sha
+    assert request.original_finding_ids == ("F1", "F2")
+    assert git(live.clone, "rev-list", "--count", f"{live.head_sha}..{pushed}") == "1"

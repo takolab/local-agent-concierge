@@ -420,11 +420,18 @@ def render_json(result: ReReviewResult, stream: TextIO) -> None:
                 }
                 for f in rereview.fresh_findings
             ],
+            # Every severity key here is fresh-only, and says so in its name.
+            # A key called '*_findings_remain' would read across both
+            # collections while counting one of them, which is the combined
+            # status this contract refuses -- and would report `false` for a
+            # pull request with an UNRESOLVED original Major finding.
+            # 'unresolved_finding_ids' above is the other half; a consumer
+            # that wants "is anything outstanding?" reads both.
             "fresh_blocking": rereview.count(Severity.BLOCKING),
             "fresh_major": rereview.count(Severity.MAJOR),
             "fresh_minor": rereview.count(Severity.MINOR),
-            "blocking_findings_remain": rereview.blocking_findings_remain,
-            "major_findings_remain": rereview.major_findings_remain,
+            "fresh_blocking_findings_present": rereview.fresh_blocking_findings_present,
+            "fresh_major_findings_present": rereview.fresh_major_findings_present,
         },
         "comment_body": result.comment_body,
     }

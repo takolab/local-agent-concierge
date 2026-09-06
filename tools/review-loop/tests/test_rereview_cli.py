@@ -225,11 +225,44 @@ def test_the_json_report_carries_resolutions_and_fresh_findings_separately(tmp_p
     assert rereview["unresolved_finding_ids"] == ["F2"]
     assert [f["finding_id"] for f in rereview["fresh_findings"]] == ["R2.F1"]
     assert rereview["fresh_major"] == 1
-    assert rereview["major_findings_remain"] is True
-    assert rereview["blocking_findings_remain"] is False
+    assert rereview["fresh_major_findings_present"] is True
+    assert rereview["fresh_blocking_findings_present"] is False
     # No combined status anywhere: the two collections are the answer.
     assert "resolved" not in payload
     assert "merge_ready" not in payload
+    # And no key whose name reads across both collections while counting one.
+    assert not [key for key in rereview if key.endswith("_findings_remain")]
+
+
+def test_an_unresolved_original_major_is_not_reported_as_no_major_finding(tmp_path):
+    """The regression the fresh-only booleans are named for.
+
+    An original Major finding is unresolved and this turn raised nothing new.
+    Every severity key here counts fresh findings, so they are all zero --
+    which is only safe to publish because each one says `fresh` in its name
+    and `unresolved_finding_ids` carries the other half.
+    """
+    reviewer = FakeReviewer(
+        ReviewerRun(
+            stdout=rereview_text(
+                recommendation="changes_requested",
+                resolutions=(
+                    resolution_block(
+                        "F1", "UNRESOLVED", evidence="still returns 200",
+                        reason="the handler was not touched",
+                    ),
+                    resolution_block("F2"),
+                ),
+            )
+        )
+    )
+    _, text, _ = _invoke(tmp_path, "--json", reviewer=reviewer)
+    rereview = json.loads(text)["rereview"]
+
+    assert rereview["unresolved_finding_ids"] == ["F1"]
+    assert rereview["fresh_major"] == 0
+    assert rereview["fresh_major_findings_present"] is False
+    assert "major_findings_remain" not in rereview
 
 
 def test_a_dry_run_writes_nothing_and_prints_the_comment(tmp_path):

@@ -222,9 +222,11 @@ def fix_json(
 ) -> str:
     """A ``review-loop fix --json`` document, in its real shape."""
     if responses is None:
+        # One response per routed finding, as a real fix turn produces: the
+        # handoff's finding ids come from the responses, not from the request.
         responses = [
             {
-                "finding_id": finding_ids[0],
+                "finding_id": fid,
                 "target_head_sha": head_sha,
                 "outcome": "fixed",
                 "files_changed": list(changed_paths),
@@ -233,6 +235,7 @@ def fix_json(
                 "reason": None,
                 "scope_notes": None,
             }
+            for fid in finding_ids
         ]
     return json.dumps(
         {

@@ -139,6 +139,17 @@ def test_the_json_result_states_what_changed(tmp_path, live):
     assert payload["ci"]["bound_to_pushed_commit"] is True
     assert payload["verified_target"]["head_sha"] == payload["pushed_sha"]
 
+    # The provenance the re-review stage pairs against. Both halves: which
+    # review caused this fix, and what git said the fix is.
+    provenance = payload["fix_provenance"]
+    assert provenance["source_round"] == 1
+    assert provenance["source_reviewed_head_sha"] == live.head_sha
+    assert provenance["source_finding_ids"] == ["F1"]
+    assert provenance["source_patch_sha256"] == live.patch_sha256
+    assert provenance["fix_sha"] == payload["pushed_sha"]
+    assert provenance["fix_parent_sha"] == live.head_sha
+    assert provenance["fix_patch_sha256"] == live.patch_sha256
+
 
 def test_a_refusal_says_plainly_that_nothing_was_written(tmp_path, live):
     client = PushGitHubClient(

@@ -107,3 +107,10 @@ def test_the_prompt_carries_the_response_delimiters_and_the_ci_evidence():
 
 def test_the_prompt_warns_against_diffing_the_ci_merge_base_directly():
     assert f"Do not diff {BASE_TIP} against {PUSHED_SHA} directly" in _prompt()
+
+
+def test_the_prompt_states_the_escalation_reason_rule_the_validator_enforces():
+    prompt = _prompt()
+
+    assert "`Escalation reason` may appear **only** when the recommendation is" in prompt
+    assert "approves or requests changes while carrying" in prompt

@@ -24,6 +24,10 @@ LATER_SHA = "9f8e7d6c5b4a39281706f5e4d3c2b1a0f9e8d7c6"
 PR = 27
 BASE_REF = "master"
 
+#: The candidate patch digest the fix turn validated, as the push turn
+#: reports it on both the created-commit and already-pushed paths.
+CANDIDATE_DIGEST = "b" * 64
+
 #: The round-1 findings every re-review test re-evaluates unless it says
 #: otherwise. Two of them, so "one resolved, one not" is expressible.
 DEFAULT_FINDINGS = (
@@ -103,6 +107,14 @@ def push_document(
     commit_parent: str | None = None,
     include_verified_target: bool = True,
     verified_head_sha: str | None = None,
+    include_provenance: bool = True,
+    source_round: int = 1,
+    source_finding_ids: tuple[str, ...] = ("F1", "F2"),
+    source_head_sha: str | None = None,
+    source_patch_sha256: str = CANDIDATE_DIGEST,
+    fix_patch_sha256: str | None = None,
+    fix_sha: str | None = None,
+    fix_parent_sha: str | None = None,
 ) -> str:
     """A ``review-loop push --json`` document."""
     payload = {
@@ -132,12 +144,28 @@ def push_document(
             "reasons": [],
         },
     }
+    if include_provenance:
+        payload["fix_provenance"] = {
+            "source_round": source_round,
+            "source_reviewed_head_sha": reviewed_sha
+            if source_head_sha is None
+            else source_head_sha,
+            "source_finding_ids": list(source_finding_ids),
+            "source_patch_sha256": source_patch_sha256,
+            "fix_sha": pushed_sha if fix_sha is None else fix_sha,
+            "fix_parent_sha": reviewed_sha
+            if fix_parent_sha is None
+            else fix_parent_sha,
+            "fix_patch_sha256": source_patch_sha256
+            if fix_patch_sha256 is None
+            else fix_patch_sha256,
+        }
     if include_commit:
         payload["commit"] = {
             "sha": pushed_sha,
             "parent_sha": reviewed_sha if commit_parent is None else commit_parent,
             "tree_sha": "1111111111111111111111111111111111111111",
-            "patch_sha256": "a" * 64,
+            "patch_sha256": CANDIDATE_DIGEST,
             "changed_paths": ["pkg/code.py"],
         }
     if include_verified_target:

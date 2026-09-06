@@ -75,6 +75,12 @@ class FixHandoff:
     #: digest decides whether a file is the candidate patch, not its name.
     patch_path: str | None
     finding_ids: tuple[str, ...]
+    #: The review round these findings belong to. Pinned to
+    #: :data:`review_loop.verdict.SUPPORTED_ROUND` by the check below, and
+    #: carried explicitly rather than assumed so that the push turn can
+    #: report *which review* caused this fix as a read fact rather than as a
+    #: constant a later reader has to trust.
+    round: int = SUPPORTED_ROUND
 
 
 def _require(payload: dict, key: str, *, where: str):
@@ -330,9 +336,10 @@ def load_handoff(document: str, *, expected_repo: str | None = None) -> FixHando
     request = payload.get("request")
     if not isinstance(request, dict):
         raise FixHandoffError("the push input's 'request' is not an object")
-    if request.get("round") != SUPPORTED_ROUND:
+    round_number = request.get("round")
+    if round_number != SUPPORTED_ROUND:
         raise FixHandoffError(
-            f"the push input reports round {request.get('round')!r}; this runner "
+            f"the push input reports round {round_number!r}; this runner "
             f"pushes only the initial round (round {SUPPORTED_ROUND})"
         )
 
@@ -357,4 +364,5 @@ def load_handoff(document: str, *, expected_repo: str | None = None) -> FixHando
         patch_bytes=size,
         patch_path=patch_path or None,
         finding_ids=finding_ids,
+        round=round_number,
     )

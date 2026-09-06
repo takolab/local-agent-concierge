@@ -213,11 +213,22 @@ class ReReview:
         )
 
     @property
-    def blocking_findings_remain(self) -> bool:
-        """Whether this turn raised a fresh Blocking finding."""
+    def fresh_blocking_findings_present(self) -> bool:
+        """Whether this turn raised a fresh Blocking finding.
+
+        Named for its scope rather than for a state. An earlier spelling --
+        ``blocking_findings_remain`` -- described the same fresh-only count
+        with a word that reads across both collections, so a consumer seeing
+        ``false`` beside an UNRESOLVED original Blocking finding would have
+        drawn exactly the wrong conclusion. There is deliberately no property
+        that combines the two: an unresolved original keeps the severity
+        round 1 gave it, that severity belongs to the round-1 record, and
+        anything summing them would be the single status this contract exists
+        to refuse.
+        """
         return self.count(Severity.BLOCKING) > 0
 
     @property
-    def major_findings_remain(self) -> bool:
-        """Whether this turn raised a fresh Major finding."""
+    def fresh_major_findings_present(self) -> bool:
+        """Whether this turn raised a fresh Major finding. See above."""
         return self.count(Severity.MAJOR) > 0

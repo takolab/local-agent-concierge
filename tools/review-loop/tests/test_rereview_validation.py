@@ -195,7 +195,7 @@ def test_zero_fresh_findings_is_a_valid_answer():
 
     assert rereview.fresh_findings == ()
     assert rereview.count(Severity.MAJOR) == 0
-    assert not rereview.blocking_findings_remain
+    assert not rereview.fresh_blocking_findings_present
 
 
 @pytest.mark.parametrize(
@@ -300,7 +300,7 @@ def test_a_resolved_original_and_a_fresh_major_are_both_preserved():
     ]
     assert rereview.unresolved_finding_ids == ()
     assert [f.finding_id for f in rereview.fresh_findings] == ["R2.F1"]
-    assert rereview.major_findings_remain
+    assert rereview.fresh_major_findings_present
 
 
 def test_an_unresolved_original_with_no_fresh_finding_invents_nothing():
@@ -317,7 +317,7 @@ def test_an_unresolved_original_with_no_fresh_finding_invents_nothing():
 
     assert rereview.unresolved_finding_ids == ("F1",)
     assert rereview.fresh_findings == ()
-    assert not rereview.major_findings_remain
+    assert not rereview.fresh_major_findings_present
 
 
 def test_fresh_severity_counts_never_include_unresolved_originals():
@@ -391,6 +391,38 @@ def test_an_escalated_resolution_requires_escalate():
 def test_escalate_with_nothing_to_escalate_is_refused():
     with pytest.raises(ReReviewValidationError, match="what is being escalated"):
         _validate(_resolved_both(recommendation="escalate"))
+
+
+@pytest.mark.parametrize("recommendation", ["approved", "changes_requested"])
+def test_an_escalation_reason_without_escalating_is_refused(recommendation):
+    # The prompt says the field is for escalating and says the rules are
+    # enforced mechanically. A document claiming both "nothing needs doing"
+    # and "a human is being asked something" contradicts itself, and would
+    # otherwise become a durable comment saying both.
+    text = rereview_text(
+        recommendation=recommendation,
+        resolutions=(
+            resolution_block("F1"),
+            resolution_block(
+                "F2", "UNRESOLVED", evidence="unchanged", reason="untouched"
+            )
+            if recommendation == "changes_requested"
+            else resolution_block("F2"),
+        ),
+        escalation_reason="the pull request was rewritten under me",
+    )
+    with pytest.raises(ReReviewValidationError, match="Escalation reason"):
+        _validate(text)
+
+
+def test_an_empty_escalation_reason_is_not_treated_as_one():
+    # Only a non-empty reason is a reason; a blank line is the field's absence.
+    text = _resolved_both().replace(
+        "Recommendation: approved", "Recommendation: approved\nEscalation reason:   "
+    )
+    rereview = _validate(text)
+
+    assert rereview.escalation_reason is None
 
 
 def test_escalate_with_a_reason_alone_is_accepted():

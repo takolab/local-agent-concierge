@@ -174,6 +174,9 @@ Format rules, all enforced mechanically:
 * `Evidence` is required everywhere it appears. `Escalation reason`,
   `Scope boundary`, and `Reason` on a RESOLVED finding are the only optional
   fields.
+* `Escalation reason` may appear **only** when the recommendation is
+  `escalate`. A re-review that approves or requests changes while carrying
+  one is discarded.
 
 A re-review that breaks any of these rules is discarded in full. Nothing you
 write outside the block is recorded anywhere.

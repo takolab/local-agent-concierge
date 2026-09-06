@@ -26,6 +26,10 @@ Four rules carry the weight:
   therefore the one place they could be wrongly collapsed -- so the coherence
   rules name which fact each requirement comes from, and the collections
   themselves stay untouched.
+* **Every field the prompt says is conditional is enforced as conditional.**
+  ``Escalation reason`` is for escalating; a re-review that recommends
+  ``approved`` and carries one is a document that contradicts itself, and
+  accepting it would put that contradiction in a durable comment.
 """
 
 from __future__ import annotations
@@ -220,6 +224,19 @@ def _validate_recommendation(
             "the re-review recommends 'escalate' but gives no ESCALATE resolution, no "
             "fresh Blocking finding and no 'Escalation reason', so what is being "
             "escalated is unstated"
+        )
+    if recommendation is not Recommendation.ESCALATE and escalation_reason:
+        # The prompt says 'Escalation reason' is for escalating, and says the
+        # format rules are enforced mechanically. Without this they were not:
+        # an 'approved' re-review carrying an escalation reason parsed, passed,
+        # and became a durable comment stating both that nothing needs doing
+        # and that something is being escalated. A contract the validator does
+        # not enforce is a claim in a prompt, not a rule.
+        raise ReReviewValidationError(
+            f"the re-review recommends {recommendation.value!r} but gives an "
+            "'Escalation reason'; that field states what a human is being asked, "
+            "and nothing is being asked of one unless the recommendation is "
+            f"{Recommendation.ESCALATE.value!r}"
         )
 
 
