@@ -182,7 +182,10 @@ def test_an_already_pushed_fix_is_reported_as_an_earlier_runs_write(tmp_path, li
     )
 
     assert code == 0
-    assert "was already on the branch" in out
+    # Stated as a fact about the branch, not as an attribution: this runner
+    # cannot tell its own earlier run from another actor.
+    assert "the branch already held this exact fix" in out
+    assert "this run did not move the ref" in out
     assert "Fix commit:           (none created)" in out
 
 
@@ -331,9 +334,16 @@ def test_no_push_module_names_a_write_http_method(name):
     assert not any("api.github.com" in literal for literal in literals)
 
 
+#: The one force-shaped flag this slice is allowed to build, and only as the
+#: prefix of a value naming the derived ref and an exact 40-character commit.
+#: It is a compare-and-swap condition, not an authorisation to rewrite: the
+#: commit's parent is already proven to be the leased value.
+LEASE_PREFIX = "--force-with-lease="
+
+
 @pytest.mark.parametrize("name", PUSH_MODULES)
 def test_no_push_module_can_force_a_push_or_write_a_tag(name):
-    """The blast radius, pinned: no force flag and no tag ref, anywhere."""
+    """The blast radius, pinned: one exact CAS form, and nothing else."""
     literals = {
         node.value
         for node in ast.walk(ast.parse(_module_path(name).read_text()))
@@ -344,10 +354,63 @@ def test_no_push_module_can_force_a_push_or_write_a_tag(name):
         for literal in literals
         if literal.startswith("-") or literal.startswith("refs/") or ":" in literal
     }
+    forceish = {literal for literal in argv_like if literal.startswith("--force")}
 
-    assert not any(literal.startswith("--force") for literal in argv_like)
+    # `--force`, and a bare `--force-with-lease` -- which leases against the
+    # local remote-tracking ref, i.e. against whatever this clone last
+    # fetched -- are both absent. Only the assignment form may appear.
+    assert forceish <= {LEASE_PREFIX}
+    assert "--force" not in argv_like
+    assert "--force-with-lease" not in argv_like
     assert not any("refs/tags" in literal for literal in argv_like)
     assert not any(literal.startswith("+") for literal in argv_like)
+
+
+def test_only_push_branch_may_build_the_lease():
+    """One module *constructs* it; others may only describe it.
+
+    The distinction is the point, so it is read from the syntax rather than
+    from the text: a lease is built by interpolating into an f-string, which
+    is what `push_branch` does and what nothing else may do. Help text and
+    documentation that merely name the flag are not construction.
+    """
+    builders = set()
+    for name in PUSH_MODULES:
+        tree = ast.parse(_module_path(name).read_text())
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.JoinedStr):
+                continue
+            for part in node.values:
+                if (
+                    isinstance(part, ast.Constant)
+                    and isinstance(part.value, str)
+                    and part.value.startswith(LEASE_PREFIX)
+                ):
+                    builders.add(name)
+
+    assert builders == {"push_branch"}
+
+
+def test_the_lease_names_the_derived_ref_and_an_exact_commit():
+    """The value, not just the flag: a CAS on one ref at one exact old value."""
+    import re
+
+    from fakes import FULL_SHA, REPO, pull_request_payload
+    from review_loop.push_branch import BranchAuthorityError, resolve
+
+    target = resolve(
+        pull_request_payload(number=27, head_ref="feat/example"), repo=REPO, number=27
+    )
+
+    lease = target.lease(FULL_SHA)
+
+    assert lease == f"--force-with-lease=refs/heads/feat/example:{FULL_SHA}"
+    assert re.fullmatch(r"--force-with-lease=refs/heads/[^:]+:[0-9a-f]{40}", lease)
+    # It cannot be built for anything but an exact commit, so it can never
+    # degrade into the unqualified form.
+    for bad in ("", "HEAD", "abc1234", FULL_SHA.upper(), FULL_SHA + "a"):
+        with pytest.raises(BranchAuthorityError):
+            target.lease(bad)
 
 
 def test_the_git_subcommands_the_push_path_runs_are_exactly_these():

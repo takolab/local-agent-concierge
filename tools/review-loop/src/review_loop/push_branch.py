@@ -135,6 +135,39 @@ class PushTarget:
             )
         return f"{sha}:{self.ref}"
 
+    def lease(self, expected_sha: str) -> str:
+        """The compare-and-swap condition: update this ref *iff* it is still X.
+
+        Reading ``--force-with-lease`` as "force" would be exactly backwards
+        here. Nothing about this authorises a history rewrite -- the runner
+        has already proven the commit's parent is the reviewed head, so the
+        update it is asking for is an ordinary fast-forward. What the lease
+        adds is **atomicity**, which a plain push does not have:
+
+            read the branch -> it is H
+            ... another actor moves or deletes it ...
+            push -> succeeds anyway
+
+        Both halves of that window are real. A branch deleted in between is
+        *recreated* by a plain push, contradicting the promise that this
+        runner never creates a branch. A branch rewound to an ancestor in
+        between accepts the push, because ancestor-to-child is still a
+        fast-forward -- so the ref moves from a state nobody authorised a fix
+        against.
+
+        The expected value is pinned explicitly rather than left to the
+        remote-tracking ref, which is what an unqualified
+        ``--force-with-lease`` would consult: that ref is a local cache, and a
+        lease against a cache is a lease against whatever this clone last
+        happened to fetch.
+        """
+        if not FULL_SHA_PATTERN.match(expected_sha):
+            raise BranchAuthorityError(
+                f"refusing to build a lease for {expected_sha!r}, which is not an "
+                "exact 40-character commit"
+            )
+        return f"--force-with-lease={self.ref}:{expected_sha}"
+
 
 def check_branch_name(name: object) -> str:
     """Return ``name`` if it is an ordinary, unambiguous branch name."""

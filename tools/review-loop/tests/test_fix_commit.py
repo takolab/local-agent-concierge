@@ -11,6 +11,7 @@ exist.
 from __future__ import annotations
 
 import os
+import re
 
 import pytest
 
@@ -40,6 +41,11 @@ def worktree(tmp_path, scenario):
     git(scenario.clone, "worktree", "add", "--detach", "--quiet", str(path), scenario.head_sha)
     yield str(path)
     git(scenario.clone, "worktree", "remove", "--force", str(path), check=False)
+
+
+def lease_for(scenario):
+    """The compare-and-swap condition every push in these tests carries."""
+    return f"--force-with-lease=refs/heads/{scenario.branch}:{scenario.head_sha}"
 
 
 def commit_the_patch(worktree, scenario):
@@ -322,6 +328,7 @@ def test_the_pushed_ref_reads_back_as_the_created_commit(worktree, scenario):
         worktree,
         remote="origin",
         refspec=f"{commit.sha}:refs/heads/{scenario.branch}",
+        lease=lease_for(scenario),
     )
 
     assert (
@@ -343,6 +350,7 @@ def test_a_push_the_remote_rejects_leaves_the_branch_where_it_was(worktree, scen
             worktree,
             remote="origin",
             refspec=f"{commit.sha}:refs/heads/{scenario.branch}",
+            lease=lease_for(scenario),
         )
 
     assert scenario.remote_tip() == theirs
@@ -362,11 +370,29 @@ def test_the_push_argument_vector_carries_no_force_and_no_tag(monkeypatch, scena
         return GitResult(returncode=0, stdout=f"To x\n\t{refspec}\told..new\nDone\n", stderr="")
 
     monkeypatch.setattr(fix_commit, "run_git_capture", record)
-    push_fix_commit(str(scenario.clone), remote="origin", refspec=refspec)
+    push_fix_commit(
+        str(scenario.clone),
+        remote="origin",
+        refspec=refspec,
+        lease=lease_for(scenario),
+    )
 
     argv = seen["argv"]
-    assert argv == ["push", "--porcelain", "--", "origin", refspec]
-    assert not any(word.startswith("--force") for word in argv)
+    assert argv == [
+        "push",
+        "--porcelain",
+        lease_for(scenario),
+        "--",
+        "origin",
+        refspec,
+    ]
+    # The lease is a compare-and-swap on an exact old value, never a bare
+    # force: it names the derived ref and the exact reviewed head.
+    assert re.fullmatch(
+        r"--force-with-lease=refs/heads/[^:]+:[0-9a-f]{40}", lease_for(scenario)
+    )
+    assert "--force" not in argv
+    assert "--force-with-lease" not in argv
     assert not any(word.startswith("+") for word in argv)
     assert not any("refs/tags" in word for word in argv)
 
@@ -395,7 +421,10 @@ def test_an_unreachable_remote_is_an_error_not_an_absent_branch(tmp_path, scenar
 def test_a_pushed_fix_is_identified_by_its_parent_and_its_diff(worktree, scenario):
     commit = commit_the_patch(worktree, scenario)
     push_fix_commit(
-        worktree, remote="origin", refspec=f"{commit.sha}:refs/heads/{scenario.branch}"
+        worktree,
+        remote="origin",
+        refspec=f"{commit.sha}:refs/heads/{scenario.branch}",
+        lease=lease_for(scenario),
     )
 
     parent, digest = describe_remote_commit(
@@ -458,7 +487,10 @@ def test_the_same_change_hashes_the_same_in_a_second_repository(tmp_path, scenar
     """The push turn's repository is not the fix turn's, and must agree with it."""
     commit = commit_the_patch(worktree, scenario)
     push_fix_commit(
-        worktree, remote="origin", refspec=f"{commit.sha}:refs/heads/{scenario.branch}"
+        worktree,
+        remote="origin",
+        refspec=f"{commit.sha}:refs/heads/{scenario.branch}",
+        lease=lease_for(scenario),
     )
 
     second = tmp_path / "second-clone"
@@ -563,7 +595,7 @@ def test_the_pinned_settings_are_the_ones_the_module_claims(worktree, scenario):
         ("To /x\n!\tSPEC\t[remote rejected] (pre-receive hook)\nDone\n", "rejected"),
         ("To /x\n\tSPEC\tabc..def\nDone\n", "accepted"),
         ("To /x\n*\tSPEC\t[new branch]\nDone\n", "accepted"),
-        ("To /x\n=\tSPEC\t[up to date]\nDone\n", "accepted"),
+        ("To /x\n=\tSPEC\t[up to date]\nDone\n", "up_to_date"),
         # No line for our ref at all: a local hook refusal and a lost response
         # look exactly like this, and they are not the same fact.
         ("", "silent"),
@@ -591,6 +623,7 @@ def test_a_real_rejected_push_carries_the_remotes_answer(worktree, scenario):
             worktree,
             remote="origin",
             refspec=f"{commit.sha}:refs/heads/{scenario.branch}",
+            lease=lease_for(scenario),
         )
 
     assert error.value.report == REMOTE_REJECTED
@@ -602,7 +635,10 @@ def test_a_real_accepted_push_carries_the_remotes_answer(worktree, scenario):
     commit = commit_the_patch(worktree, scenario)
 
     report = push_fix_commit(
-        worktree, remote="origin", refspec=f"{commit.sha}:refs/heads/{scenario.branch}"
+        worktree,
+        remote="origin",
+        refspec=f"{commit.sha}:refs/heads/{scenario.branch}",
+        lease=lease_for(scenario),
     )
 
     assert report == REMOTE_ACCEPTED

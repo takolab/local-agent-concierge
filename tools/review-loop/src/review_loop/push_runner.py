@@ -58,6 +58,8 @@ from typing import Callable
 from .fix_commit import (
     REMOTE_ACCEPTED,
     REMOTE_REJECTED,
+    REMOTE_SILENT,
+    REMOTE_UP_TO_DATE,
     CandidatePatchError,
     CommitRefused,
     FixCommit,
@@ -89,7 +91,7 @@ from .push_response import (
     PushOutcome,
 )
 from .review_target import ReviewTarget, TargetNotVerified, from_evaluation
-from .reviewer_workspace import DEFAULT_REMOTE, WorkspaceError
+from .reviewer_workspace import DEFAULT_REMOTE, GitTimeoutError, WorkspaceError
 from .runner import verify_pull_request
 
 #: How many consecutive GitHub failures the CI wait tolerates before giving
@@ -596,6 +598,12 @@ def _commit_and_push(
             worktree,
             remote=git_remote,
             refspec=refspec,
+            # The read that authorised this write said the branch was at the
+            # reviewed head. The lease makes the write conditional on that
+            # still being true, closing the window in which the branch could
+            # be deleted (a plain push recreates it) or rewound to an ancestor
+            # (a plain push accepts it as a fast-forward).
+            lease=push_target.lease(target.head_sha),
             timeout=git_timeout,
         )
     except PushRefused as exc:
@@ -604,6 +612,21 @@ def _commit_and_push(
         # first of those can distinguish a rejection the remote sent from an
         # answer that never arrived.
         remote_said = exc.report
+    except GitTimeoutError as exc:
+        # Belt and braces. `push_fix_commit` already translates a timeout into
+        # a silent PushRefused, and this catches one raised anywhere else on
+        # the push path so that the rule holds at the boundary that matters
+        # rather than only at the layer that happens to implement it:
+        #
+        #   a failure *before* the push process starts may be a verified
+        #   no-write; a failure *after* it starts is unknown until remote
+        #   evidence proves otherwise.
+        #
+        # Without this the timeout escapes to the outer WorkspaceError handler
+        # and is reported as an invalid workspace -- a pre-write failure --
+        # discarding both the mutation and the record of the commit.
+        push_failure = str(exc)
+        remote_said = REMOTE_SILENT
 
     # Read the ref back from the remote either way. On the failure path this
     # is what distinguishes a rejected push from a lost response: a push whose
@@ -631,10 +654,31 @@ def _commit_and_push(
         )
 
     if observed == commit.sha:
+        # The branch holds the fix. Whether *this run* is what put it there is
+        # a separate question, and only the remote saying it applied our
+        # update answers it. `= [up to date]` means the ref already held this
+        # exact commit and the push moved nothing; a rejection or a missing
+        # answer alongside a matching ref means something else got there.
+        # Reporting any of those as "pushed by this run" would be a provenance
+        # claim the evidence does not support.
+        moved_the_ref = remote_said == REMOTE_ACCEPTED
+        if moved_the_ref:
+            attribution = (f"{git_remote} applied {refspec}",)
+        elif remote_said == REMOTE_UP_TO_DATE:
+            attribution = (
+                f"{git_remote} reports {push_target.ref} was already up to date: "
+                "the branch already held this exact fix, and this run did not move "
+                "the ref",
+            )
+        else:
+            attribution = (
+                f"{push_target.ref} holds {commit.sha}, but {git_remote} gave no "
+                "answer establishing that this run's push is what put it there",
+            )
         if push_failure is not None:
-            created = created + (
+            attribution = attribution + (
                 f"git push reported a failure ({push_failure}) but "
-                f"{push_target.ref} reads back as {commit.sha}, so the push landed",
+                f"{push_target.ref} reads back as {commit.sha}",
             )
         return _wait_for_ci(
             client=client,
@@ -642,10 +686,11 @@ def _commit_and_push(
             push_target=push_target,
             pushed_sha=commit.sha,
             commit=commit,
-            push_performed=True,
-            already_pushed=False,
+            push_performed=moved_the_ref,
+            already_pushed=not moved_the_ref,
             prior_reasons=created
-            + (f"{push_target.ref} reads back as {commit.sha}",),
+            + (f"{push_target.ref} reads back as {commit.sha}",)
+            + attribution,
             ci_timeout=ci_timeout,
             ci_poll_seconds=ci_poll_seconds,
             clock=clock,
@@ -704,7 +749,7 @@ def _commit_and_push(
             created
             + (
                 f"the push was refused: {push_failure}",
-                f"{remote_said_label(git_remote)} rejected {refspec}, so nothing "
+                f"{remote_said_label(git_remote)} rejected {refspec} outright, so nothing "
                 "this run created was written. The fix commit existed only in a "
                 "workspace this run removed",
                 f"{push_target.ref} reads back as {observed}"

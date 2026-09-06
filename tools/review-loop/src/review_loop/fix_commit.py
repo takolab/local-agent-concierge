@@ -42,6 +42,7 @@ from .model import FULL_SHA_PATTERN
 from .patch_identity import capture_patch, digest_bytes, patch_digest
 from .reviewer_workspace import (
     DEFAULT_GIT_TIMEOUT_SECONDS,
+    GitTimeoutError,
     WorkspaceError,
     run_git,
     run_git_capture,
@@ -52,9 +53,32 @@ from .reviewer_workspace import (
 #: Defined here rather than beside the push, because :class:`PushRefused`
 #: carries one as a default argument and a default is evaluated when the
 #: class body runs.
+#:
+#: The distinction that matters is not success versus failure but **proven
+#: versus unproven**. Only ``REMOTE_REJECTED`` establishes that nothing was
+#: written, so only recognised refusals may reach it; everything else that
+#: went wrong is ``REMOTE_UNKNOWN`` and stays unknown.
 REMOTE_ACCEPTED = "accepted"
+#: The ref already held this exact commit, so this push moved nothing. A
+#: separate value from ``accepted`` because "the branch holds the fix" and
+#: "this run put it there" are different claims.
+REMOTE_UP_TO_DATE = "up_to_date"
 REMOTE_REJECTED = "rejected"
+#: The remote answered about our ref and the answer does not establish
+#: anything -- a transient server-side failure, or a summary this runner does
+#: not recognise.
+REMOTE_UNKNOWN = "unknown"
+#: No per-ref line at all: a local hook refusal, a dropped connection, a
+#: timeout. git never got an answer to relay.
 REMOTE_SILENT = "silent"
+
+#: Failure summaries that are the remote *refusing*, and therefore evidence
+#: that the ref did not move. Anything else after a ``!`` is unknown: git uses
+#: ``!`` for "rejected **or failed to push**", and ``[remote failure]`` in
+#: particular can be a transient server-side error whose outcome is not
+#: established. Matched against C-locale output -- see
+#: :func:`review_loop.reviewer_workspace.run_git_capture`.
+REFUSAL_SUMMARIES = ("[rejected]", "[remote rejected]", "[no match]")
 
 
 class CandidatePatchError(Exception):
@@ -455,18 +479,30 @@ def read_push_report(stdout: str, *, refspec: str) -> str:
         !\t<sha>:refs/heads/b\t[rejected] (non-fast-forward)
         Done
 
-    A leading ``!`` is a rejection the remote *answered with*, which is the
-    only after-the-fact evidence that a push definitely did not land -- an
-    absent commit is not, because a commit can land and then be erased.
-    Anything with no line for our ref is :data:`REMOTE_SILENT`: git never got
-    a per-ref answer, which is what both a local hook refusal and a lost
-    response look like, and those are not the same fact.
+    The flag character is the first field: ``!`` for a ref that was rejected
+    **or failed to push**, ``=`` for one that was already up to date, and a
+    space, ``*`` or ``+`` for one that was updated.
+
+    That ``or failed to push`` is the whole reason this function is not two
+    lines. Reading every ``!`` as a refusal would turn ``[remote failure]`` --
+    a transient server-side error whose outcome is *not* established -- into
+    evidence that nothing was written, which is the strongest claim this
+    runner makes and the one it must never make on a guess. So refusals are an
+    explicit allowlist and everything else fails closed to
+    :data:`REMOTE_UNKNOWN`.
     """
     for line in stdout.splitlines():
         fields = line.split("\t")
         if len(fields) < 3 or fields[1] != refspec:
             continue
-        return REMOTE_REJECTED if fields[0].startswith("!") else REMOTE_ACCEPTED
+        flag, summary = fields[0], fields[2]
+        if flag.startswith("!"):
+            if any(reason in summary for reason in REFUSAL_SUMMARIES):
+                return REMOTE_REJECTED
+            return REMOTE_UNKNOWN
+        if flag.startswith("="):
+            return REMOTE_UP_TO_DATE
+        return REMOTE_ACCEPTED
     return REMOTE_SILENT
 
 
@@ -475,6 +511,7 @@ def push_fix_commit(
     *,
     remote: str,
     refspec: str,
+    lease: str,
     timeout: float = DEFAULT_GIT_TIMEOUT_SECONDS,
 ) -> str:
     """Push one commit to one branch, with ordinary fast-forward semantics.
@@ -489,16 +526,32 @@ def push_fix_commit(
     push authority this week is not the thing that should start ignoring it.
     A hook that refuses the push is a refusal, reported as one.
 
+    ``lease`` is the compare-and-swap condition built by
+    :meth:`review_loop.push_branch.PushTarget.lease`, and it is what makes the
+    write atomic with respect to the read that authorised it. Despite its
+    name it authorises no rewrite: the commit's parent is already proven to be
+    the leased value, so the update is an ordinary fast-forward that the
+    remote will only apply while the ref still holds exactly that value.
+
     Returns what the remote said about our ref -- see :func:`read_push_report`
     -- and raises :class:`PushRefused` carrying the same, because git's exit
     status alone cannot tell a rejection the remote sent from an answer that
     never arrived.
     """
-    result = run_git_capture(
-        ["push", "--porcelain", "--", remote, refspec],
-        cwd=worktree,
-        timeout=timeout,
-    )
+    try:
+        result = run_git_capture(
+            ["push", "--porcelain", lease, "--", remote, refspec],
+            cwd=worktree,
+            timeout=timeout,
+        )
+    except GitTimeoutError as exc:
+        # The process had already started, so the remote may have applied the
+        # update and the answer may be the only thing that went missing. This
+        # is emphatically not a workspace failure, which is what it used to be
+        # reported as -- with `repository_mutated: false` attached to a branch
+        # that could already hold the commit.
+        raise PushRefused(str(exc), REMOTE_SILENT) from exc
+
     report = read_push_report(result.stdout, refspec=refspec)
     if not result.ok:
         raise PushRefused(f"git push failed: {result.failure}", report)

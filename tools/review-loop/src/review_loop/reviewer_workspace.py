@@ -74,6 +74,19 @@ class WorkspaceError(Exception):
     """
 
 
+class GitTimeoutError(WorkspaceError):
+    """A git command was abandoned before it said what it had done.
+
+    A subclass rather than a message, because a timeout is the one failure
+    whose *meaning depends on which command timed out*. For a read it is
+    equivalent to any other failure. For ``git push`` it is not: the process
+    had already started, so the remote may have applied the update and the
+    answer may simply be the thing that never arrived. Callers that write must
+    be able to tell the two apart, and a shared exception type would not let
+    them.
+    """
+
+
 def _label(argv: list[str]) -> str:
     """Name a git command by its subcommand, not by its flags."""
     words = [word for word in argv if not word.startswith("-")][:2]
@@ -122,9 +135,20 @@ def run_git_capture(
             timeout=timeout,
             shell=False,
             check=False,
+            # git is run in the C locale throughout. Everything this package
+            # reads from git is either a porcelain format or a message it
+            # matches on, and a translated build would change the second
+            # without changing the first -- so a runner that classified a push
+            # by its summary text would classify it differently on a machine
+            # whose git speaks another language. The rest of the environment
+            # is inherited untouched, so credentials, PATH and any GIT_* the
+            # operator set still reach git.
+            env={**os.environ, "LC_ALL": "C", "LANG": "C"},
         )
     except subprocess.TimeoutExpired as exc:
-        raise WorkspaceError(f"{_label(argv)} timed out after {timeout:g}s") from exc
+        raise GitTimeoutError(
+            f"{_label(argv)} timed out after {timeout:g}s"
+        ) from exc
     except OSError as exc:
         raise WorkspaceError(f"{_label(argv)} could not be run: {exc}") from exc
 

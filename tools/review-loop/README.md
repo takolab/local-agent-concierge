@@ -1153,7 +1153,7 @@ design:
 | | |
 | --- | --- |
 | **Can** | Fast-forward one commit onto the pull request's own head branch, in this repository. |
-| **Cannot** | Force push, or push with a lease. Write a tag. Create a branch that does not exist. Push to the default branch, the base branch, or a fork's branch. Push to a remote that names a different repository. Push an arbitrary refspec. Rebase, reset, cherry-pick, merge, or rewrite history. Merge the pull request. Write anything at all to the GitHub API. |
+| **Cannot** | Force push, or lease against the local remote-tracking ref. Write a tag. Create a branch that does not exist. Push to the default branch, the base branch, or a fork's branch. Push to a remote that names a different repository. Push an arbitrary refspec. Rebase, reset, cherry-pick, merge, or rewrite history. Merge the pull request. Write anything at all to the GitHub API. |
 
 **What that guarantee covers, precisely.** It is a statement about *the git
 argument vectors this runner constructs* — enumerated by a test that walks the
@@ -1323,6 +1323,41 @@ written. **The patch is never rebased or adapted onto a different head.** A
 fix for a commit is a fix for that commit; making it apply somewhere else is a
 new fix turn's job, with a human deciding to run it.
 
+**The write is a compare-and-swap.** Reading the branch and then pushing are
+two operations, and between them the branch can move. Two ways that matters,
+both of which a plain `git push` gets wrong:
+
+* **deleted** in between — a plain push *recreates* it, contradicting "never
+  creates a branch that does not exist";
+* **rewound to an ancestor** in between — `A → C` is still a fast-forward, so
+  a plain push writes over a ref that is no longer at the state the fix was
+  authorised against.
+
+So the push carries an explicit lease on the exact expected old value:
+
+```bash
+git push --porcelain \
+  --force-with-lease=refs/heads/<branch>:<reviewed head> \
+  -- <remote> <commit>:refs/heads/<branch>
+```
+
+**This is not a force push**, despite the flag's name. The commit's parent is
+already proven to be the reviewed head, so the update it asks for is an
+ordinary fast-forward; the lease adds only the condition *update this ref iff
+it is still exactly H*. The expected value is pinned explicitly rather than
+left to the remote-tracking ref, which is what an unqualified
+`--force-with-lease` consults — a local cache, and a lease against a cache is
+a lease against whatever this clone last fetched.
+
+The boundary test distinguishes the two precisely:
+
+| | |
+| --- | --- |
+| `--force` | forbidden |
+| `+<refspec>` | forbidden |
+| unqualified `--force-with-lease` | forbidden |
+| `--force-with-lease=refs/heads/<derived branch>:<40-hex>` | the only form, built in one module from values it has already validated |
+
 ### Push verification
 
 `git push` exiting zero is not evidence that a ref moved. After the push the
@@ -1351,14 +1386,38 @@ To <url>
 Done
 ```
 
-A leading `!` is a rejection *the remote answered with*. That is the only
-after-the-fact evidence that a push definitely did not land — and it is why
-`PUSH_FAILED` requires it. **An absent commit does not establish a no-write**,
-because a commit can land and then be erased from the branch's history, and
-nothing observable afterwards separates that from a push that never happened.
-A local `pre-push` hook refusal and a dropped connection both produce *no*
-per-ref line, and those two are not the same fact, so neither is reported as
-though it were.
+The flag character is the first field. `!` marks a ref that was **rejected or
+failed to push** — and that "or" is why the summary text is read rather than
+the flag alone:
+
+| Summary | Meaning |
+| --- | --- |
+| `[rejected]`, `[remote rejected]`, `[no match]` | the remote refused; nothing was written |
+| `[remote failure]`, anything else after `!` | a server-side error whose outcome is **not** established |
+| `=` `[up to date]` | the ref already held this commit; the push moved nothing |
+| space, `*`, `+` | the remote applied our update |
+
+Only a recognised refusal is evidence. Treating every `!` as a refusal would
+turn a transient `[remote failure]` into a machine-readable claim that nothing
+was written, which is the strongest claim this runner makes and the one it
+must never make on a guess — so unrecognised summaries fail closed to
+"unknown". Because that text is human-readable, git is run in the **C locale**
+throughout, so a translated build cannot change the classification.
+
+**An absent commit does not establish a no-write** either, because a commit
+can land and then be erased from the branch's history. A local `pre-push` hook
+refusal, a dropped connection and a timeout all produce *no* per-ref line at
+all, and none of those is reported as though it were a refusal.
+
+**A timeout after the push process starts is never a pre-write failure.** The
+remote may already have applied the update, with the answer being the only
+thing that went missing, so it becomes an attempted push with no answer rather
+than a workspace error. The rule stated plainly:
+
+```text
+failure before the push process starts  => may be a verified no-write
+failure after  the push process starts  => unknown until remote evidence proves otherwise
+```
 
 **Is our commit in the branch's history?**
 
@@ -1373,11 +1432,20 @@ Together:
 
 | Remote's answer | Commit in history | Outcome |
 | --- | --- | --- |
-| — | the ref *is* our commit | pushed; CI wait begins |
+| accepted | the ref *is* our commit | pushed **by this run**; CI wait begins |
+| up to date, or no answer | the ref *is* our commit | the branch holds the fix, but this run is not credited with moving the ref; CI wait begins |
 | rejected | no | `PUSH_FAILED` — verified no-write, on the remote's own word |
 | any | yes | `CI_STALE_TARGET` — landed, branch moved on |
 | accepted | no | `CI_STALE_TARGET` — landed, branch since rewritten |
-| silent | no, or unknown | `PUSH_NOT_VERIFIED` — genuinely unknown |
+| unknown or silent | no, or unanswerable | `PUSH_NOT_VERIFIED` — genuinely unknown |
+
+The second row is a provenance rule rather than a safety one. `= [up to date]`
+means the ref already held this exact commit and the push moved nothing, and a
+missing answer means the runner cannot show its own push is what put it there.
+The branch state is reported either way; only the attribution changes — and
+the text output says *"the branch already held this exact fix; this run did
+not move the ref"* rather than crediting an earlier run, because another actor
+could equally have placed it.
 
 The last row is the honest one and the reason the table exists: after a push
 that produced no per-ref answer, an absent commit is compatible both with a
@@ -1426,8 +1494,8 @@ alongside anything else.
 | 62 | `PUSH_TARGET_STALE` | Not written. The head moved, or the branch is somewhere unaccounted for. |
 | 63 | `PATCH_IDENTITY_MISMATCH` | Not written. |
 | 64 | `COMMIT_REFUSED` | Not written. |
-| 65 | `PUSH_FAILED` | Not written, **verified**: the remote's own `--porcelain` report rejected the ref. |
-| 66 | `PUSH_NOT_VERIFIED` | **Unknown.** The remote gave no per-ref answer, so an absent commit proves nothing. Read the branch before doing anything else. |
+| 65 | `PUSH_FAILED` | Not written, **verified**: the remote's own `--porcelain` report *refused* the ref (a recognised rejection, not merely a failure). |
+| 66 | `PUSH_NOT_VERIFIED` | **Unknown.** The remote gave no answer, or one that establishes nothing (`[remote failure]`, a timeout, a local hook). An absent commit proves nothing. Read the branch before doing anything else. |
 | 67 | `CI_FAILED` | **Pushed.** CI for the exact commit failed. |
 | 68 | `CI_PENDING` | **Pushed.** CI had not finished within `--ci-timeout`. |
 | 69 | `CI_STALE_TARGET` | **Pushed.** The head moved off it, its merge context is stale, or a lost response hid a push that landed — under a later commit, or under a rewrite. |
@@ -1476,7 +1544,7 @@ built on.
 
 | | |
 | --- | --- |
-| **Enforced by this runner** | The patch's bytes hash to the fix turn's digest. The applied tree and the created commit both re-hash to it. The commit's parent is the reviewed head and it is exactly one commit. The branch comes from GitHub's pull request object — read for the repository the handoff names, at both ends of the pull request — and cannot be a fork, a base or a default branch. Every URL for the chosen remote, fetch and push, names the target repository. The push is fast-forward and carries no force flag. A no-write is claimed only on the remote's own rejection. The pushed ref is read back from the remote. CI evidence belongs to the exact pushed commit, from the authoritative event, against the current merge context. |
+| **Enforced by this runner** | The patch's bytes hash to the fix turn's digest. The applied tree and the created commit both re-hash to it. The commit's parent is the reviewed head and it is exactly one commit. The branch comes from GitHub's pull request object — read for the repository the handoff names, at both ends of the pull request — and cannot be a fork, a base or a default branch. Every URL for the chosen remote, fetch and push, names the target repository. The push is a fast-forward, conditional on the branch still being exactly the reviewed head. A no-write is claimed only on the remote's own recognised rejection; a failure after the push starts is never one. The pushed ref is read back from the remote. CI evidence belongs to the exact pushed commit, from the authoritative event, against the current merge context. |
 | **Not enforced, and not claimed** | That the fix is *correct*. That it resolves the finding. That the pull request should be merged. That your git hooks do nothing else — they run, deliberately, and are trusted. That a digest survives configuration this module does not pin. That a push which landed and was then force-pushed away can be detected. Whether a `pre-push` hook, a signing configuration or a branch protection rule refuses the push — those are the remote's and the operator's decisions, reported rather than bypassed. |
 
 ## Tests
@@ -1581,13 +1649,20 @@ written out explicitly.
   structural write guarantee covers the argv this runner constructs, not
   arbitrary configured hook behaviour. A hook that edits files is still caught
   by the post-commit digest check.
-* **A silent push failure leaves remote state genuinely unknown.** When the
-  remote gives no per-ref answer — a local `pre-push` hook refusal, a dropped
-  connection — an absent commit proves nothing, because a commit can land and
-  then be erased. The run reports `PUSH_NOT_VERIFIED` rather than guessing,
-  which means an operator has to look at the branch themselves. That is the
-  intended direction, but it does mean an ordinary local hook refusal reports
-  as "unknown" rather than as the no-write it almost certainly was.
+* **A silent or unrecognised push failure leaves remote state genuinely
+  unknown.** When the remote gives no per-ref answer — a local `pre-push` hook
+  refusal, a dropped connection, a timeout — or gives one that establishes
+  nothing, such as `[remote failure]`, an absent commit proves nothing,
+  because a commit can land and then be erased. The run reports
+  `PUSH_NOT_VERIFIED` rather than guessing, which means an operator has to
+  look at the branch themselves. That is the intended direction, but it does
+  mean an ordinary local hook refusal reports as "unknown" rather than as the
+  no-write it almost certainly was.
+* **The porcelain summary text is a parsing contract.** Refusals are matched
+  against a fixed list of C-locale summaries, and git is run with `LC_ALL=C`
+  so a translated build cannot change the classification. A future git that
+  renames a summary would fail closed to "unknown" rather than misclassify —
+  but it would also stop recognising a genuine refusal.
 * **A `--commit-cwd` directory is written to and committed in.** It is
   verified to be a clean checkout of the reviewed head first, but the fix
   commit is created there and pushed from there. The prepared worktree is the

@@ -65,13 +65,15 @@ exit codes:
                               does not apply, or produced something else
   64  COMMIT_REFUSED          the workspace was not a clean reviewed head, or
                               the commit is not exactly the candidate patch
-  65  PUSH_FAILED             the remote's own --porcelain report rejected the
-                              ref, so nothing was written
-  66  PUSH_NOT_VERIFIED       the remote gave no per-ref answer and the branch
-                              does not read back as the created commit; an
-                              absent commit proves nothing, because a commit
-                              can land and then be erased. REMOTE STATE IS NOT
-                              KNOWN
+  65  PUSH_FAILED             the remote's own --porcelain report REFUSED the
+                              ref (a recognised rejection, not merely a
+                              failure), so nothing was written
+  66  PUSH_NOT_VERIFIED       the remote gave no answer, or one that settles
+                              nothing ([remote failure], a timeout, a local
+                              hook), and the branch does not read back as the
+                              created commit; an absent commit proves nothing,
+                              because a commit can land and then be erased.
+                              REMOTE STATE IS NOT KNOWN
   67  CI_FAILED               authoritative CI for the pushed commit failed
   68  CI_PENDING              CI had not finished within --ci-timeout
   69  CI_STALE_TARGET         the pull request moved off the pushed commit, its
@@ -90,7 +92,12 @@ before doing anything else, and do not re-run blind.
 
 WRITE AUTHORITY. This command performs exactly one repository write: a
 fast-forward `git push` of one commit to refs/heads/<the pull request's head
-branch>, over your existing git credential for the remote. It never forces,
+branch>, over your existing git credential for the remote, conditional on that
+ref still being exactly the reviewed head. The condition is carried as
+--force-with-lease=<that ref>:<reviewed head>, which despite the flag's name
+authorises no rewrite: the commit's parent is already proven to be that value,
+so the update is an ordinary fast-forward and the lease only makes it atomic
+with the read that authorised it. It never forces,
 never writes a tag, never creates a branch that does not exist, never pushes
 to a default branch or a fork, and never merges. The branch name comes from
 GitHub's pull request object alone; there is no flag that can change it. The
@@ -253,8 +260,13 @@ def _mutation_line(result: PushResult) -> str:
     if not mutated:
         return "No -- the pull request branch is verified unchanged"
     if result.already_pushed:
+        # Not "by an earlier run": this runner cannot tell an earlier run of
+        # its own from another actor that put the same commit there, and the
+        # honest claim is about the branch's state rather than about who is
+        # responsible for it.
         return (
-            f"Yes, by an earlier run -- {result.pushed_sha} was already on the branch"
+            f"Yes -- the branch already held this exact fix ({result.pushed_sha}); "
+            "this run did not move the ref"
         )
     return f"Yes -- {result.pushed_sha} was pushed by this run"
 

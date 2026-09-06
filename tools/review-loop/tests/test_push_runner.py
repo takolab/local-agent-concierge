@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 from conftest import build_scenario
 from fakes import ADVANCED_BASE_TIP, BASE_TIP, OTHER_SHA
 from push_fakes import PushGitHubClient, Timeline, fix_json, git
@@ -362,7 +364,7 @@ def test_a_push_whose_readback_disagrees_is_reported_as_unknown(scenario, monkey
     """`git push` exits zero and the ref is not what we created."""
     from review_loop import push_runner
 
-    def silent_push(worktree, *, remote, refspec, timeout=300.0):
+    def silent_push(worktree, *, remote, refspec, lease, timeout=300.0):
         return None  # exits zero, moves nothing
 
     monkeypatch.setattr(push_runner, "push_fix_commit", silent_push)
@@ -377,13 +379,19 @@ def test_a_push_whose_readback_disagrees_is_reported_as_unknown(scenario, monkey
 
 
 def test_a_push_that_lands_despite_a_reported_failure_is_believed(scenario, monkeypatch):
-    """A lost response is not a failed push, and the remote settles it."""
+    """A lost response is not a failed push, and the read-back settles it.
+
+    What the read-back settles is *what is on the branch*, not *who put it
+    there*. With no per-ref answer from the remote, "this run pushed it" is
+    not established -- so the fix is reported as present and the attribution
+    is not claimed.
+    """
     from review_loop import fix_commit, push_runner
 
     real = fix_commit.push_fix_commit
 
-    def push_then_claim_failure(worktree, *, remote, refspec, timeout=300.0):
-        real(worktree, remote=remote, refspec=refspec, timeout=timeout)
+    def push_then_claim_failure(worktree, *, remote, refspec, lease, timeout=300.0):
+        real(worktree, remote=remote, refspec=refspec, lease=lease, timeout=timeout)
         raise fix_commit.PushRefused("the connection dropped before the answer arrived")
 
     monkeypatch.setattr(push_runner, "push_fix_commit", push_then_claim_failure)
@@ -394,7 +402,12 @@ def test_a_push_that_lands_despite_a_reported_failure_is_believed(scenario, monk
 
     assert result.outcome is PushOutcome.PUSH_READY
     assert result.repository_mutated is True
-    assert "the push landed" in " ".join(result.reasons)
+    assert result.pushed_sha == scenario.remote_tip()
+    # The branch holds the fix; the runner does not claim to know it moved it.
+    assert result.push_performed is False
+    reasons = " ".join(result.reasons)
+    assert "gave no answer establishing that this run's push is what put it there" in reasons
+    assert "git push reported a failure" in reasons
 
 
 # --------------------------------------------------------------------------
@@ -728,8 +741,8 @@ def test_a_landed_push_followed_by_a_concurrent_child_is_not_a_no_write(
     real = fix_commit.push_fix_commit
     landed = {}
 
-    def push_then_lose_the_answer(worktree, *, remote, refspec, timeout=300.0):
-        real(worktree, remote=remote, refspec=refspec, timeout=timeout)
+    def push_then_lose_the_answer(worktree, *, remote, refspec, lease, timeout=300.0):
+        real(worktree, remote=remote, refspec=refspec, lease=lease, timeout=timeout)
         landed["sha"] = refspec.split(":")[0]
         git(scenario.seed, "fetch", "--quiet", "origin", f"refs/heads/{scenario.branch}")
         git(scenario.seed, "checkout", "--quiet", "FETCH_HEAD")
@@ -767,9 +780,13 @@ def test_a_landed_push_followed_by_a_concurrent_child_is_not_a_no_write(
 
 def test_an_unanswerable_ancestry_question_stays_unknown(scenario, monkeypatch):
     """`landed is None` must not be rounded to either certainty."""
-    from review_loop import push_runner
+    from review_loop import fix_commit, push_runner
 
-    monkeypatch.setattr(push_runner, "push_fix_commit", lambda *a, **k: None)
+    # Exits zero but the remote gave no per-ref answer, and git cannot say
+    # whether the commit reached it. Both unknowns, and the result stays one.
+    monkeypatch.setattr(
+        push_runner, "push_fix_commit", lambda *a, **k: fix_commit.REMOTE_SILENT
+    )
     monkeypatch.setattr(push_runner, "contains_commit", lambda *a, **k: None)
 
     result = push(scenario)
@@ -839,7 +856,7 @@ def test_a_silent_push_failure_is_unknown_not_a_verified_no_write(scenario, monk
     """
     from review_loop import fix_commit, push_runner
 
-    def silent_failure(worktree, *, remote, refspec, timeout=300.0):
+    def silent_failure(worktree, *, remote, refspec, lease, timeout=300.0):
         raise fix_commit.PushRefused(
             "git push failed: hook says no", fix_commit.REMOTE_SILENT
         )
@@ -860,7 +877,7 @@ def test_a_silent_push_failure_is_unknown_not_a_verified_no_write(scenario, monk
 def test_a_remote_rejection_is_reported_as_a_verified_no_write(scenario, monkeypatch):
     from review_loop import fix_commit, push_runner
 
-    def rejected(worktree, *, remote, refspec, timeout=300.0):
+    def rejected(worktree, *, remote, refspec, lease, timeout=300.0):
         raise fix_commit.PushRefused(
             "git push failed: non-fast-forward", fix_commit.REMOTE_REJECTED
         )
@@ -881,7 +898,7 @@ def test_a_remote_that_accepted_a_since_rewritten_ref_is_reported_as_pushed(
     """Accepted by the remote, then erased from the branch: mutated, absent."""
     from review_loop import fix_commit, push_runner
 
-    def accepted_then_gone(worktree, *, remote, refspec, timeout=300.0):
+    def accepted_then_gone(worktree, *, remote, refspec, lease, timeout=300.0):
         return fix_commit.REMOTE_ACCEPTED
 
     monkeypatch.setattr(push_runner, "push_fix_commit", accepted_then_gone)
@@ -892,3 +909,188 @@ def test_a_remote_that_accepted_a_since_rewritten_ref_is_reported_as_pushed(
     assert result.repository_mutated is True
     assert result.push_performed is True
     assert "rewritten" in " ".join(result.reasons)
+
+
+# --------------------------------------------------------------------------
+# Regressions from PR #35's third review round
+# --------------------------------------------------------------------------
+
+
+class MovesTheBranchDuringTheRun:
+    """Moves the remote branch after the pre-flight read, before the push.
+
+    This is the TOCTOU window itself, reproduced: the runner has already read
+    the branch and decided it is at the reviewed head when the move happens.
+    """
+
+    def __init__(self, inner, act):
+        self._inner = inner
+        self._act = act
+
+    def open(self, head_sha):
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _open():
+            with self._inner.open(head_sha) as path:
+                self._act()
+                yield path
+
+        return _open()
+
+    def describe(self):
+        return "(moves the branch mid-run)"
+
+
+def test_a_branch_deleted_after_the_preflight_is_not_recreated(scenario):
+    """A plain push recreates a deleted branch; the lease refuses to.
+
+    "Never creates a branch that does not exist" is one of this command's
+    stated guarantees, and without a compare-and-swap on the exact expected
+    old value it was not true between the read and the write.
+    """
+
+    def delete_the_branch():
+        git(scenario.seed, "push", "--quiet", "origin", "--delete", scenario.branch)
+
+    result = push(
+        scenario,
+        workspace=MovesTheBranchDuringTheRun(
+            workspace_for(scenario), delete_the_branch
+        ),
+    )
+
+    assert result.outcome is PushOutcome.PUSH_FAILED
+    assert result.repository_mutated is False
+    # The branch is still gone: it was not recreated.
+    assert scenario.remote_tip() == ""
+
+
+def test_a_branch_rewound_after_the_preflight_is_not_written_over(scenario):
+    """A rewind to an ancestor still fast-forwards, so only a lease stops it.
+
+    `A -> C` is a fast-forward from git's point of view even though the ref is
+    no longer at the `H` the fix was authorised against.
+    """
+    ancestor = git(scenario.clone, "rev-parse", f"{scenario.head_sha}^")
+
+    def rewind_the_branch():
+        git(
+            scenario.seed,
+            "push",
+            "--quiet",
+            "--force",
+            "origin",
+            f"{ancestor}:refs/heads/{scenario.branch}",
+        )
+
+    result = push(
+        scenario,
+        workspace=MovesTheBranchDuringTheRun(
+            workspace_for(scenario), rewind_the_branch
+        ),
+    )
+
+    assert result.outcome is PushOutcome.PUSH_FAILED
+    assert result.repository_mutated is False
+    # The branch is still where the other actor put it; our commit is not there.
+    assert scenario.remote_tip() == ancestor
+
+
+def test_a_transient_remote_failure_is_not_a_verified_no_write(scenario, monkeypatch):
+    """`!` means "rejected OR failed to push", and only the first is evidence.
+
+    `[remote failure]` is a server-side error whose outcome is not
+    established, so it must never become `repository_mutated: false`.
+    """
+    from review_loop import fix_commit, push_runner
+
+    def remote_failure(worktree, *, remote, refspec, lease, timeout=300.0):
+        raise fix_commit.PushRefused(
+            "git push failed: remote end hung up",
+            fix_commit.read_push_report(
+                f"To x\n!\t{refspec}\t[remote failure]\nDone\n", refspec=refspec
+            ),
+        )
+
+    monkeypatch.setattr(push_runner, "push_fix_commit", remote_failure)
+
+    result = push(scenario)
+
+    assert result.outcome is PushOutcome.PUSH_NOT_VERIFIED
+    assert result.repository_mutated is None
+
+
+def test_a_push_that_lands_then_times_out_is_reported_as_pushed(scenario, monkeypatch):
+    """A timeout after the process started cannot be a pre-write failure.
+
+    The remote may already have applied the update, and the answer may be the
+    only thing that went missing. Reporting this as a workspace problem lost
+    both the mutation and the commit record.
+    """
+    from review_loop import fix_commit, push_runner
+    from review_loop.reviewer_workspace import GitTimeoutError
+
+    real = fix_commit.push_fix_commit
+    landed = {}
+
+    def push_then_time_out(worktree, *, remote, refspec, lease, timeout=300.0):
+        real(worktree, remote=remote, refspec=refspec, lease=lease, timeout=timeout)
+        landed["sha"] = refspec.split(":")[0]
+        raise GitTimeoutError("git push timed out after 300s")
+
+    monkeypatch.setattr(push_runner, "push_fix_commit", push_then_time_out)
+
+    client = client_for(scenario)
+    timeline = Timeline({1: green(scenario, client, sha_getter=scenario.remote_tip)})
+    result = push(scenario, client=client, timeline=timeline)
+
+    assert result.outcome is PushOutcome.PUSH_READY
+    assert result.repository_mutated is True
+    assert result.pushed_sha == landed["sha"] == scenario.remote_tip()
+    assert result.commit_created is True
+
+
+def test_a_timeout_reaches_the_push_path_as_an_unknown_answer(scenario, monkeypatch):
+    """The translation itself: a timeout is a push attempt, not a bad workspace."""
+    from review_loop import fix_commit
+    from review_loop.reviewer_workspace import GitTimeoutError
+
+    def time_out(argv, *, cwd, timeout):
+        raise GitTimeoutError("git push timed out after 300s")
+
+    monkeypatch.setattr(fix_commit, "run_git_capture", time_out)
+
+    with pytest.raises(fix_commit.PushRefused) as error:
+        fix_commit.push_fix_commit(
+            str(scenario.clone),
+            remote="origin",
+            refspec=f"{scenario.head_sha}:refs/heads/{scenario.branch}",
+            lease=f"--force-with-lease=refs/heads/{scenario.branch}:{scenario.head_sha}",
+        )
+
+    assert error.value.report == fix_commit.REMOTE_SILENT
+    assert "timed out" in str(error.value)
+
+
+def test_an_up_to_date_ref_is_not_attributed_to_this_run(scenario, monkeypatch):
+    """`= [up to date]` means the push moved nothing, whoever put it there."""
+    from review_loop import fix_commit, push_runner
+
+    real = fix_commit.push_fix_commit
+
+    def push_then_report_up_to_date(worktree, *, remote, refspec, lease, timeout=300.0):
+        real(worktree, remote=remote, refspec=refspec, lease=lease, timeout=timeout)
+        return fix_commit.REMOTE_UP_TO_DATE
+
+    monkeypatch.setattr(push_runner, "push_fix_commit", push_then_report_up_to_date)
+
+    client = client_for(scenario)
+    timeline = Timeline({1: green(scenario, client, sha_getter=scenario.remote_tip)})
+    result = push(scenario, client=client, timeline=timeline)
+
+    assert result.outcome is PushOutcome.PUSH_READY
+    assert result.repository_mutated is True
+    assert result.push_performed is False
+    assert result.already_pushed is True
+    assert "already held this exact fix" in " ".join(result.reasons)
