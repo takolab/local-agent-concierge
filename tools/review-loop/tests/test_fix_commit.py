@@ -381,6 +381,10 @@ def test_the_push_argument_vector_carries_no_force_and_no_tag(monkeypatch, scena
     assert argv == [
         "push",
         "--porcelain",
+        # The two expansions git configuration can apply to a one-refspec
+        # push, refused explicitly rather than hoped against.
+        "--no-follow-tags",
+        "--recurse-submodules=no",
         lease_for(scenario),
         "--",
         "origin",
@@ -634,14 +638,15 @@ def test_a_real_accepted_push_carries_the_remotes_answer(worktree, scenario):
 
     commit = commit_the_patch(worktree, scenario)
 
-    report = push_fix_commit(
+    attempt = push_fix_commit(
         worktree,
         remote="origin",
         refspec=f"{commit.sha}:refs/heads/{scenario.branch}",
         lease=lease_for(scenario),
     )
 
-    assert report == REMOTE_ACCEPTED
+    assert attempt.report == REMOTE_ACCEPTED
+    assert attempt.unexpected_refs == ()
     assert scenario.remote_tip() == commit.sha
 
 

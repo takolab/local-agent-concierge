@@ -83,12 +83,16 @@ exit codes:
   71  PUSH_WORKSPACE_INVALID  the workspace could not be prepared or verified
   72  PUSH_API_ERROR          GitHub could not be queried before the push
   73  CI_API_ERROR            GitHub could not be queried while waiting for CI
+  74  PUSH_WROTE_UNEXPECTED_REFS  the remote reported updating a ref this run
+                              did not ask for; something was written, and more
+                              than the boundary permits. Inspect the remote
   2   usage error
 
-Exit codes 0-66 differ in what changed. 60-65, 71 and 72 leave the pull
-request branch verified unchanged. 0 (PUSH_READY) and 67-70, 73 mean the fix
-commit IS on the branch. 66 means remote state is not known -- read the branch
-before doing anything else, and do not re-run blind.
+Exit codes differ in what changed. 60-65, 71 and 72 leave the pull request
+branch verified unchanged. 0 (PUSH_READY) and 67-70, 73 mean the fix commit IS
+on the branch. 66 means remote state is not known -- read the branch before
+doing anything else, and do not re-run blind. 74 means something WAS written
+and more than one ref moved.
 
 WRITE AUTHORITY. This command performs exactly one repository write: a
 fast-forward `git push` of one commit to refs/heads/<the pull request's head
@@ -97,7 +101,11 @@ ref still being exactly the reviewed head. The condition is carried as
 --force-with-lease=<that ref>:<reviewed head>, which despite the flag's name
 authorises no rewrite: the commit's parent is already proven to be that value,
 so the update is an ordinary fast-forward and the lease only makes it atomic
-with the read that authorised it. It never forces,
+with the read that authorised it. The push also passes --no-follow-tags and
+--recurse-submodules=no, because an explicit refspec bounds what this runner
+asks for but not what push.followTags or push.recurseSubmodules would add to
+the request; and the remote's own report is checked for refs nobody asked for.
+It never forces,
 never writes a tag, never creates a branch that does not exist, never pushes
 to a default branch or a fork, and never merges. The branch name comes from
 GitHub's pull request object alone; there is no flag that can change it. The

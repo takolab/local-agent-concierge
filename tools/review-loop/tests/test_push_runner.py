@@ -362,10 +362,12 @@ def test_a_non_fast_forward_push_is_refused_and_reported_as_no_write(scenario):
 
 def test_a_push_whose_readback_disagrees_is_reported_as_unknown(scenario, monkeypatch):
     """`git push` exits zero and the ref is not what we created."""
-    from review_loop import push_runner
+    from review_loop import fix_commit, push_runner
 
     def silent_push(worktree, *, remote, refspec, lease, timeout=300.0):
-        return None  # exits zero, moves nothing
+        # Exits zero, moves nothing, and reports nothing -- which is what a
+        # real push with no per-ref output would produce.
+        return fix_commit.PushAttempt(fix_commit.REMOTE_SILENT)
 
     monkeypatch.setattr(push_runner, "push_fix_commit", silent_push)
 
@@ -762,9 +764,13 @@ def test_a_landed_push_followed_by_a_concurrent_child_is_not_a_no_write(
 
     assert result.outcome is PushOutcome.CI_STALE_TARGET
     assert result.repository_mutated is True
-    assert result.push_performed is True
     assert result.pushed_sha == landed["sha"]
-    assert "DID land" in " ".join(result.reasons)
+    assert "IS in the branch's history" in " ".join(result.reasons)
+    # The commit is in the history; with no answer from the remote, this run
+    # is not credited with having put it there. Another actor pushing the
+    # identical commit and advancing past it looks exactly the same from here.
+    assert result.push_performed is False
+    assert "gave no answer establishing that this run's push" in " ".join(result.reasons)
     # And it really is in the branch's history, which is what was asserted.
     assert (
         git(
@@ -785,7 +791,9 @@ def test_an_unanswerable_ancestry_question_stays_unknown(scenario, monkeypatch):
     # Exits zero but the remote gave no per-ref answer, and git cannot say
     # whether the commit reached it. Both unknowns, and the result stays one.
     monkeypatch.setattr(
-        push_runner, "push_fix_commit", lambda *a, **k: fix_commit.REMOTE_SILENT
+        push_runner,
+        "push_fix_commit",
+        lambda *a, **k: fix_commit.PushAttempt(fix_commit.REMOTE_SILENT),
     )
     monkeypatch.setattr(push_runner, "contains_commit", lambda *a, **k: None)
 
@@ -858,7 +866,8 @@ def test_a_silent_push_failure_is_unknown_not_a_verified_no_write(scenario, monk
 
     def silent_failure(worktree, *, remote, refspec, lease, timeout=300.0):
         raise fix_commit.PushRefused(
-            "git push failed: hook says no", fix_commit.REMOTE_SILENT
+            "git push failed: hook says no",
+            fix_commit.PushAttempt(fix_commit.REMOTE_SILENT),
         )
 
     monkeypatch.setattr(push_runner, "push_fix_commit", silent_failure)
@@ -879,7 +888,8 @@ def test_a_remote_rejection_is_reported_as_a_verified_no_write(scenario, monkeyp
 
     def rejected(worktree, *, remote, refspec, lease, timeout=300.0):
         raise fix_commit.PushRefused(
-            "git push failed: non-fast-forward", fix_commit.REMOTE_REJECTED
+            "git push failed: non-fast-forward",
+            fix_commit.PushAttempt(fix_commit.REMOTE_REJECTED),
         )
 
     monkeypatch.setattr(push_runner, "push_fix_commit", rejected)
@@ -899,7 +909,7 @@ def test_a_remote_that_accepted_a_since_rewritten_ref_is_reported_as_pushed(
     from review_loop import fix_commit, push_runner
 
     def accepted_then_gone(worktree, *, remote, refspec, lease, timeout=300.0):
-        return fix_commit.REMOTE_ACCEPTED
+        return fix_commit.PushAttempt(fix_commit.REMOTE_ACCEPTED)
 
     monkeypatch.setattr(push_runner, "push_fix_commit", accepted_then_gone)
 
@@ -1008,8 +1018,11 @@ def test_a_transient_remote_failure_is_not_a_verified_no_write(scenario, monkeyp
     def remote_failure(worktree, *, remote, refspec, lease, timeout=300.0):
         raise fix_commit.PushRefused(
             "git push failed: remote end hung up",
-            fix_commit.read_push_report(
-                f"To x\n!\t{refspec}\t[remote failure]\nDone\n", refspec=refspec
+            fix_commit.PushAttempt(
+                fix_commit.read_push_report(
+                    f"To x\n!\t{refspec}\t[remote failure]\nDone\n",
+                    refspec=refspec,
+                )
             ),
         )
 
@@ -1081,7 +1094,7 @@ def test_an_up_to_date_ref_is_not_attributed_to_this_run(scenario, monkeypatch):
 
     def push_then_report_up_to_date(worktree, *, remote, refspec, lease, timeout=300.0):
         real(worktree, remote=remote, refspec=refspec, lease=lease, timeout=timeout)
-        return fix_commit.REMOTE_UP_TO_DATE
+        return fix_commit.PushAttempt(fix_commit.REMOTE_UP_TO_DATE)
 
     monkeypatch.setattr(push_runner, "push_fix_commit", push_then_report_up_to_date)
 
@@ -1094,3 +1107,187 @@ def test_an_up_to_date_ref_is_not_attributed_to_this_run(scenario, monkeypatch):
     assert result.push_performed is False
     assert result.already_pushed is True
     assert "already held this exact fix" in " ".join(result.reasons)
+
+
+# --------------------------------------------------------------------------
+# Regressions from PR #35's fourth review round
+# --------------------------------------------------------------------------
+
+
+def test_push_follow_tags_does_not_carry_a_tag_to_the_remote(scenario, monkeypatch):
+    """`push.followTags=true` turns one ref update into two.
+
+    An annotated tag reachable from the fix commit is pushed alongside the
+    branch, into a namespace this command promises never to write -- and the
+    per-ref report, which looks only for our own refspec, would not have
+    noticed the extra line.
+
+    The tag has to exist on the fix commit *before* the push, and the fix
+    commit's SHA is not known until the runner creates it, so the tag is made
+    in the push wrapper -- the one point between the commit and the push.
+    """
+    from review_loop import fix_commit, push_runner
+
+    real = fix_commit.push_fix_commit
+    git(scenario.clone, "config", "push.followTags", "true")
+
+    def tag_then_push(worktree, *, remote, refspec, lease, timeout=300.0):
+        ours = refspec.split(":")[0]
+        git(worktree, "tag", "-a", "local-release", "-m", "release", ours)
+        return real(
+            worktree, remote=remote, refspec=refspec, lease=lease, timeout=timeout
+        )
+
+    monkeypatch.setattr(push_runner, "push_fix_commit", tag_then_push)
+
+    client = client_for(scenario)
+    timeline = Timeline({1: green(scenario, client, sha_getter=scenario.remote_tip)})
+    result = push(scenario, client=client, timeline=timeline)
+
+    assert result.outcome is PushOutcome.PUSH_READY
+    assert scenario.remote_tip() == result.pushed_sha
+    # The branch moved and no tag went with it.
+    assert git(scenario.clone, "ls-remote", "--tags", "origin") == ""
+
+
+def test_the_follow_tags_fixture_really_would_push_a_tag(scenario):
+    """Pins the bug itself, so the test above cannot silently stop testing it.
+
+    Without `--no-follow-tags` this exact configuration pushes the tag. If
+    this ever fails, `push.followTags` no longer behaves the way the fix
+    assumes and the test above proves nothing.
+    """
+    from review_loop.reviewer_workspace import run_git
+
+    git(scenario.clone, "config", "push.followTags", "true")
+    git(scenario.clone, "checkout", "--quiet", scenario.head_sha)
+    git(scenario.clone, "commit", "--quiet", "--allow-empty", "-m", "a commit to tag")
+    ours = git(scenario.clone, "rev-parse", "HEAD")
+    git(scenario.clone, "tag", "-a", "local-release", "-m", "release", ours)
+
+    # The same argv this runner used to build, without the two refusals.
+    run_git(
+        [
+            "push",
+            "--porcelain",
+            f"--force-with-lease=refs/heads/{scenario.branch}:{scenario.head_sha}",
+            "--",
+            "origin",
+            f"{ours}:refs/heads/{scenario.branch}",
+        ],
+        cwd=str(scenario.clone),
+        timeout=60,
+    )
+
+    assert "refs/tags/local-release" in git(
+        scenario.clone, "ls-remote", "--tags", "origin"
+    )
+
+
+def test_the_push_argv_always_refuses_the_config_driven_expansions(scenario, monkeypatch):
+    """Structural: the two flags are in every push this runner makes."""
+    from review_loop import fix_commit
+    from review_loop.reviewer_workspace import GitResult
+
+    seen = {}
+    refspec = f"{scenario.head_sha}:refs/heads/{scenario.branch}"
+
+    def record(argv, *, cwd, timeout):
+        seen["argv"] = list(argv)
+        return GitResult(returncode=0, stdout=f"To x\n\t{refspec}\told..new\nDone\n", stderr="")
+
+    monkeypatch.setattr(fix_commit, "run_git_capture", record)
+    fix_commit.push_fix_commit(
+        str(scenario.clone),
+        remote="origin",
+        refspec=refspec,
+        lease=f"--force-with-lease=refs/heads/{scenario.branch}:{scenario.head_sha}",
+    )
+
+    assert "--no-follow-tags" in seen["argv"]
+    assert "--recurse-submodules=no" in seen["argv"]
+
+
+def test_a_report_naming_another_ref_stops_the_run(scenario, monkeypatch):
+    """The backstop, for an expansion the flags do not know about."""
+    from review_loop import fix_commit, push_runner
+
+    real = fix_commit.push_fix_commit
+
+    def push_and_claim_a_tag(worktree, *, remote, refspec, lease, timeout=300.0):
+        attempt = real(
+            worktree, remote=remote, refspec=refspec, lease=lease, timeout=timeout
+        )
+        return fix_commit.PushAttempt(
+            report=attempt.report,
+            unexpected_refs=("refs/tags/local-release:refs/tags/local-release",),
+        )
+
+    monkeypatch.setattr(push_runner, "push_fix_commit", push_and_claim_a_tag)
+
+    result = push(scenario)
+
+    assert result.outcome is PushOutcome.PUSH_WROTE_UNEXPECTED_REFS
+    assert result.exit_code == 74
+    # Known to have written, and more than was authorised: not "unknown".
+    assert result.repository_mutated is True
+    assert "refs/tags/local-release" in " ".join(result.reasons)
+    assert "write boundary was exceeded" in " ".join(result.reasons)
+
+
+def test_an_ancestor_commit_another_actor_pushed_is_not_credited_to_this_run(
+    scenario, monkeypatch
+):
+    """Concurrency: B pushes the same commit and advances; A's push is rejected.
+
+    A can conclude its commit is in the branch's history. It cannot conclude
+    that its own push is what put it there -- its push was refused.
+    """
+    from review_loop import fix_commit, push_runner
+
+    real = fix_commit.push_fix_commit
+
+    def another_actor_gets_there_first(worktree, *, remote, refspec, lease, timeout=300.0):
+        # Someone else pushes the identical commit, then a child on top.
+        ours = refspec.split(":")[0]
+        git(worktree, "push", "--quiet", remote, f"{ours}:refs/heads/{scenario.branch}")
+        git(worktree, "commit", "--quiet", "--allow-empty", "-m", "theirs on top")
+        git(
+            worktree,
+            "push",
+            "--quiet",
+            remote,
+            f"HEAD:refs/heads/{scenario.branch}",
+        )
+        # Our own lease-based push is then refused: the ref is no longer H.
+        return real(worktree, remote=remote, refspec=refspec, lease=lease, timeout=timeout)
+
+    monkeypatch.setattr(push_runner, "push_fix_commit", another_actor_gets_there_first)
+
+    result = push(scenario)
+
+    assert result.outcome is PushOutcome.CI_STALE_TARGET
+    assert result.repository_mutated is True
+    # The fix is in the history, but this run did not put it there.
+    assert result.push_performed is False
+    assert "gave no answer establishing that this run's push" in " ".join(result.reasons)
+
+
+def test_an_unhelpful_answer_is_not_described_as_no_answer(scenario, monkeypatch):
+    """`[remote failure]` IS an answer; it just settles nothing."""
+    from review_loop import fix_commit, push_runner
+
+    def remote_failure(worktree, *, remote, refspec, lease, timeout=300.0):
+        raise fix_commit.PushRefused(
+            "git push failed: remote end hung up",
+            fix_commit.PushAttempt(fix_commit.REMOTE_UNKNOWN),
+        )
+
+    monkeypatch.setattr(push_runner, "push_fix_commit", remote_failure)
+
+    result = push(scenario)
+    reasons = " ".join(result.reasons)
+
+    assert result.outcome is PushOutcome.PUSH_NOT_VERIFIED
+    assert "does not establish whether the ref was updated" in reasons
+    assert "gave no per-ref answer" not in reasons

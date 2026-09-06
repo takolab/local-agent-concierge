@@ -57,6 +57,7 @@ from typing import Callable
 
 from .fix_commit import (
     REMOTE_ACCEPTED,
+    PushAttempt,
     REMOTE_REJECTED,
     REMOTE_SILENT,
     REMOTE_UP_TO_DATE,
@@ -142,6 +143,9 @@ class PushResult:
         """
         if self.outcome is PushOutcome.PUSH_NOT_VERIFIED:
             return None
+        if self.outcome is PushOutcome.PUSH_WROTE_UNEXPECTED_REFS:
+            # Certainly written, and more than was authorised. Not unknown.
+            return True
         return self.outcome in PUSHED_OUTCOMES
 
 
@@ -594,7 +598,7 @@ def _commit_and_push(
     push_failure: str | None = None
     refspec = push_target.refspec(commit.sha)
     try:
-        remote_said = push_fix_commit(
+        attempt = push_fix_commit(
             worktree,
             remote=git_remote,
             refspec=refspec,
@@ -611,7 +615,7 @@ def _commit_and_push(
         # The remote's own per-ref answer, not git's exit status. Only the
         # first of those can distinguish a rejection the remote sent from an
         # answer that never arrived.
-        remote_said = exc.report
+        attempt = exc.attempt
     except GitTimeoutError as exc:
         # Belt and braces. `push_fix_commit` already translates a timeout into
         # a silent PushRefused, and this catches one raised anywhere else on
@@ -626,7 +630,33 @@ def _commit_and_push(
         # and is reported as an invalid workspace -- a pre-write failure --
         # discarding both the mutation and the record of the commit.
         push_failure = str(exc)
-        remote_said = REMOTE_SILENT
+        attempt = PushAttempt(REMOTE_SILENT)
+
+    remote_said = attempt.report
+
+    # Before anything else: did the push write only the ref it was allowed to?
+    # The argv refuses the expansions git configuration can apply, and this is
+    # the backstop for the ones it does not know about. Reported first because
+    # every classification below is about *our* ref, and none of them would
+    # mention that a second one moved.
+    if attempt.unexpected_refs:
+        return _result(
+            PushOutcome.PUSH_WROTE_UNEXPECTED_REFS,
+            created
+            + ((f"the push reported: {push_failure}",) if push_failure else ())
+            + (
+                f"{git_remote} reports updating "
+                + ", ".join(attempt.unexpected_refs)
+                + f", which this run did not ask it to. Only {refspec} was "
+                "authorised, so the write boundary was exceeded and this run "
+                "stops here rather than continuing on the strength of the branch "
+                "alone. Inspect the remote before doing anything else",
+            ),
+            target=target,
+            push_target=push_target,
+            commit=commit,
+            commit_created=True,
+        )
 
     # Read the ref back from the remote either way. On the failure path this
     # is what distinguishes a rejected push from a lost response: a push whose
@@ -714,22 +744,33 @@ def _commit_and_push(
     )
 
     if landed is True:
+        # The commit is in the branch's history. *Who put it there* is the
+        # same question as on the exact-tip path, and gets the same answer:
+        # only the remote saying it applied our update establishes that this
+        # run did. Another actor pushing the identical commit and advancing
+        # past it produces exactly this observation while our own push was
+        # rejected.
+        moved_the_ref = remote_said == REMOTE_ACCEPTED
         return _result(
             PushOutcome.CI_STALE_TARGET,
             created
             + ((f"the push reported: {push_failure}",) if push_failure else ())
             + (
                 f"{push_target.ref} reads back as {observed}, and {commit.sha} is an "
-                "ancestor of it: the push DID land, and the branch has since moved "
-                "on. This run's fix is in the branch's history but is not its head, "
-                "so CI for it is not evidence about the pull request's present "
-                "state",
+                "ancestor of it: the fix IS in the branch's history, and the branch "
+                "has since moved on. It is not the head, so CI for it is not "
+                "evidence about the pull request's present state",
+                f"{git_remote} applied {refspec}, so this run is what put it there"
+                if moved_the_ref
+                else f"{git_remote} gave no answer establishing that this run's push "
+                "is what put it there",
             ),
             target=target,
             push_target=push_target,
             commit=commit,
             pushed_sha=commit.sha,
-            push_performed=True,
+            push_performed=moved_the_ref,
+            already_pushed=not moved_the_ref,
             commit_created=True,
         )
 
@@ -802,8 +843,13 @@ def _commit_and_push(
             else ("git push reported success",)
         )
         + (
-            f"{git_remote} gave no per-ref answer for {refspec}, so whether it "
-            "reached the remote at all is not established",
+            (
+                f"{git_remote} gave no per-ref answer for {refspec}, so whether it "
+                "reached the remote at all is not established"
+                if remote_said == REMOTE_SILENT
+                else f"{git_remote} answered for {refspec}, but the answer does not "
+                "establish whether the ref was updated"
+            ),
         )
         + (
             f"{push_target.ref} reads back as {observed}, not the {commit.sha} this "

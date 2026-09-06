@@ -525,6 +525,11 @@ def test_only_outcomes_after_a_verified_push_report_a_mutation():
         mutated = PushResult(outcome=outcome).repository_mutated
         if outcome is PushOutcome.PUSH_NOT_VERIFIED:
             assert mutated is None
+        elif outcome is PushOutcome.PUSH_WROTE_UNEXPECTED_REFS:
+            # Certainly written, and more than was authorised: known, not
+            # unknown, and the one outcome that is mutated without the branch
+            # necessarily holding the fix.
+            assert mutated is True
         else:
             assert mutated is (outcome in PUSHED_OUTCOMES)
 

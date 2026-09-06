@@ -96,18 +96,36 @@ class CommitRefused(Exception):
     """
 
 
+@dataclass(frozen=True)
+class PushAttempt:
+    """Everything the remote said about a push, not only about *our* ref.
+
+    ``unexpected_refs`` exists because "one bounded ref update" is a claim
+    about what the remote *did*, and the only place that shows up is the
+    remote's own report. A push that also wrote a tag says so on a line this
+    runner would otherwise have skipped past.
+    """
+
+    report: str
+    unexpected_refs: tuple[str, ...] = ()
+
+
 class PushRefused(Exception):
     """``git push`` exited non-zero. What that means is a separate question.
 
-    ``report`` carries the remote's own per-ref answer, because the exit
+    ``attempt`` carries the remote's own per-ref answer, because the exit
     status does not distinguish "the remote refused this ref" from "the
     answer never arrived" -- and only the first of those proves that nothing
     was written.
     """
 
-    def __init__(self, message: str, report: str = REMOTE_SILENT) -> None:
+    def __init__(self, message: str, attempt: PushAttempt | None = None) -> None:
         super().__init__(message)
-        self.report = report
+        self.attempt = attempt if attempt is not None else PushAttempt(REMOTE_SILENT)
+
+    @property
+    def report(self) -> str:
+        return self.attempt.report
 
 
 class PushNotVerified(Exception):
@@ -469,6 +487,29 @@ def contains_commit(
     return completed == ""
 
 
+def _porcelain_lines(stdout: str):
+    """Yield ``(flag, refspec, summary)`` for each per-ref line git reported."""
+    for line in stdout.splitlines():
+        fields = line.split("\t")
+        if len(fields) >= 3 and ":" in fields[1]:
+            yield fields[0], fields[1], fields[2]
+
+
+def read_unexpected_refs(stdout: str, *, refspec: str) -> tuple[str, ...]:
+    """Refs the remote reports updating that this runner did not ask for.
+
+    The argv already refuses the two expansions git configuration can apply
+    -- ``push.followTags`` and ``push.recurseSubmodules`` -- but that is the
+    *stated* half of the boundary. This is the backstop: whatever the reason,
+    a report naming a ref other than ours means the push wrote more than one
+    ref, and the runner would rather stop and say so than continue on the
+    strength of having passed the right flags.
+    """
+    return tuple(
+        spec for _flag, spec, _summary in _porcelain_lines(stdout) if spec != refspec
+    )
+
+
 def read_push_report(stdout: str, *, refspec: str) -> str:
     """What did the remote say about *our* ref?
 
@@ -491,11 +532,10 @@ def read_push_report(stdout: str, *, refspec: str) -> str:
     explicit allowlist and everything else fails closed to
     :data:`REMOTE_UNKNOWN`.
     """
-    for line in stdout.splitlines():
-        fields = line.split("\t")
-        if len(fields) < 3 or fields[1] != refspec:
+    for _flag, spec, _summary in _porcelain_lines(stdout):
+        if spec != refspec:
             continue
-        flag, summary = fields[0], fields[2]
+        flag, summary = _flag, _summary
         if flag.startswith("!"):
             if any(reason in summary for reason in REFUSAL_SUMMARIES):
                 return REMOTE_REJECTED
@@ -516,9 +556,11 @@ def push_fix_commit(
 ) -> str:
     """Push one commit to one branch, with ordinary fast-forward semantics.
 
-    No ``--force``, no ``+`` in the refspec, no ``--force-with-lease``, and no
-    tag: a non-fast-forward is refused by the remote, which is the correct
-    place for that decision. ``--`` separates the remote from the refspec so
+    No ``--force`` and no ``+`` in the refspec, so a non-fast-forward is
+    refused by the remote rather than by this runner's good intentions; no tag
+    ref, and no configuration-driven expansion into one. The ``lease`` is the
+    one force-shaped argument here and it is the opposite of a force: it makes
+    the update conditional. ``--`` separates the remote from the refspec so
     neither can be read as an option.
 
     A ``pre-push`` hook is deliberately **not** bypassed. It is the operator's
@@ -533,14 +575,31 @@ def push_fix_commit(
     the leased value, so the update is an ordinary fast-forward that the
     remote will only apply while the ref still holds exactly that value.
 
-    Returns what the remote said about our ref -- see :func:`read_push_report`
-    -- and raises :class:`PushRefused` carrying the same, because git's exit
-    status alone cannot tell a rejection the remote sent from an answer that
-    never arrived.
+    Returns a :class:`PushAttempt`: what the remote said about our ref -- see
+    :func:`read_push_report` -- together with any *other* ref it reported
+    updating. :class:`PushRefused` carries the same, because git's exit status
+    alone cannot tell a rejection the remote sent from an answer that never
+    arrived.
     """
     try:
         result = run_git_capture(
-            ["push", "--porcelain", lease, "--", remote, refspec],
+            [
+                "push",
+                "--porcelain",
+                # Two expansions the operator's own configuration can apply to
+                # a push that names one refspec, both refused explicitly.
+                # `push.followTags` pushes annotated tags reachable from the
+                # commit -- a second ref update, in a namespace this runner
+                # promises never to write. `push.recurseSubmodules=on-demand`
+                # pushes submodule commits to *their* remotes, turning one
+                # repository write into writes to several.
+                "--no-follow-tags",
+                "--recurse-submodules=no",
+                lease,
+                "--",
+                remote,
+                refspec,
+            ],
             cwd=worktree,
             timeout=timeout,
         )
@@ -550,9 +609,12 @@ def push_fix_commit(
         # is emphatically not a workspace failure, which is what it used to be
         # reported as -- with `repository_mutated: false` attached to a branch
         # that could already hold the commit.
-        raise PushRefused(str(exc), REMOTE_SILENT) from exc
+        raise PushRefused(str(exc), PushAttempt(REMOTE_SILENT)) from exc
 
-    report = read_push_report(result.stdout, refspec=refspec)
+    attempt = PushAttempt(
+        report=read_push_report(result.stdout, refspec=refspec),
+        unexpected_refs=read_unexpected_refs(result.stdout, refspec=refspec),
+    )
     if not result.ok:
-        raise PushRefused(f"git push failed: {result.failure}", report)
-    return report
+        raise PushRefused(f"git push failed: {result.failure}", attempt)
+    return attempt

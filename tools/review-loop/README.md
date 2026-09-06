@@ -1153,7 +1153,7 @@ design:
 | | |
 | --- | --- |
 | **Can** | Fast-forward one commit onto the pull request's own head branch, in this repository. |
-| **Cannot** | Force push, or lease against the local remote-tracking ref. Write a tag. Create a branch that does not exist. Push to the default branch, the base branch, or a fork's branch. Push to a remote that names a different repository. Push an arbitrary refspec. Rebase, reset, cherry-pick, merge, or rewrite history. Merge the pull request. Write anything at all to the GitHub API. |
+| **Cannot** | Force push, or lease against the local remote-tracking ref. Write a tag — including one carried along by `push.followTags`. Push submodule commits to their own remotes. Create a branch that does not exist. Push to the default branch, the base branch, or a fork's branch. Push to a remote that names a different repository. Push an arbitrary refspec. Rebase, reset, cherry-pick, merge, or rewrite history. Merge the pull request. Write anything at all to the GitHub API. |
 
 **What that guarantee covers, precisely.** It is a statement about *the git
 argument vectors this runner constructs* — enumerated by a test that walks the
@@ -1337,9 +1337,30 @@ So the push carries an explicit lease on the exact expected old value:
 
 ```bash
 git push --porcelain \
+  --no-follow-tags --recurse-submodules=no \
   --force-with-lease=refs/heads/<branch>:<reviewed head> \
   -- <remote> <commit>:refs/heads/<branch>
 ```
+
+**The two `--no-*` flags are not decoration.** An explicit refspec bounds what
+this runner *asks* for; it does not bound what the operator's configuration
+adds to the request. `push.followTags=true` pushes an annotated tag reachable
+from the commit — a second ref update, in the one namespace this command
+promises never to write — and `push.recurseSubmodules=on-demand` pushes
+submodule commits to *their* remotes, turning one repository write into
+writes to several. Both are refused explicitly.
+
+Two neighbouring settings were checked and need no flag: a configured
+`remote.<name>.push` refspec is overridden by the one on the command line, and
+`remote.<name>.mirror` makes git refuse outright rather than expand
+(`--mirror can't be combined with refspecs`).
+
+And because "the flags are right" is a claim about this argv rather than about
+what happened, **the remote's own report is checked for refs nobody asked
+for.** Any per-ref line naming something other than our refspec ends the run
+as `PUSH_WROTE_UNEXPECTED_REFS`: something was certainly written, and more
+than the boundary permits, so a human looks rather than the run continuing on
+the strength of the branch alone.
 
 **This is not a force push**, despite the flag's name. The commit's parent is
 already proven to be the reviewed head, so the update it asks for is an
@@ -1447,6 +1468,13 @@ the text output says *"the branch already held this exact fix; this run did
 not move the ref"* rather than crediting an earlier run, because another actor
 could equally have placed it.
 
+**The same rule applies when the commit is merely an ancestor.** Finding it in
+the branch's history proves it is there, not that this run put it there: a
+concurrent runner can push the identical commit, advance past it, and leave
+our own lease-guarded push refused — which looks exactly like this from here.
+So `push_performed` is set from the remote's answer in that case too, never
+from the ancestry alone.
+
 The last row is the honest one and the reason the table exists: after a push
 that produced no per-ref answer, an absent commit is compatible both with a
 push that never landed and with one that landed and was erased. The runner
@@ -1503,6 +1531,7 @@ alongside anything else.
 | 71 | `PUSH_WORKSPACE_INVALID` | Not written. |
 | 72 | `PUSH_API_ERROR` | Not written. GitHub unreachable before the push. |
 | 73 | `CI_API_ERROR` | **Pushed.** GitHub unreachable while waiting. |
+| 74 | `PUSH_WROTE_UNEXPECTED_REFS` | **Written, beyond authority.** The remote reported updating a ref this run did not ask for. Inspect the remote. |
 
 Three rules the runner keeps on the failure paths:
 

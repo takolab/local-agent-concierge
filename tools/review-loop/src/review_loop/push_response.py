@@ -17,6 +17,9 @@ Three groups, and the boundary between them is the push:
   fix commit is on the pull request branch, and
   :attr:`PushResult.pushed_sha` names it. What differs between them is only
   what CI then said.
+* **Mutated beyond authority** -- ``PUSH_WROTE_UNEXPECTED_REFS`` alone. The
+  remote reported writing a ref nobody asked for. Something was written for
+  certain, and more than the boundary permits.
 * **Unknown** -- ``PUSH_NOT_VERIFIED`` alone. ``git push`` ran and the remote
   does not show the expected commit. This is not "the push failed": the
   remote may have taken it and answered late, or something else may have
@@ -64,6 +67,15 @@ class PushOutcome(Enum):
     #: ``git push`` was attempted and reading the remote ref back afterwards
     #: did not show the created commit. Remote state is not known.
     PUSH_NOT_VERIFIED = "PUSH_NOT_VERIFIED"
+
+    # -- mutated beyond what was authorised --------------------------------
+
+    #: The remote reported updating a ref this runner did not ask for -- a tag
+    #: carried along by ``push.followTags``, or anything else. Something was
+    #: certainly written, and more than the one ref the write boundary
+    #: permits, so the run stops and a human looks rather than continuing to
+    #: CI on the strength of the branch alone.
+    PUSH_WROTE_UNEXPECTED_REFS = "PUSH_WROTE_UNEXPECTED_REFS"
 
     # -- before any write --------------------------------------------------
 
@@ -133,6 +145,7 @@ PUSH_EXIT_CODES: dict[PushOutcome, int] = {
     PushOutcome.PUSH_WORKSPACE_INVALID: 71,
     PushOutcome.PUSH_API_ERROR: 72,
     PushOutcome.CI_API_ERROR: 73,
+    PushOutcome.PUSH_WROTE_UNEXPECTED_REFS: 74,
 }
 
 #: How long the runner waits for authoritative CI on the pushed commit, and
