@@ -15,6 +15,12 @@ Two rules are worth naming, because they are not obvious:
   standing review-automation decision: Blocking findings go to a human, never
   into a bounded fix. A verdict that pairs one with ``changes_requested`` is
   therefore not a verdict this pipeline knows how to act on.
+
+:func:`validate_finding` and :func:`check_text` are public because the
+re-review contract raises *fresh* findings in the same shape, and a second
+implementation of "is this an admissible finding?" is exactly the kind of
+drift the single-contract design exists to prevent. They are the finding
+rules; the round-1 envelope rules below stay private to this module.
 """
 
 from __future__ import annotations
@@ -71,7 +77,7 @@ def _require(raw: dict[str, str], label: str, *, where: str) -> str:
     return value.strip()
 
 
-def _check_text(value: str, label: str, *, where: str, limit: int) -> str:
+def check_text(value: str, label: str, *, where: str, limit: int) -> str:
     if len(value) > limit:
         raise VerdictValidationError(
             f"{where}: {label!r} is {len(value)} characters, above the {limit} limit"
@@ -85,7 +91,7 @@ def _check_text(value: str, label: str, *, where: str, limit: int) -> str:
     return value
 
 
-def _validate_finding(raw: RawFinding, index: int) -> Finding:
+def validate_finding(raw: RawFinding, index: int) -> Finding:
     where = f"finding {index}"
     for label in _REQUIRED_FINDING_FIELDS:
         _require(raw.fields, label, where=where)
@@ -105,18 +111,18 @@ def _validate_finding(raw: RawFinding, index: int) -> Finding:
             + ", ".join(s.value for s in Severity)
         )
 
-    location = _check_text(
+    location = check_text(
         raw.fields["Location"].strip(), "Location", where=where, limit=MAX_LOCATION_CHARS
     )
     texts = {}
     for label in ("Problem", "Evidence", "Required outcome"):
-        texts[label] = _check_text(
+        texts[label] = check_text(
             raw.fields[label].strip(), label, where=where, limit=MAX_FIELD_CHARS
         )
 
     scope_boundary = raw.fields.get("Scope boundary", "").strip() or None
     if scope_boundary is not None:
-        scope_boundary = _check_text(
+        scope_boundary = check_text(
             scope_boundary, "Scope boundary", where=where, limit=MAX_FIELD_CHARS
         )
 
@@ -212,7 +218,7 @@ def validate(raw: RawVerdict, *, target_head_sha: str) -> ReviewVerdict:
         )
 
     findings = tuple(
-        _validate_finding(entry, index) for index, entry in enumerate(raw.findings, start=1)
+        validate_finding(entry, index) for index, entry in enumerate(raw.findings, start=1)
     )
 
     seen: set[str] = set()
@@ -226,7 +232,7 @@ def validate(raw: RawVerdict, *, target_head_sha: str) -> ReviewVerdict:
 
     escalation_reason = raw.envelope.get("Escalation reason", "").strip() or None
     if escalation_reason is not None:
-        escalation_reason = _check_text(
+        escalation_reason = check_text(
             escalation_reason, "Escalation reason", where="the verdict", limit=MAX_FIELD_CHARS
         )
 

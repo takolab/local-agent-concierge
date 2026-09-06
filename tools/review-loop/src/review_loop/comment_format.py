@@ -18,7 +18,7 @@ The marker alone is not proof either. It is a public, deterministic string
 that anyone who can comment is able to reproduce; it identifies *which*
 review a record would be, not *who* wrote it. The runner therefore accepts a
 marker as a record only from the account it would post as -- see
-:func:`review_loop.review_runner._existing_record`. That is a provenance
+:func:`find_record` below. That is a provenance
 check, not a signature: it does not defend against the account itself, which
 is the same-identity residual risk this project accepts deliberately.
 """
@@ -33,6 +33,7 @@ from .verdict import Recommendation, ReviewVerdict, Severity
 from .review_target import ReviewTarget
 
 HEADING = "## Independent AI Review"
+RE_REVIEW_HEADING = "## Independent AI Re-Review"
 
 _MARKER_PREFIX = "local-agent-concierge:independent-review"
 _MARKER_VERSION = "v1"
@@ -41,6 +42,12 @@ _MARKER_VERSION = "v1"
 #: or a Bounded Fix Response, is a different identity rather than an
 #: overwrite of this one.
 REVIEWER_ROLE = "independent-reviewer"
+
+#: The role a fresh Independent Re-Review record is written in. Together with
+#: the round it makes a re-review a different identity from the review it
+#: follows, even though both describe the same pull request -- and it is what
+#: keeps a re-review comment from being mistaken for a second initial review.
+RE_REVIEWER_ROLE = "independent-re-reviewer"
 
 _MARKER_PATTERN = re.compile(
     r"<!--\s*"
@@ -131,6 +138,38 @@ def body_records(body: str, identity: RecordIdentity) -> bool:
     return identity in parse_markers(body)
 
 
+def find_record(comments, identity: RecordIdentity, *, expected_author: str) -> int | None:
+    """Return the id of a comment already recording this identity, if any.
+
+    A record is a matching marker **written by the account the runner would
+    post as**. Neither half is sufficient on its own.
+
+    The heading is not identity: ``## Independent AI Review`` is how every
+    review in this repository has been written by hand, so a human comment
+    must not suppress a real review.
+
+    The marker is not provenance either. Its format is public and
+    deterministic, so anyone who can comment on the pull request can reproduce
+    it -- and a marker copied into someone else's comment would otherwise make
+    a runner report a validated review that was never produced, without even
+    starting a reviewer. Checking the author is not a signature and does not
+    defend against the account itself; it distinguishes this automation's own
+    record from everyone else's text, which is the distinction the duplicate
+    check actually needs.
+
+    Shared by the review and re-review turns rather than written twice: the
+    two records differ by round and role inside ``identity``, and a second
+    copy of this rule is a second place for it to drift.
+    """
+    for comment in comments:
+        if not body_records(comment.body, identity):
+            continue
+        if comment.author.casefold() != expected_author.casefold():
+            continue
+        return comment.comment_id
+    return None
+
+
 def _render_finding(finding) -> list[str]:
     lines = [
         "",
@@ -204,5 +243,130 @@ def render(target: ReviewTarget, verdict: ReviewVerdict) -> str:
         "context immediately before this comment was written.",
         "",
         marker(identity_for(target, verdict)),
+    ]
+    return "\n".join(lines) + "\n"
+
+
+def rereview_identity_for(target: ReviewTarget, rereview) -> RecordIdentity:
+    """The identity of one recorded Independent AI Re-Review.
+
+    Same shape as :func:`identity_for`, with two fields carrying the whole
+    difference: the head is the *pushed fix* commit and the role is
+    :data:`RE_REVIEWER_ROLE`. So a re-review can never overwrite or be
+    mistaken for the round-1 review of the commit it followed, and -- because
+    ``base_sha`` is still the merge base CI verified -- a re-review of the
+    same pushed commit against a *different* merge context is a different
+    record, which is the case a duplicate check must not suppress.
+    """
+    return RecordIdentity(
+        repo=target.repo,
+        number=target.number,
+        head_sha=rereview.reviewed_head_sha,
+        base_sha=target.ci_merge_base_sha,
+        round=rereview.round,
+        role=RE_REVIEWER_ROLE,
+    )
+
+
+def _render_resolution(resolution) -> list[str]:
+    lines = [
+        "",
+        f"### {resolution.resolution.value} — {resolution.finding_id}",
+        "",
+        f"Finding ID: {resolution.finding_id}",
+        f"Resolution: {resolution.resolution.value}",
+        f"Evidence: {resolution.evidence}",
+    ]
+    if resolution.reason:
+        lines.append(f"Reason: {resolution.reason}")
+    return lines
+
+
+def _id_list(ids) -> str:
+    return ", ".join(ids) or "(none)"
+
+
+def render_rereview(target: ReviewTarget, request, rereview) -> str:
+    """Render the comment body for one validated re-review of one pushed fix.
+
+    The layout is deliberately two sections that never share a number. The
+    counts above them are counts *of one collection each* -- resolutions by
+    resolution, fresh findings by severity -- and there is no combined total
+    anywhere, because there is no fact a combined total would state. A reader
+    who wants "is this pull request done?" has to read both, which is the
+    correct amount of work for that question.
+    """
+    from .rereview import Resolution
+
+    evidence = (
+        ", ".join(
+            f"{path} (run {run_id}: {conclusion})"
+            for path, run_id, conclusion in target.ci_evidence
+        )
+        or "(none recorded)"
+    )
+    resolved = rereview.resolutions_with(Resolution.RESOLVED)
+
+    lines = [
+        RE_REVIEW_HEADING,
+        "",
+        f"Round: {rereview.round}",
+        f"Reviewed head SHA: {rereview.reviewed_head_sha}",
+        f"Fix for: round {request.original_round} review of "
+        f"{request.original_head_sha}",
+        f"CI integration base: {target.base_ref} at {target.ci_merge_base_sha}",
+        f"CI verification: READY — {evidence}",
+        f"Recommendation: {rereview.recommendation.value}",
+        "",
+        "These are two independent facts. Resolution describes what became of "
+        "the round "
+        f"{request.original_round} findings; the fresh review describes this "
+        "pull request as it now stands. Neither implies the other.",
+        "",
+        f"Original findings: {len(rereview.resolutions)}",
+        f"RESOLVED: {_id_list(r.finding_id for r in resolved)}",
+        f"UNRESOLVED: {_id_list(rereview.unresolved_finding_ids)}",
+        "ESCALATE: "
+        + _id_list(
+            r.finding_id for r in rereview.resolutions_with(Resolution.ESCALATE)
+        ),
+        "",
+        f"Fresh Blocking: {rereview.count(Severity.BLOCKING)}",
+        f"Fresh Major: {rereview.count(Severity.MAJOR)}",
+        f"Fresh Minor: {rereview.count(Severity.MINOR)}",
+        f"Fresh findings: {len(rereview.fresh_findings)}",
+    ]
+
+    if rereview.escalation_reason:
+        lines += ["", f"Escalation reason: {rereview.escalation_reason}"]
+
+    lines += ["", f"Original finding resolutions (round {request.original_round}):"]
+    for resolution in rereview.resolutions:
+        lines += _render_resolution(resolution)
+
+    lines += ["", "Fresh findings:"]
+    if not rereview.fresh_findings:
+        lines += [
+            "",
+            f"The re-reviewer found nothing new at {rereview.reviewed_head_sha}.",
+        ]
+    else:
+        for finding in rereview.fresh_findings:
+            lines += _render_finding(finding)
+
+    lines += [
+        "",
+        "---",
+        "",
+        "Recorded automatically by `review-loop re-review`. The re-review above "
+        "was produced by a fresh independent reviewer with no access to the "
+        "Coding Agent's context, validated against this exact pushed fix SHA, "
+        "and re-checked against the pull request's current CI and merge context "
+        "immediately before this comment was written. It is evidence, not an "
+        "approval: whether an unresolved finding gets another fix, whether a "
+        "fresh finding is accepted, and whether anything merges all remain a "
+        "human's decision.",
+        "",
+        marker(rereview_identity_for(target, rereview)),
     ]
     return "\n".join(lines) + "\n"
