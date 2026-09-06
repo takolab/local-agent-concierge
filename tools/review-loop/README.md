@@ -2,10 +2,12 @@
 
 A local command that runs one Independent AI Review turn against a pull
 request, records the result only when it can prove which exact pull request
-state that review describes, and routes the findings that review produced to
-one bounded Coding Agent turn against that same exact state.
+state that review describes, routes the findings that review produced to one
+bounded Coding Agent turn against that same exact state, and commits and
+pushes the patch that produces — proving, at each step, exactly which change
+is being carried forward.
 
-It has three commands.
+It has four commands, and only the fourth can change the repository.
 
 **`review-loop --pr N`** answers two questions, read-only:
 
@@ -24,10 +26,20 @@ writable worktree at the reviewed commit, an explicit allowed scope derived
 from the findings, a Structured Fix Response validated against the working
 tree, and a patch. It makes **no GitHub request at all** and commits nothing.
 
-Everything after that — committing the fix, pushing it, waiting for CI,
-re-review, merge decisions — is not here. This is one review turn and one
-bounded fix turn, both bound to one verified state, with the human keeping
-every decision about what happens to the result.
+**`review-loop push --fix-json <file> --patch <file>`** is the first stage
+with **authoritative repository write capability**. It proves the patch it
+holds is the one the fix turn validated, commits it on the exact reviewed
+head, fast-forward pushes that commit to the pull request's own branch, reads
+the remote ref back to confirm the exact pushed SHA, and waits for
+authoritative CI on that exact commit. Its entire write surface is one
+`git push` to one derived ref; GitHub itself stays read-only.
+
+Everything after that — Independent Re-Review, finding-resolution tracking,
+the multi-round loop, the Merge Decision Brief, merge — is not here. **The
+full Finding → Fix → Re-Review loop is not automated.** This is one review
+turn, one bounded fix turn, and one commit-and-push turn, each bound to one
+verified state, with the human keeping every decision about acceptance and
+merge.
 
 ## Verification: `review-loop --pr N`
 
@@ -758,6 +770,11 @@ candidate patch
 → merge
 ```
 
+The first two of those are now
+[`review-loop push`](#committing-and-pushing-the-fix-review-loop-push), which
+does re-establish merge-context currency before reporting `PUSH_READY` —
+because unlike a fix turn, it writes.
+
 One property makes this coherent rather than merely convenient: **the change-set
 boundary does not drift when the base moves.** `merge-base` backs up to where
 the branch diverged, so a base that has advanced since contributes nothing to
@@ -1097,6 +1114,486 @@ working tree is inspected independently rather than trusted — but the
 inspection establishes what happened *inside the worktree*, and an agent that
 wrote somewhere else did so as you, unobserved.
 
+## Committing and pushing the fix: `review-loop push`
+
+**This is the first stage of the review loop with authoritative repository
+write capability.** Everything before it produced records and files; this one
+puts a commit on a branch that GitHub builds and a human merges. That is the
+whole reason its correctness argument is stated at this length.
+
+```bash
+review-loop fix --review-json review.json \
+  --agent-command "..." --write-patch fix.patch --json > fix.json
+
+review-loop push --fix-json fix.json --patch fix.patch
+```
+
+What it does, in the order it does it:
+
+```text
+validated candidate patch
+→ exact patch identity verification
+→ exact fix commit on the reviewed head
+→ fast-forward push to the pull request's own branch
+→ exact pushed commit SHA, read back from the remote
+→ authoritative CI for that exact commit
+→ CI classification
+```
+
+### The write boundary
+
+Exactly one repository mutation is possible:
+
+> A **fast-forward `git push` of one commit to `refs/heads/<the pull request's
+> head branch>`**, on the remote named by `--git-remote` (default `origin`).
+
+Everything that is *not* possible is worth listing, because the list is the
+design:
+
+| | |
+| --- | --- |
+| **Can** | Fast-forward one commit onto the pull request's own head branch, in this repository. |
+| **Cannot** | Force push, or lease against the local remote-tracking ref. Write a tag — including one carried along by `push.followTags`. Push submodule commits to their own remotes. Create a branch that does not exist. Push to the default branch, the base branch, or a fork's branch. Push to a remote that names a different repository. Push an arbitrary refspec. Rebase, reset, cherry-pick, merge, or rewrite history. Merge the pull request. Write anything at all to the GitHub API. |
+
+**What that guarantee covers, precisely.** It is a statement about *the git
+argument vectors this runner constructs* — enumerated by a test that walks the
+AST and asserts the complete set of subcommands. It is **not** a statement
+that no other write can occur while the command runs, because `git commit` and
+`git push` deliberately run your normal hooks, and a `pre-commit`,
+`prepare-commit-msg` or `pre-push` hook is an arbitrary program that can write
+files, reach the network, or touch other repositories. Hooks are not bypassed
+— `--no-verify` is not passed — because they are your configuration on your
+machine and a runner that gained push authority this week is not the thing
+that should start ignoring them. The trust assumption is therefore explicit:
+**your configured hooks are trusted; the runner's own argv is bounded.** A
+hook that modifies files is still caught, because the commit is re-hashed
+against the candidate patch afterwards.
+
+The branch is not a parameter. **There is no `--branch`, no `--ref`, no
+`--refspec` and no `--force`**, and a test asserts that the parser offers
+none of them — because the flag that would undo this design is the one that
+lets an operator, or a script quoting agent output, name the ref. The refspec
+is built inside [`push_branch.py`](src/review_loop/push_branch.py) from
+GitHub's own pull request object and from nothing else.
+
+**The repository is checked too, not just the ref name.** A ref name is half a
+destination; `--git-remote` supplies the other half, and it *is* operator
+controlled. So **every** URL git reports for that remote must name the
+repository the validated handoff describes — read with `--all`, in both
+directions:
+
+```bash
+git remote get-url --all <remote>
+git remote get-url --push --all <remote>
+```
+
+`--all` is not thoroughness for its own sake. A remote may have several push
+URLs and `git push` writes to **every** one of them, while
+`git remote get-url --push` without `--all` reports only the first. Checking
+that first URL while pushing to all of them is not a check; it is the
+appearance of one.
+
+The rule each URL must satisfy:
+
+* a URL with a **host** must be a GitHub host, and its `owner/name` must be
+  the target repository. `--git-remote upstream` pointing at `someone/fork`,
+  or at another forge entirely, is refused;
+* a URL with **no host** — a local path — is accepted when its final two
+  segments name the target repository. This runner cannot prove a local path
+  is GitHub and says so rather than pretending; an operator who constructs a
+  path ending in `<owner>/<name>.git` to redirect this push can already push
+  there by hand.
+
+`git remote get-url` reports the *effective* URL, with any
+`url.<base>.insteadOf` rewriting already applied, so a rewrite cannot hide
+behind this check.
+
+**Credentials.** The push travels over your existing git credential for the
+remote — an SSH key or a credential helper. No new token is introduced, and
+none is read from the environment by this tool. GitHub itself stays read-only
+here: the same `gh api --method GET` client the verification command uses. No
+comment, label, review, dispatch or merge is written, and a source-level test
+asserts that no push-path module imports the comment writer or names a write
+HTTP method.
+
+**Your git identity authors the commit.** `git commit` runs with your
+environment, so `user.name` and `user.email` must be configured, and the fix
+commit is authored as you. That is deliberate rather than incidental: a
+machine-generated commit landing under a human's name is a fact worth being
+visible in `git log`, not one to paper over with a synthetic identity. A
+missing identity, or a signing configuration that cannot sign, is
+`COMMIT_REFUSED` with git's own message — reported, never bypassed.
+
+**One repository, one authority.** The GitHub client is constructed from
+`handoff.target.repo` — never from `detect_repository()`, which would read the
+repository out of whatever clone you happen to be standing in and give the
+GitHub side of this command a different authority from the git side. `--repo`
+is an *assertion* that the handoff describes that repository, not a selector.
+A test asserts the module does not even import the directory-based detector.
+
+For the same reason the pull request must be a pull request **in** that
+repository at both ends: `head.repo.full_name` and `base.repo.full_name` must
+both equal it. Checking only the head would admit a cross-repository pull
+request in someone else's repository whose head happens to live here, and the
+branch named in one of those is not a branch this fix may be pushed to.
+
+**Who controls what.**
+
+| Input | Controlled by | Treated as |
+| --- | --- | --- |
+| `--fix-json` document | the operator | a *selection*, re-validated field by field; it cannot name a commit that is not the head, or a patch whose bytes disagree with its digest |
+| the patch file | the operator | checked against the digest before anything is applied |
+| the pull request object | GitHub | **authoritative** for the branch, the base, the default branch and the head SHA |
+| `--git-remote` | the operator | a *selection*, checked against `target.repo` before any write |
+| the remote's URLs | git | **authoritative** for which repository a push would reach |
+| the remote branch tip | the remote | **authoritative** for what is already pushed |
+| the created commit's parent and diff | local git | **authoritative** for what was committed |
+| reviewer finding text, Coding Agent output | untrusted | reaches neither the refspec nor the commit message |
+
+### Exact candidate patch identity
+
+The fix turn records a SHA-256 of the diff it captured. The push turn checks
+that digest **three times**, against three different things, and the third is
+the one that matters:
+
+1. **The file.** Its bytes must hash to the recorded digest. A patch from
+   another fix turn, or one edited by hand, stops here — before `git apply`.
+2. **The applied tree.** After `git apply --index`, the working tree is
+   re-diffed and must hash to the same digest. This is what makes "no
+   unrelated change leaked in" a checked fact: any extra edit, from any
+   source, changes the diff and therefore the digest.
+3. **The commit.** Once the commit exists, *git's own account of it* —
+   `diff <parent> <commit>` — must hash to the same digest again, its parent
+   must be the reviewed head, it must be exactly one commit, and the working
+   tree must be clean afterwards.
+
+A digest is only comparable if a diff is a function of its content, which by
+default it is not. `index` lines abbreviate to a length derived from the
+repository's object count; `diff.noprefix`, `diff.algorithm`, `diff.context`,
+`diff.indentHeuristic`, `diff.orderFile`, `mnemonicPrefix` and textconv
+drivers are all ordinary user configuration; `core.quotePath` decides whether
+a non-ASCII path is rendered literally or octal-escaped; and **rename
+detection** renders one tree transition either as `rename from`/`rename to` or
+as a delete plus an add, depending on `diff.renames` and — when renames are on
+— on `diff.renameLimit`, and therefore on how many files the change happened
+to touch.
+
+So every load-bearing diff goes through one canonical argument vector in
+[`patch_identity.py`](src/review_loop/patch_identity.py), which pins each of
+those. Tests cover it from three directions: hostile local `git config` for
+every pinned setting does not move the digest, a non-ASCII path and a rename
+each hash identically under both settings, and the same change hashes
+identically in a second clone with a different object count.
+
+The claim that comes with that is deliberately bounded: the digest is a
+property of the change **for the settings this module pins**, which is what
+makes two runs on two machines comparable. It is not a claim that no git
+configuration anywhere can affect it — `core.fileMode`, for instance, changes
+what git *sees* in a working tree rather than how a diff is rendered, and is
+not pinned because forcing it would break clones on filesystems that need it
+off.
+
+**The patch path is resolved before any worktree exists.** The file is read
+from your working directory and `git apply` runs inside a temporary worktree,
+so a relative `--patch fix.patch` — exactly what the documented flow produces
+— would otherwise pass the identity check and then fail to open. The resolved
+absolute path is used for both and reported in the result. For the same
+reason, `review-loop fix --write-patch` writes the patch in **binary** mode:
+the identity is the captured UTF-8 bytes, and text-mode newline translation
+would put different bytes on disk from the ones the digest describes.
+
+### Exact reviewed-head ancestry, and the branch this may reach
+
+Before anything is applied, four facts are re-established from their own
+authorities:
+
+* **The pull request object** (GitHub) — still open, still this number, head
+  branch in *this* repository, head branch that is neither the base nor the
+  default branch, base branch unchanged since the fix turn, and an exact
+  40-character head SHA.
+* **The remote branch tip** (`git ls-remote`) — what `refs/heads/<branch>`
+  actually points at right now.
+* **The workspace** — a detached worktree at the exact reviewed head, clean,
+  with no git-ignored residue. `--commit-cwd` can supply your own directory
+  instead; it is *verified*, not trusted.
+* **The patch** — applies to that head, producing exactly the validated change.
+
+If the head has moved, the run stops with `PUSH_TARGET_STALE` and nothing is
+written. **The patch is never rebased or adapted onto a different head.** A
+fix for a commit is a fix for that commit; making it apply somewhere else is a
+new fix turn's job, with a human deciding to run it.
+
+**The write is a compare-and-swap.** Reading the branch and then pushing are
+two operations, and between them the branch can move. Two ways that matters,
+both of which a plain `git push` gets wrong:
+
+* **deleted** in between — a plain push *recreates* it, contradicting "never
+  creates a branch that does not exist";
+* **rewound to an ancestor** in between — `A → C` is still a fast-forward, so
+  a plain push writes over a ref that is no longer at the state the fix was
+  authorised against.
+
+So the push carries an explicit lease on the exact expected old value:
+
+```bash
+git push --porcelain \
+  --no-follow-tags --recurse-submodules=no \
+  --force-with-lease=refs/heads/<branch>:<reviewed head> \
+  -- <remote> <commit>:refs/heads/<branch>
+```
+
+**The two `--no-*` flags are not decoration.** An explicit refspec bounds what
+this runner *asks* for; it does not bound what the operator's configuration
+adds to the request. `push.followTags=true` pushes an annotated tag reachable
+from the commit — a second ref update, in the one namespace this command
+promises never to write — and `push.recurseSubmodules=on-demand` pushes
+submodule commits to *their* remotes, turning one repository write into
+writes to several. Both are refused explicitly.
+
+Two neighbouring settings were checked and need no flag: a configured
+`remote.<name>.push` refspec is overridden by the one on the command line, and
+`remote.<name>.mirror` makes git refuse outright rather than expand
+(`--mirror can't be combined with refspecs`).
+
+And because "the flags are right" is a claim about this argv rather than about
+what happened, **the remote's own report is checked for refs nobody asked
+for** — and classified by what the report actually establishes, because git
+prints a line for a ref it left alone as readily as for one it changed:
+
+| Flag on the extra line | Established | Boundary |
+| --- | --- | --- |
+| space, `+`, `-`, `*` | it was updated | `exceeded` → `PUSH_WROTE_UNEXPECTED_REFS` (74) |
+| `!` `[remote failure]`, unrecognised | nothing | `unknown` → `PUSH_BOUNDARY_NOT_VERIFIED` (75) |
+| `=`, `!` with a recognised refusal | it was *not* updated | `clean`; reported in the reasons, the run continues |
+
+Exit 74 therefore means *a write beyond authority was established*, not merely
+that another ref appeared in the output — the same standard `PUSH_FAILED`
+holds itself to in the other direction.
+
+**The boundary is a second fact, not a replacement for the first.** What the
+push did to the authorised branch and what it did to everything else are
+separate questions, and either can be known while the other is not. So the
+branch is always read back *before* the boundary is judged, and both are
+reported: `boundary_status` in the JSON, its own line in the text output, and
+`pushed_sha` still populated when the read-back saw the commit. An earlier
+version returned on an unresolved extra ref before reading the branch at all,
+and answered "unknown" about a commit that was demonstrably sitting on it.
+
+**This is not a force push**, despite the flag's name. The commit's parent is
+already proven to be the reviewed head, so the update it asks for is an
+ordinary fast-forward; the lease adds only the condition *update this ref iff
+it is still exactly H*. The expected value is pinned explicitly rather than
+left to the remote-tracking ref, which is what an unqualified
+`--force-with-lease` consults — a local cache, and a lease against a cache is
+a lease against whatever this clone last fetched.
+
+The boundary test distinguishes the two precisely:
+
+| | |
+| --- | --- |
+| `--force` | forbidden |
+| `+<refspec>` | forbidden |
+| unqualified `--force-with-lease` | forbidden |
+| `--force-with-lease=refs/heads/<derived branch>:<40-hex>` | the only form, built in one module from values it has already validated |
+
+### Push verification
+
+`git push` exiting zero is not evidence that a ref moved. After the push the
+remote is asked, with `git ls-remote`, what the branch now points at, and the
+answer must be the exact commit this run created:
+
+```text
+created_fix_commit_sha == remote PR head SHA
+```
+
+That read-back also settles the ambiguous case in the *other* direction: a
+push whose answer was lost still moved the ref, so a reported failure whose
+read-back shows our commit is reported as a push that landed, not as a
+failure.
+
+A read-back that is *neither* our commit nor obviously unchanged is not
+self-explanatory, and it is not treated as if it were. Two independent
+questions are asked, because neither alone is enough.
+
+**What did the remote say?** The push runs with `--porcelain`, which writes
+one machine-readable line per ref on stdout whether it succeeded or failed:
+
+```text
+To <url>
+!	<sha>:refs/heads/<branch>	[rejected] (non-fast-forward)
+Done
+```
+
+The flag character is the first field. `!` marks a ref that was **rejected or
+failed to push** — and that "or" is why the summary text is read rather than
+the flag alone:
+
+| Summary | Meaning |
+| --- | --- |
+| `[rejected]`, `[remote rejected]`, `[no match]` | the remote refused; nothing was written |
+| `[remote failure]`, anything else after `!` | a server-side error whose outcome is **not** established |
+| `=` `[up to date]` | the ref already held this commit; the push moved nothing |
+| space, `*`, `+` | the remote applied our update |
+
+Only a recognised refusal is evidence. Treating every `!` as a refusal would
+turn a transient `[remote failure]` into a machine-readable claim that nothing
+was written, which is the strongest claim this runner makes and the one it
+must never make on a guess — so unrecognised summaries fail closed to
+"unknown". Because that text is human-readable, git is run in the **C locale**
+throughout, so a translated build cannot change the classification.
+
+**An absent commit does not establish a no-write** either, because a commit
+can land and then be erased from the branch's history. A local `pre-push` hook
+refusal, a dropped connection and a timeout all produce *no* per-ref line at
+all, and none of those is reported as though it were a refusal.
+
+**A timeout after the push process starts is never a pre-write failure.** The
+remote may already have applied the update, with the answer being the only
+thing that went missing, so it becomes an attempted push with no answer rather
+than a workspace error. The rule stated plainly:
+
+```text
+failure before the push process starts  => may be a verified no-write
+failure after  the push process starts  => unknown until remote evidence proves otherwise
+```
+
+**Is our commit in the branch's history?**
+
+```text
+git rev-list --max-count=1 <our commit> ^<observed tip>
+```
+
+Empty means our commit is an ancestor of what the branch now holds, so the
+push **did** land and the branch has moved on.
+
+Together:
+
+| Remote's answer | Commit in history | Outcome |
+| --- | --- | --- |
+| accepted | the ref *is* our commit | pushed **by this run**; CI wait begins |
+| up to date, or no answer | the ref *is* our commit | the branch holds the fix, but this run is not credited with moving the ref; CI wait begins |
+| rejected | no | `PUSH_FAILED` — verified no-write, on the remote's own word |
+| any | yes | `CI_STALE_TARGET` — landed, branch moved on |
+| accepted | no | `CI_STALE_TARGET` — landed, branch since rewritten |
+| unknown or silent | no, or unanswerable | `PUSH_NOT_VERIFIED` — genuinely unknown |
+
+The second row is a provenance rule rather than a safety one. `= [up to date]`
+means the ref already held this exact commit and the push moved nothing, and a
+missing answer means the runner cannot show its own push is what put it there.
+The branch state is reported either way; only the attribution changes — and
+the text output says *"the branch already held this exact fix; this run did
+not move the ref"* rather than crediting an earlier run, because another actor
+could equally have placed it.
+
+**The same rule applies when the commit is merely an ancestor.** Finding it in
+the branch's history proves it is there, not that this run put it there: a
+concurrent runner can push the identical commit, advance past it, and leave
+our own lease-guarded push refused — which looks exactly like this from here.
+So `push_performed` is set from the remote's answer in that case too, never
+from the ancestry alone.
+
+The last row is the honest one and the reason the table exists: after a push
+that produced no per-ref answer, an absent commit is compatible both with a
+push that never landed and with one that landed and was erased. The runner
+reports that it does not know, rather than putting a guess in a
+machine-readable field.
+
+### Authoritative CI, bound to the pushed commit
+
+The wait re-uses PR #28's verification unchanged — including its definition of
+authoritative evidence, so a `push`-event run on the same commit is still not
+evidence, and a path-filtered workflow's absence is still explained or
+ambiguous. What this stage adds is one requirement: **the pull request head
+that verification resolved must be the exact commit that was pushed.**
+
+* CI from the reviewed head is never accepted, even when it is green.
+* A third commit pushed on top ends the run as `CI_STALE_TARGET`.
+* Immediately after a push GitHub can still report the previous head; that is
+  lag and is waited out, boundedly. If the head never becomes the pushed
+  commit within `--ci-timeout`, the run ends `CI_AMBIGUOUS` rather than
+  guessing.
+
+The result vocabulary reuses the verification verdicts rather than inventing
+a second set of words for the same facts — READY, FAILED, PENDING,
+STALE_TARGET, AMBIGUOUS — with a `CI_` prefix marking which side of the push
+they describe.
+
+**Merge-context currency is back in contract here.** A fix turn deliberately
+did not guarantee it, because a fix turn wrote nothing; this stage writes, so
+it does. `PUSH_READY` requires that authoritative CI tested the pushed commit
+merged onto the *current* base branch tip. Green CI against a merge that no
+longer exists is `CI_STALE_TARGET`, and a fresh Independent Re-Review may not
+start from it.
+
+### Failure semantics
+
+Every outcome answers "what is now different?" on its own, without being read
+alongside anything else.
+
+| Exit | Outcome | Repository state |
+| --- | --- | --- |
+| 0 | `PUSH_READY` | **Pushed.** CI green for the exact commit, against the current merge context. |
+| 0 | `PUSH_PREPARED` | This run wrote nothing. `--dry-run` verified and applied the patch in a throwaway worktree. |
+| 60 | `PUSH_INPUT_INVALID` | This run wrote nothing. |
+| 61 | `PUSH_BRANCH_REFUSED` | This run wrote nothing. Fork head, closed pull request, default branch, an unusable branch name, or a remote naming another repository. |
+| 62 | `PUSH_TARGET_STALE` | This run wrote nothing. The head moved, or the branch is somewhere unaccounted for. |
+| 63 | `PATCH_IDENTITY_MISMATCH` | This run wrote nothing. |
+| 64 | `COMMIT_REFUSED` | This run wrote nothing. |
+| 65 | `PUSH_FAILED` | **This run wrote nothing**, verified: the remote's own `--porcelain` report *refused* the ref (a recognised rejection, not merely a failure). |
+| 66 | `PUSH_NOT_VERIFIED` | **Unknown.** The remote gave no answer, or one that establishes nothing (`[remote failure]`, a timeout, a local hook). An absent commit proves nothing. Read the branch before doing anything else. |
+| 67 | `CI_FAILED` | **Pushed.** CI for the exact commit failed. |
+| 68 | `CI_PENDING` | **Pushed.** CI had not finished within `--ci-timeout`. |
+| 69 | `CI_STALE_TARGET` | **Pushed.** The head moved off it, its merge context is stale, or a lost response hid a push that landed — under a later commit, or under a rewrite. |
+| 70 | `CI_AMBIGUOUS` | **Pushed.** CI state undecidable. |
+| 71 | `PUSH_WORKSPACE_INVALID` | This run wrote nothing. |
+| 72 | `PUSH_API_ERROR` | This run wrote nothing. GitHub unreachable before the push. |
+| 73 | `CI_API_ERROR` | **Pushed.** GitHub unreachable while waiting. |
+| 74 | `PUSH_WROTE_UNEXPECTED_REFS` | **Written, beyond authority.** The remote reported *updating* a ref this run did not ask for. What the authorised branch holds is reported too. Inspect the remote. |
+| 75 | `PUSH_BOUNDARY_NOT_VERIFIED` | **Boundary unknown.** The remote reported *trying* a ref this run did not ask for, with an answer that settles nothing. What the authorised branch holds is reported separately. Inspect the remote. |
+
+Three rules the runner keeps on the failure paths:
+
+* **Partial success is stated, never rounded.** A failure after a verified
+  push reports the exact pushed SHA, that the branch was mutated, and why the
+  observation did not complete. It never claims a rollback that did not happen.
+* **Nothing is repaired automatically.** No second commit is created to fix a
+  bad first one, no force push recovers a diverged branch, and no revert is
+  written. Those are human decisions.
+* **A local commit is not repository state.** A commit created in a worktree
+  this run then removes is reported as created and *not* as written.
+
+### Idempotency
+
+There is no state file, no lock and no memory of previous runs — deliberately,
+because a runner that remembered having pushed would be wrong exactly when it
+mattered. A retry re-derives which situation it is in from git and GitHub:
+
+| Observed | Concluded | Done |
+| --- | --- | --- |
+| branch tip == reviewed head | not committed, not pushed | apply, commit, push, wait |
+| branch tip's parent == reviewed head **and** its diff hashes to the candidate digest | **this exact fix is already pushed** | nothing committed, nothing pushed; resume at the CI wait |
+| branch tip is anything else | unaccounted for | `PUSH_TARGET_STALE`; a human looks |
+
+The middle row is the whole idempotency boundary, and it is identity by
+*content*: a commit is this fix if and only if its parent is the reviewed head
+and its diff is the candidate patch. Commit SHAs are not comparable across
+runs — the committer timestamp differs — so they are not what is compared.
+`already_pushed: true` in the JSON, and "was already on the branch" in the
+text, say which row was taken.
+
+A local commit in a prepared worktree is never reused, because the worktree
+does not survive the run. `--commit-cwd` is the exception an operator opts
+into, and it is verified to be a clean checkout of the reviewed head first — a
+directory holding a previous run's commit fails that check rather than being
+built on.
+
+### What a push turn enforces, and what it does not claim
+
+| | |
+| --- | --- |
+| **Enforced by this runner** | The patch's bytes hash to the fix turn's digest. The applied tree and the created commit both re-hash to it. The commit's parent is the reviewed head and it is exactly one commit. The branch comes from GitHub's pull request object — read for the repository the handoff names, at both ends of the pull request — and cannot be a fork, a base or a default branch. Every URL for the chosen remote, fetch and push, names the target repository. The push is a fast-forward, conditional on the branch still being exactly the reviewed head. A no-write is claimed only on the remote's own recognised rejection; a failure after the push starts is never one. The pushed ref is read back from the remote. CI evidence belongs to the exact pushed commit, from the authoritative event, against the current merge context. |
+| **Not enforced, and not claimed** | That the fix is *correct*. That it resolves the finding. That the pull request should be merged. That your git hooks do nothing else — they run, deliberately, and are trusted. That a digest survives configuration this module does not pin. That a push which landed and was then force-pushed away can be detected. Whether a `pre-push` hook, a signing configuration or a branch protection rule refuses the push — those are the remote's and the operator's decisions, reported rather than bypassed. |
+
 ## Tests
 
 ```bash
@@ -1124,6 +1621,18 @@ and a real `__pycache__` that must not fail the turn. The operator's own
 checkout is asserted unchanged, and the worktree asserted removed, on the
 success path and on the failure paths alike.
 
+The push-turn tests go further still, because this is the stage that writes.
+Every git invariant is exercised against a real bare "remote" on disk: a real
+`git apply`, a real commit whose parent and diff are read back from git, a
+real `git push`, a real `git ls-remote` read-back, a real non-fast-forward
+rejection when someone else moves the branch first, and a real second clone
+used to prove the patch digest does not depend on which repository computed
+it. After every refusal the test asserts the remote branch is still exactly
+where it was. GitHub, by contrast, *is* faked — with a client whose head SHA
+and CI answer a test moves between polls, from an injected `sleep`, so a
+half-hour bounded wait costs no wall-clock time and the timeline under test is
+written out explicitly.
+
 ## Known limitations
 
 * **Scope is coarse, and can refuse legitimate findings.** A reviewer that
@@ -1149,15 +1658,62 @@ success path and on the failure paths alike.
 * **A fix turn is not sandboxed.** See
   [What is structurally enforced](#what-is-structurally-enforced-and-what-is-only-asked-for).
   The worktree binds where the agent is pointed, not what it can reach.
-* **The fix exists only as a patch.** Nothing commits, pushes, or updates the
-  pull request; without `--write-patch` the change is discarded with the
-  worktree. Applying it is the human's, and so is everything after.
-* **Merge-context currency is out of contract.** A fix turn gates on head
-  currency alone; the review's original merge/CI context is not
+* **A fix turn still ends at a patch.** `review-loop fix` commits nothing;
+  without `--write-patch` the change is discarded with the worktree, and
+  `review-loop push` needs that file. Whether the patch is used remains the
+  human's decision, taken between the two commands.
+* **Merge-context currency is out of contract *for a fix turn*.** It gates on
+  head currency alone; the review's original merge/CI context is not
   re-established, and the base may have moved since. See
   [What a fix turn guarantees](#what-a-fix-turn-guarantees-and-what-it-does-not).
   A deliberate narrowing, not an oversight — but it means a candidate patch is
-  never evidence that the pull request is currently green.
+  never evidence that the pull request is currently green. `review-loop push`
+  re-establishes it, because it writes.
+* **The loop stops at a pushed, green commit.** There is no Independent
+  Re-Review, no judgement about whether the finding is actually resolved, no
+  second fix round, no multi-round loop, no Merge Decision Brief and no merge.
+  `PUSH_READY` means "a re-review could start here", not "this is done".
+* **A run can end with the repository changed and the answer unknown.**
+  `PUSH_NOT_VERIFIED` is a real outcome, not a defensive one: a push that
+  exits zero and does not read back as the created commit leaves state this
+  runner cannot determine. It reports that and stops, rather than pushing
+  again to find out. Recovery is a human's.
+* **Nothing is repaired automatically.** A bad commit is not amended, a
+  diverged branch is not force-pushed back, and a failed CI run produces no
+  follow-up commit. Every repair is a human decision, and by design there is
+  no code path here that could take one.
+* **Push authority is only as narrow as the pull request object.** The branch
+  is derived from GitHub's `head.ref` for the target pull request, with fork,
+  base and default-branch heads refused, both ends of the pull request
+  required to be in the target repository, and every one of the remote's URLs
+  required to name it. That is a strong bound, but it does rest on GitHub
+  returning a truthful pull request object for a number the operator supplied
+  in the handoff — and, for a hostless remote URL, on a local path that ends
+  in `<owner>/<name>.git` actually being that repository.
+* **Your git hooks run, and are trusted.** `--no-verify` is not passed to
+  either `commit` or `push`, so a `pre-commit`, `prepare-commit-msg` or
+  `pre-push` hook executes as normal and can do anything a program can. The
+  structural write guarantee covers the argv this runner constructs, not
+  arbitrary configured hook behaviour. A hook that edits files is still caught
+  by the post-commit digest check.
+* **A silent or unrecognised push failure leaves remote state genuinely
+  unknown.** When the remote gives no per-ref answer — a local `pre-push` hook
+  refusal, a dropped connection, a timeout — or gives one that establishes
+  nothing, such as `[remote failure]`, an absent commit proves nothing,
+  because a commit can land and then be erased. The run reports
+  `PUSH_NOT_VERIFIED` rather than guessing, which means an operator has to
+  look at the branch themselves. That is the intended direction, but it does
+  mean an ordinary local hook refusal reports as "unknown" rather than as the
+  no-write it almost certainly was.
+* **The porcelain summary text is a parsing contract.** Refusals are matched
+  against a fixed list of C-locale summaries, and git is run with `LC_ALL=C`
+  so a translated build cannot change the classification. A future git that
+  renames a summary would fail closed to "unknown" rather than misclassify —
+  but it would also stop recognising a genuine refusal.
+* **A `--commit-cwd` directory is written to and committed in.** It is
+  verified to be a clean checkout of the reviewed head first, but the fix
+  commit is created there and pushed from there. The prepared worktree is the
+  default for exactly that reason.
 * **A force-pushed base branch can move the boundary.** The change set is
   `merge-base(base, head)..head`. A base that merely advances leaves it
   unchanged, but one rewritten so the old divergence point is no longer an
@@ -1201,11 +1757,39 @@ success path and on the failure paths alike.
 ## Scope boundary
 
 This slice ends at "one validated review recorded against one verified pull
-request state, and one bounded local fix routed from it". Out of scope here,
-and left for later slices: committing the fix, pushing it, updating the pull
-request, waiting for CI after a fix, Independent Re-Review, multi-round loops,
-finding resolution tracking across commits, the Merge Decision Brief,
-automatic merge, any server or daemon, and any persistent state.
+request state, one bounded local fix routed from it, and that fix committed
+and pushed to the pull request's own branch with authoritative CI observed for
+the exact pushed commit". Out of scope here, and left for later slices:
+Independent Re-Review, finding-resolution evaluation, additional fix rounds,
+the multi-round loop, the Merge Decision Brief, automatic merge, force-push
+recovery, general-purpose branch write support, any server or daemon, and any
+persistent state.
+
+Stated as the pipeline:
+
+```text
+PR #34
+Validated Finding
+→ Candidate Patch
+
+this slice
+Candidate Patch
+→ Exact Fix Commit
+→ Push
+→ Authoritative CI
+
+not implemented
+→ Independent Re-Review
+→ Finding resolution
+→ Multi-round loop
+→ Merge Decision Brief
+→ Merge
+```
+
+**The full Finding → Fix → Re-Review loop is not automated.** What is
+automated is routing, bounded local fixing, and now getting a validated fix
+onto the branch with its CI observed — with a human still deciding whether the
+finding was right, whether the fix is right, and whether anything merges.
 
 That live trial has now happened, on PR #30, and is recorded in
 [`docs/delegated-development/review-loop-live-experiment-1.md`](../../docs/delegated-development/review-loop-live-experiment-1.md).
@@ -1218,8 +1802,10 @@ live, against a pull request in a different repository, in
 Structured Findings → Coding Agent routing + Bounded Fix Response is what
 `review-loop fix` above now does.
 
-The next slice is **bounded fix → exact fix commit identity → push → wait for
-authoritative CI**, followed later by fresh-context Independent Re-Review,
-finding resolution, the multi-round loop and the Merge Decision Brief. None of
-that is here, and the human gate is why: this pipeline automates *routing and
-bounded local fixing*. It does not automate acceptance.
+Bounded fix → exact fix commit identity → push → wait for authoritative CI is
+what `review-loop push` above now does, and it is the first stage that can
+change this repository. The next slices are fresh-context Independent
+Re-Review, finding resolution across rounds, the multi-round loop and the
+Merge Decision Brief. None of that is here, and the human gate is why: this
+pipeline automates *routing, bounded local fixing, and getting a validated fix
+onto the branch*. It does not automate acceptance.

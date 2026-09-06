@@ -305,6 +305,75 @@ def test_the_patch_is_written_where_it_is_asked_for(tmp_path, tree, head):
     assert str(patch_path) in output
 
 
+def test_the_written_patch_hashes_to_the_identity_the_json_reports(tmp_path, tree, head):
+    """The handoff to the push stage, checked end to end.
+
+    The push turn refuses any patch whose bytes do not hash to the digest this
+    document records, so a document and a file that disagree would make the
+    next stage impossible rather than unsafe. Both halves are produced here in
+    one run, and compared.
+    """
+    import hashlib
+    import json as json_module
+
+    path = write(tmp_path, review_json(routed(), head_sha=head))
+    patch_path = tmp_path / "fix.patch"
+
+    def edit(worktree):
+        with open(os.path.join(worktree, SOURCE), "w") as handle:
+            handle.write("value = 2\n")
+
+    agent = ScriptedAgent(stdout=response_text(files=(SOURCE,), head_sha=head), edit=edit)
+
+    code, output = invoke(
+        ["--review-json", path, "--write-patch", str(patch_path), "--json"],
+        agent=agent,
+        workspace=FakeWorkspace(str(tree)),
+    )
+    payload = json_module.loads(output)
+
+    assert code == 0
+    data = patch_path.read_bytes()
+    assert hashlib.sha256(data).hexdigest() == payload["workspace"]["patch_sha256"]
+    assert len(data) == payload["workspace"]["patch_bytes"]
+    # And it is a patch git will accept: the trailing newline survives.
+    assert data.endswith(b"\n")
+
+
+def test_the_patch_is_written_as_the_exact_bytes_the_digest_is_over(tmp_path, tree, head):
+    """Binary, not text mode.
+
+    The identity is SHA-256 over the captured UTF-8 bytes. Text mode applies
+    the platform's newline translation on the way out, so on a platform that
+    writes CRLF the file would no longer hash to the digest recorded beside
+    it -- and the push stage would correctly refuse a patch that was correct
+    when captured.
+    """
+    import hashlib
+    import json as json_module
+
+    path = write(tmp_path, review_json(routed(), head_sha=head))
+    patch_path = tmp_path / "fix.patch"
+
+    def edit(worktree):
+        with open(os.path.join(worktree, SOURCE), "w") as handle:
+            handle.write("value = 2\n")
+
+    agent = ScriptedAgent(stdout=response_text(files=(SOURCE,), head_sha=head), edit=edit)
+
+    code, output = invoke(
+        ["--review-json", path, "--write-patch", str(patch_path), "--json"],
+        agent=agent,
+        workspace=FakeWorkspace(str(tree)),
+    )
+    payload = json_module.loads(output)
+    data = patch_path.read_bytes()
+
+    assert code == 0
+    assert hashlib.sha256(data).hexdigest() == payload["workspace"]["patch_sha256"]
+    assert b"\r\n" not in data
+
+
 def test_without_write_patch_the_diff_is_reported_as_unkept(tmp_path, tree, head):
     path = write(tmp_path, review_json(routed(), head_sha=head))
 
@@ -497,6 +566,7 @@ FIX_MODULES = (
     "agent_prompt",
     "agent_process",
     "agent_workspace",
+    "patch_identity",
     "routing",
 )
 

@@ -341,6 +341,11 @@ def render_text(result: FixResult, stream: TextIO, *, agent_label: str,
             file=stream,
         )
         print(f"HEAD after the run:   {inspection.head_sha}", file=stream)
+        print(
+            "Candidate patch id:   "
+            + (inspection.patch_sha256 or "(no patch captured)"),
+            file=stream,
+        )
         if inspection.residue_paths:
             print(
                 f"Build/test residue:   {len(inspection.residue_paths)} ignored "
@@ -443,6 +448,12 @@ def render_json(result: FixResult, stream: TextIO) -> None:
             "changed_paths": list(inspection.changed_paths),
             "residue_paths": list(inspection.residue_paths),
             "unexpected_ignored": list(inspection.unexpected_ignored),
+            # The candidate patch's identity, carried forward so that the push
+            # stage can prove the patch file it is handed is this one. Without
+            # it the next stage would be committing a file it can only assume
+            # came from here.
+            "patch_sha256": inspection.patch_sha256,
+            "patch_bytes": inspection.patch_bytes,
             "patch_refused": inspection.patch_refused,
         },
         "responses": None
@@ -558,8 +569,14 @@ def fix_main(
 
     if args.write_patch and result.patch:
         try:
-            with open(args.write_patch, "w", encoding="utf-8") as handle:
-                handle.write(result.patch)
+            # Binary, not text. The handoff's identity is SHA-256 over the
+            # captured UTF-8 bytes, and text mode applies the platform's
+            # newline translation on the way out -- so on a platform that
+            # writes CRLF the file on disk would no longer hash to the digest
+            # recorded beside it, and the push stage would correctly refuse a
+            # patch that was correct when captured.
+            with open(args.write_patch, "wb") as handle:
+                handle.write(result.patch.encode("utf-8"))
         except OSError as exc:
             result = FixResult(
                 outcome=FixRunOutcome.PATCH_WRITE_FAILED,

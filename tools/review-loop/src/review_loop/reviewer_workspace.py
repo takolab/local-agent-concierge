@@ -53,6 +53,7 @@ import shutil
 import subprocess
 import tempfile
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Iterator
 
 #: Git operations here are local except the fetch, which is one small ref.
@@ -73,23 +74,53 @@ class WorkspaceError(Exception):
     """
 
 
+class GitTimeoutError(WorkspaceError):
+    """A git command was abandoned before it said what it had done.
+
+    A subclass rather than a message, because a timeout is the one failure
+    whose *meaning depends on which command timed out*. For a read it is
+    equivalent to any other failure. For ``git push`` it is not: the process
+    had already started, so the remote may have applied the update and the
+    answer may simply be the thing that never arrived. Callers that write must
+    be able to tell the two apart, and a shared exception type would not let
+    them.
+    """
+
+
 def _label(argv: list[str]) -> str:
     """Name a git command by its subcommand, not by its flags."""
     words = [word for word in argv if not word.startswith("-")][:2]
     return "git " + " ".join(words or argv[:1])
 
 
-def run_git(
-    argv: list[str], *, cwd: str | None, timeout: float, strip: bool = True
-) -> str:
-    """Run one git command with no shell and return its stdout.
+@dataclass(frozen=True)
+class GitResult:
+    """One git invocation's complete result, failure included.
 
-    ``strip`` is on by default because almost every caller wants one line
-    without its newline. It must be turned **off** for ``-z`` output: a
-    ``git status --porcelain`` record begins with a two-character status
-    field whose first character is a space for an unstaged change, and
-    stripping it shifts every path by one character.
+    :func:`run_git` discards stdout when git exits non-zero, which is right
+    for a command whose answer *is* its exit status. It is wrong for a command
+    whose failure output carries the evidence -- ``git push --porcelain``
+    reports per-ref rejection lines on stdout while exiting non-zero, and that
+    report is the only independent evidence of what the remote decided.
     """
+
+    returncode: int
+    stdout: str
+    stderr: str
+
+    @property
+    def ok(self) -> bool:
+        return self.returncode == 0
+
+    @property
+    def failure(self) -> str:
+        return (self.stderr or "").strip() or "(no stderr)"
+
+
+def run_git_capture(
+    argv: list[str], *, cwd: str | None, timeout: float
+) -> GitResult:
+    """Run one git command with no shell and return everything it produced."""
     if shutil.which("git") is None:
         raise WorkspaceError(
             "the 'git' CLI is required to bind the reviewer to the review target "
@@ -104,17 +135,45 @@ def run_git(
             timeout=timeout,
             shell=False,
             check=False,
+            # git is run in the C locale throughout. Everything this package
+            # reads from git is either a porcelain format or a message it
+            # matches on, and a translated build would change the second
+            # without changing the first -- so a runner that classified a push
+            # by its summary text would classify it differently on a machine
+            # whose git speaks another language. The rest of the environment
+            # is inherited untouched, so credentials, PATH and any GIT_* the
+            # operator set still reach git.
+            env={**os.environ, "LC_ALL": "C", "LANG": "C"},
         )
     except subprocess.TimeoutExpired as exc:
-        raise WorkspaceError(f"{_label(argv)} timed out after {timeout:g}s") from exc
+        raise GitTimeoutError(
+            f"{_label(argv)} timed out after {timeout:g}s"
+        ) from exc
     except OSError as exc:
         raise WorkspaceError(f"{_label(argv)} could not be run: {exc}") from exc
 
-    if completed.returncode != 0:
-        stderr = (completed.stderr or "").strip() or "(no stderr)"
-        raise WorkspaceError(f"{_label(argv)} failed: {stderr}")
-    stdout = completed.stdout or ""
-    return stdout.strip() if strip else stdout
+    return GitResult(
+        returncode=completed.returncode,
+        stdout=completed.stdout or "",
+        stderr=completed.stderr or "",
+    )
+
+
+def run_git(
+    argv: list[str], *, cwd: str | None, timeout: float, strip: bool = True
+) -> str:
+    """Run one git command with no shell and return its stdout.
+
+    ``strip`` is on by default because almost every caller wants one line
+    without its newline. It must be turned **off** for ``-z`` output: a
+    ``git status --porcelain`` record begins with a two-character status
+    field whose first character is a space for an unstaged change, and
+    stripping it shifts every path by one character.
+    """
+    result = run_git_capture(argv, cwd=cwd, timeout=timeout)
+    if not result.ok:
+        raise WorkspaceError(f"{_label(argv)} failed: {result.failure}")
+    return result.stdout.strip() if strip else result.stdout
 
 
 def verify_checkout(
