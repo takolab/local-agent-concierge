@@ -569,8 +569,14 @@ def fix_main(
 
     if args.write_patch and result.patch:
         try:
-            with open(args.write_patch, "w", encoding="utf-8") as handle:
-                handle.write(result.patch)
+            # Binary, not text. The handoff's identity is SHA-256 over the
+            # captured UTF-8 bytes, and text mode applies the platform's
+            # newline translation on the way out -- so on a platform that
+            # writes CRLF the file on disk would no longer hash to the digest
+            # recorded beside it, and the push stage would correctly refuse a
+            # patch that was correct when captured.
+            with open(args.write_patch, "wb") as handle:
+                handle.write(result.patch.encode("utf-8"))
         except OSError as exc:
             result = FixResult(
                 outcome=FixRunOutcome.PATCH_WRITE_FAILED,

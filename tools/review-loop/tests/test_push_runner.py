@@ -12,6 +12,8 @@ organised around them rather than around the code:
 
 from __future__ import annotations
 
+import os
+
 from conftest import build_scenario
 from fakes import ADVANCED_BASE_TIP, BASE_TIP, OTHER_SHA
 from push_fakes import PushGitHubClient, Timeline, fix_json, git
@@ -61,7 +63,7 @@ def push(scenario, *, client=None, timeline=None, workspace=None, **kwargs):
         repo_root=str(scenario.clone),
         handoff=kwargs.pop("handoff", None) or handoff_for(scenario),
         patch_path=kwargs.pop("patch_path", None) or scenario.patch_path,
-        git_remote="origin",
+        git_remote=kwargs.pop("git_remote", "origin"),
         clock=timeline.clock,
         sleep=timeline.sleep,
         **kwargs,
@@ -603,3 +605,171 @@ def test_a_persistent_github_failure_after_the_push_keeps_the_push_reported(scen
 def _touch(worktree):
     (worktree / "pkg" / "code.py").write_text("value = 2\n")
     (worktree / "pkg" / "new.py").write_text("added = True\n")
+
+
+# --------------------------------------------------------------------------
+# Regressions from PR #35's independent review
+# --------------------------------------------------------------------------
+
+
+def test_a_relative_patch_path_works_with_the_prepared_worktree(scenario, monkeypatch):
+    """The documented flow, exactly as an operator types it.
+
+    `read_patch` runs in the operator's directory and `git apply` runs in a
+    temporary worktree, so a relative `--patch fix.patch` passed the identity
+    check and then failed to open -- and was reported as though the patch did
+    not apply to the reviewed commit.
+    """
+    monkeypatch.chdir(scenario.clone)
+    os.replace(scenario.patch_path, str(scenario.clone / "fix.patch"))
+
+    client = client_for(scenario)
+    timeline = Timeline({1: green(scenario, client, sha_getter=scenario.remote_tip)})
+    result = push(
+        scenario,
+        client=client,
+        timeline=timeline,
+        handoff=handoff_for(scenario, patch_path="fix.patch"),
+        patch_path="fix.patch",
+    )
+
+    assert result.outcome is PushOutcome.PUSH_READY
+    assert result.pushed_sha == scenario.remote_tip()
+    # And the report names the file that was actually read, absolutely.
+    assert result.patch_path == str(scenario.clone / "fix.patch")
+    assert os.path.isabs(result.patch_path)
+
+
+def test_the_resolved_patch_path_is_reported_on_a_failure_too(scenario, monkeypatch):
+    monkeypatch.chdir(scenario.clone)
+    (scenario.clone / "wrong.patch").write_text("not the candidate patch\n")
+
+    result = push(scenario, patch_path="wrong.patch")
+
+    assert result.outcome is PushOutcome.PATCH_IDENTITY_MISMATCH
+    assert result.patch_path == str(scenario.clone / "wrong.patch")
+
+
+def test_a_remote_naming_another_repository_is_refused_before_any_push(
+    tmp_path, scenario
+):
+    """A second remote with the same branch at the same commit is not this one.
+
+    The branch name came from GitHub, but the *repository* came from
+    `--git-remote`. Without binding the two, a mirror holding the same history
+    would be pushed to while every message said "this repository".
+    """
+    mirror = tmp_path / "someone" / "mirror.git"
+    mirror.mkdir(parents=True)
+    git(mirror, "init", "--quiet", "--bare")
+    git(scenario.seed, "remote", "add", "mirror", str(mirror))
+    git(scenario.seed, "push", "--quiet", "mirror", f"HEAD:refs/heads/{scenario.branch}")
+    git(scenario.clone, "remote", "add", "mirror", str(mirror))
+
+    # The mirror really does hold the same branch at the same commit.
+    assert scenario.remote_tip() == scenario.head_sha
+    tip = git(scenario.clone, "ls-remote", "mirror", f"refs/heads/{scenario.branch}")
+    assert tip.split("\t")[0] == scenario.head_sha
+
+    result = push(scenario, git_remote="mirror")
+
+    assert result.outcome is PushOutcome.PUSH_BRANCH_REFUSED
+    assert result.exit_code == 61
+    assert result.repository_mutated is False
+    assert "someone/mirror" in " ".join(result.reasons)
+    # Nothing reached either repository.
+    assert scenario.remote_tip() == scenario.head_sha
+    assert (
+        git(scenario.clone, "ls-remote", "mirror", f"refs/heads/{scenario.branch}")
+        .split("\t")[0]
+        == scenario.head_sha
+    )
+
+
+def test_a_remote_on_another_forge_is_refused(scenario):
+    git(
+        scenario.clone,
+        "remote",
+        "add",
+        "elsewhere",
+        "https://gitlab.com/takolab/local-agent-concierge.git",
+    )
+
+    result = push(scenario, git_remote="elsewhere")
+
+    assert result.outcome is PushOutcome.PUSH_BRANCH_REFUSED
+    assert "host is not GitHub" in " ".join(result.reasons)
+    assert scenario.remote_tip() == scenario.head_sha
+
+
+def test_a_remote_that_does_not_exist_is_refused(scenario):
+    result = push(scenario, git_remote="no-such-remote")
+
+    assert result.outcome is PushOutcome.PUSH_BRANCH_REFUSED
+    assert result.repository_mutated is False
+    assert scenario.remote_tip() == scenario.head_sha
+
+
+def test_a_landed_push_followed_by_a_concurrent_child_is_not_a_no_write(
+    scenario, monkeypatch
+):
+    """The lost-response case, with one extra concurrent event.
+
+    push accepted -> response lost -> someone pushes a child on top ->
+    read-back sees the child. Reporting that as a verified no-write would send
+    an operator to re-run a push whose commit is already in the branch.
+    """
+    from review_loop import fix_commit, push_runner
+
+    real = fix_commit.push_fix_commit
+    landed = {}
+
+    def push_then_lose_the_answer(worktree, *, remote, refspec, timeout=300.0):
+        real(worktree, remote=remote, refspec=refspec, timeout=timeout)
+        landed["sha"] = refspec.split(":")[0]
+        git(scenario.seed, "fetch", "--quiet", "origin", f"refs/heads/{scenario.branch}")
+        git(scenario.seed, "checkout", "--quiet", "FETCH_HEAD")
+        git(scenario.seed, "commit", "--quiet", "--allow-empty", "-m", "theirs on top")
+        git(
+            scenario.seed,
+            "push",
+            "--quiet",
+            "origin",
+            f"HEAD:refs/heads/{scenario.branch}",
+        )
+        raise fix_commit.PushRefused("the connection dropped before the answer arrived")
+
+    monkeypatch.setattr(push_runner, "push_fix_commit", push_then_lose_the_answer)
+
+    result = push(scenario)
+
+    assert result.outcome is PushOutcome.CI_STALE_TARGET
+    assert result.repository_mutated is True
+    assert result.push_performed is True
+    assert result.pushed_sha == landed["sha"]
+    assert "DID land" in " ".join(result.reasons)
+    # And it really is in the branch's history, which is what was asserted.
+    assert (
+        git(
+            scenario.clone,
+            "rev-list",
+            "--max-count=1",
+            landed["sha"],
+            f"^{scenario.remote_tip()}",
+        )
+        == ""
+    )
+
+
+def test_an_unanswerable_ancestry_question_stays_unknown(scenario, monkeypatch):
+    """`landed is None` must not be rounded to either certainty."""
+    from review_loop import push_runner
+
+    monkeypatch.setattr(push_runner, "push_fix_commit", lambda *a, **k: None)
+    monkeypatch.setattr(push_runner, "contains_commit", lambda *a, **k: None)
+
+    result = push(scenario)
+
+    assert result.outcome is PushOutcome.PUSH_NOT_VERIFIED
+    assert result.repository_mutated is None
+    assert "could not be determined" in " ".join(result.reasons)

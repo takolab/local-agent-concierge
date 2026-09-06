@@ -1153,7 +1153,21 @@ design:
 | | |
 | --- | --- |
 | **Can** | Fast-forward one commit onto the pull request's own head branch, in this repository. |
-| **Cannot** | Force push, or push with a lease. Write a tag. Create a branch that does not exist. Push to the default branch, the base branch, or a fork's branch. Push an arbitrary refspec. Rebase, reset, cherry-pick, merge, or rewrite history. Merge the pull request. Write anything at all to the GitHub API. |
+| **Cannot** | Force push, or push with a lease. Write a tag. Create a branch that does not exist. Push to the default branch, the base branch, or a fork's branch. Push to a remote that names a different repository. Push an arbitrary refspec. Rebase, reset, cherry-pick, merge, or rewrite history. Merge the pull request. Write anything at all to the GitHub API. |
+
+**What that guarantee covers, precisely.** It is a statement about *the git
+argument vectors this runner constructs* — enumerated by a test that walks the
+AST and asserts the complete set of subcommands. It is **not** a statement
+that no other write can occur while the command runs, because `git commit` and
+`git push` deliberately run your normal hooks, and a `pre-commit`,
+`prepare-commit-msg` or `pre-push` hook is an arbitrary program that can write
+files, reach the network, or touch other repositories. Hooks are not bypassed
+— `--no-verify` is not passed — because they are your configuration on your
+machine and a runner that gained push authority this week is not the thing
+that should start ignoring them. The trust assumption is therefore explicit:
+**your configured hooks are trusted; the runner's own argv is bounded.** A
+hook that modifies files is still caught, because the commit is re-hashed
+against the candidate patch afterwards.
 
 The branch is not a parameter. **There is no `--branch`, no `--ref`, no
 `--refspec` and no `--force`**, and a test asserts that the parser offers
@@ -1161,6 +1175,25 @@ none of them — because the flag that would undo this design is the one that
 lets an operator, or a script quoting agent output, name the ref. The refspec
 is built inside [`push_branch.py`](src/review_loop/push_branch.py) from
 GitHub's own pull request object and from nothing else.
+
+**The repository is checked too, not just the ref name.** A ref name is half a
+destination; `--git-remote` supplies the other half, and it *is* operator
+controlled. So every URL git reports for that remote — the fetch URL and the
+push URL, which can differ — must name the repository the validated handoff
+describes:
+
+* a URL with a **host** must be a GitHub host, and its `owner/name` must be
+  the target repository. `--git-remote upstream` pointing at `someone/fork`,
+  or at another forge entirely, is refused;
+* a URL with **no host** — a local path — is accepted when its final two
+  segments name the target repository. This runner cannot prove a local path
+  is GitHub and says so rather than pretending; an operator who constructs a
+  path ending in `<owner>/<name>.git` to redirect this push can already push
+  there by hand.
+
+`git remote get-url` reports the *effective* URL, with any
+`url.<base>.insteadOf` rewriting already applied, so a rewrite cannot hide
+behind this check.
 
 **Credentials.** The push travels over your existing git credential for the
 remote — an SSH key or a credential helper. No new token is introduced, and
@@ -1185,6 +1218,8 @@ missing identity, or a signing configuration that cannot sign, is
 | `--fix-json` document | the operator | a *selection*, re-validated field by field; it cannot name a commit that is not the head, or a patch whose bytes disagree with its digest |
 | the patch file | the operator | checked against the digest before anything is applied |
 | the pull request object | GitHub | **authoritative** for the branch, the base, the default branch and the head SHA |
+| `--git-remote` | the operator | a *selection*, checked against `target.repo` before any write |
+| the remote's URLs | git | **authoritative** for which repository a push would reach |
 | the remote branch tip | the remote | **authoritative** for what is already pushed |
 | the created commit's parent and diff | local git | **authoritative** for what was committed |
 | reviewer finding text, Coding Agent output | untrusted | reaches neither the refspec nor the commit message |
@@ -1207,14 +1242,39 @@ the one that matters:
    tree must be clean afterwards.
 
 A digest is only comparable if a diff is a function of its content, which by
-default it is not: `index` lines abbreviate to a length derived from the
-repository's object count, and `diff.noprefix`, `diff.algorithm`,
-`diff.context`, `mnemonicPrefix` and textconv drivers are all ordinary user
-configuration. So every load-bearing diff goes through one canonical argument
-vector in [`patch_identity.py`](src/review_loop/patch_identity.py), which pins
-each of them. Tests cover both halves: hostile local `git config` does not move
-the digest, and the same change hashes identically in a second clone with a
-different object count.
+default it is not. `index` lines abbreviate to a length derived from the
+repository's object count; `diff.noprefix`, `diff.algorithm`, `diff.context`,
+`diff.indentHeuristic`, `diff.orderFile`, `mnemonicPrefix` and textconv
+drivers are all ordinary user configuration; `core.quotePath` decides whether
+a non-ASCII path is rendered literally or octal-escaped; and **rename
+detection** renders one tree transition either as `rename from`/`rename to` or
+as a delete plus an add, depending on `diff.renames` and — when renames are on
+— on `diff.renameLimit`, and therefore on how many files the change happened
+to touch.
+
+So every load-bearing diff goes through one canonical argument vector in
+[`patch_identity.py`](src/review_loop/patch_identity.py), which pins each of
+those. Tests cover it from three directions: hostile local `git config` for
+every pinned setting does not move the digest, a non-ASCII path and a rename
+each hash identically under both settings, and the same change hashes
+identically in a second clone with a different object count.
+
+The claim that comes with that is deliberately bounded: the digest is a
+property of the change **for the settings this module pins**, which is what
+makes two runs on two machines comparable. It is not a claim that no git
+configuration anywhere can affect it — `core.fileMode`, for instance, changes
+what git *sees* in a working tree rather than how a diff is rendered, and is
+not pinned because forcing it would break clones on filesystems that need it
+off.
+
+**The patch path is resolved before any worktree exists.** The file is read
+from your working directory and `git apply` runs inside a temporary worktree,
+so a relative `--patch fix.patch` — exactly what the documented flow produces
+— would otherwise pass the identity check and then fail to open. The resolved
+absolute path is used for both and reported in the result. For the same
+reason, `review-loop fix --write-patch` writes the patch in **binary** mode:
+the identity is the captured UTF-8 bytes, and text-mode newline translation
+would put different bytes on disk from the ones the digest describes.
 
 ### Exact reviewed-head ancestry, and the branch this may reach
 
@@ -1250,9 +1310,30 @@ created_fix_commit_sha == remote PR head SHA
 That read-back also settles the ambiguous case in the *other* direction: a
 push whose answer was lost still moved the ref, so a reported failure whose
 read-back shows our commit is reported as a push that landed, not as a
-failure. A reported failure whose read-back shows something else is a clean
-no-write. Only "push exited zero **and** the ref is not ours" is unknown, and
-it gets its own outcome and its own exit code.
+failure.
+
+A read-back that is *neither* our commit nor obviously unchanged is not
+self-explanatory, and it is not treated as if it were. "The push was refused
+and the ref is not ours" is compatible with two opposite histories — the push
+never landed, or it landed and someone pushed a child on top before the
+read-back — so git is asked which one:
+
+```text
+git rev-list --max-count=1 <our commit> ^<observed tip>
+```
+
+Empty means our commit is an ancestor of what the branch now holds, so the
+push **did** land and the branch has moved on: that is `CI_STALE_TARGET` with
+`repository_mutated: true`, not a no-write. Non-empty, together with a
+reported push failure, is a *verified* no-write regardless of where the tip
+sits. And if the question cannot be answered at all — the branch will not
+fetch — the run ends `PUSH_NOT_VERIFIED`, because "I could not tell" is an
+answer that must not be rounded to either certainty.
+
+The one case this does not distinguish is a push that landed and was then
+force-pushed away entirely, leaving no trace in the branch's history. Nothing
+observable afterwards separates that from a push that never landed, and this
+runner does not pretend otherwise.
 
 ### Authoritative CI, bound to the pushed commit
 
@@ -1295,11 +1376,11 @@ alongside anything else.
 | 62 | `PUSH_TARGET_STALE` | Not written. The head moved, or the branch is somewhere unaccounted for. |
 | 63 | `PATCH_IDENTITY_MISMATCH` | Not written. |
 | 64 | `COMMIT_REFUSED` | Not written. |
-| 65 | `PUSH_FAILED` | Not written, **verified** by reading the ref back. |
+| 65 | `PUSH_FAILED` | Not written, **verified**: the ref was read back and git confirms the commit is not in its history. |
 | 66 | `PUSH_NOT_VERIFIED` | **Unknown.** Read the branch before doing anything else. |
 | 67 | `CI_FAILED` | **Pushed.** CI for the exact commit failed. |
 | 68 | `CI_PENDING` | **Pushed.** CI had not finished within `--ci-timeout`. |
-| 69 | `CI_STALE_TARGET` | **Pushed.** The head moved off it, or its merge context is stale. |
+| 69 | `CI_STALE_TARGET` | **Pushed.** The head moved off it, its merge context is stale, or a lost response hid a push that landed under a later commit. |
 | 70 | `CI_AMBIGUOUS` | **Pushed.** CI state undecidable. |
 | 71 | `PUSH_WORKSPACE_INVALID` | Not written. |
 | 72 | `PUSH_API_ERROR` | Not written. GitHub unreachable before the push. |
@@ -1345,8 +1426,8 @@ built on.
 
 | | |
 | --- | --- |
-| **Enforced by this runner** | The patch's bytes hash to the fix turn's digest. The applied tree and the created commit both re-hash to it. The commit's parent is the reviewed head and it is exactly one commit. The branch comes from GitHub's pull request object and cannot be a fork, a base or a default branch. The push is fast-forward and carries no force flag. The pushed ref is read back from the remote. CI evidence belongs to the exact pushed commit, from the authoritative event, against the current merge context. |
-| **Not enforced, and not claimed** | That the fix is *correct*. That it resolves the finding. That the pull request should be merged. Whether a `pre-push` hook, a signing configuration or a branch protection rule refuses the push — those are the remote's and the operator's decisions, reported rather than bypassed. |
+| **Enforced by this runner** | The patch's bytes hash to the fix turn's digest. The applied tree and the created commit both re-hash to it. The commit's parent is the reviewed head and it is exactly one commit. The branch comes from GitHub's pull request object and cannot be a fork, a base or a default branch. Every URL for the chosen remote names the target repository. The push is fast-forward and carries no force flag. The pushed ref is read back from the remote. CI evidence belongs to the exact pushed commit, from the authoritative event, against the current merge context. |
+| **Not enforced, and not claimed** | That the fix is *correct*. That it resolves the finding. That the pull request should be merged. That your git hooks do nothing else — they run, deliberately, and are trusted. That a digest survives configuration this module does not pin. That a push which landed and was then force-pushed away can be detected. Whether a `pre-push` hook, a signing configuration or a branch protection rule refuses the push — those are the remote's and the operator's decisions, reported rather than bypassed. |
 
 ## Tests
 
@@ -1438,9 +1519,21 @@ written out explicitly.
   no code path here that could take one.
 * **Push authority is only as narrow as the pull request object.** The branch
   is derived from GitHub's `head.ref` for the target pull request, with fork,
-  base and default-branch heads refused. That is a strong bound, but it does
-  rest on GitHub returning a truthful pull request object for a number the
-  operator supplied in the handoff.
+  base and default-branch heads refused, and the remote's URLs must name the
+  same repository. That is a strong bound, but it does rest on GitHub
+  returning a truthful pull request object for a number the operator supplied
+  in the handoff — and, for a hostless remote URL, on a local path that ends
+  in `<owner>/<name>.git` actually being that repository.
+* **Your git hooks run, and are trusted.** `--no-verify` is not passed to
+  either `commit` or `push`, so a `pre-commit`, `prepare-commit-msg` or
+  `pre-push` hook executes as normal and can do anything a program can. The
+  structural write guarantee covers the argv this runner constructs, not
+  arbitrary configured hook behaviour. A hook that edits files is still caught
+  by the post-commit digest check.
+* **A landed-then-force-pushed commit is indistinguishable from one that never
+  landed.** The post-push ancestry check separates "never landed" from "landed
+  and the branch moved on", but a push that landed and was then erased from
+  the branch's history entirely leaves nothing to observe.
 * **A `--commit-cwd` directory is written to and committed in.** It is
   verified to be a clean checkout of the reviewed head first, but the fix
   commit is created there and pushed from there. The prepared worktree is the

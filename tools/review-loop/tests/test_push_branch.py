@@ -176,3 +176,93 @@ def test_an_ordinary_branch_name_is_accepted(name):
 def test_an_unusable_branch_name_stops_resolution_too():
     with pytest.raises(BranchAuthorityError):
         resolve(payload(head_ref="refs/heads/sneaky"), repo=REPO, number=NUMBER)
+
+
+# --------------------------------------------------------------------------
+# Which repository receives the push
+# --------------------------------------------------------------------------
+
+TARGET = "takolab/local-agent-concierge"
+
+
+@pytest.mark.parametrize(
+    "url,expected",
+    [
+        ("https://github.com/takolab/local-agent-concierge.git", ("github.com", TARGET)),
+        ("https://github.com/takolab/local-agent-concierge", ("github.com", TARGET)),
+        ("http://github.com/takolab/local-agent-concierge.git", ("github.com", TARGET)),
+        ("git@github.com:takolab/local-agent-concierge.git", ("github.com", TARGET)),
+        ("git@github.com:takolab/local-agent-concierge", ("github.com", TARGET)),
+        ("ssh://git@github.com/takolab/local-agent-concierge.git", ("github.com", TARGET)),
+        ("ssh://git@ssh.github.com:443/takolab/local-agent-concierge.git", ("ssh.github.com", TARGET)),
+        ("git://github.com/takolab/local-agent-concierge.git", ("github.com", TARGET)),
+        ("https://GITHUB.COM/takolab/local-agent-concierge.git", ("github.com", TARGET)),
+        # A token embedded by a credential helper must not change the identity.
+        ("https://x-access-token:ghs_secret@github.com/takolab/local-agent-concierge.git", ("github.com", TARGET)),
+        # Hostless forms: a local path or a file:// URL.
+        ("/srv/mirrors/takolab/local-agent-concierge.git", (None, TARGET)),
+        ("file:///srv/mirrors/takolab/local-agent-concierge.git", (None, TARGET)),
+        ("../takolab/local-agent-concierge.git", (None, TARGET)),
+        # Another forge, another repository, and something unreadable.
+        ("https://gitlab.com/takolab/local-agent-concierge.git", ("gitlab.com", TARGET)),
+        ("https://github.com/someone/fork.git", ("github.com", "someone/fork")),
+        ("/srv/origin.git", (None, "srv/origin")),
+        ("origin.git", (None, None)),
+        ("", (None, None)),
+    ],
+)
+def test_a_remote_url_is_read_as_a_repository_identity(url, expected):
+    from review_loop.push_branch import repository_from_url
+
+    assert repository_from_url(url) == expected
+
+
+def test_a_remote_naming_the_target_repository_is_accepted():
+    from review_loop.push_branch import check_remote_repository
+
+    check_remote_repository(
+        (
+            "https://github.com/takolab/local-agent-concierge.git",
+            "git@github.com:takolab/local-agent-concierge.git",
+        ),
+        expected_repo=TARGET,
+        remote="origin",
+    )
+
+
+def test_a_case_difference_in_the_repository_name_is_still_the_same_repository():
+    from review_loop.push_branch import check_remote_repository
+
+    check_remote_repository(
+        ("https://github.com/TakoLab/Local-Agent-Concierge.git",),
+        expected_repo=TARGET,
+        remote="origin",
+    )
+
+
+@pytest.mark.parametrize(
+    "urls,fragment",
+    [
+        (("https://github.com/someone/fork.git",), "someone/fork"),
+        (("https://gitlab.com/takolab/local-agent-concierge.git",), "host is not GitHub"),
+        (("/srv/mirrors/someone/mirror.git",), "someone/mirror"),
+        (("origin.git",), "cannot read as a repository"),
+        ((), "reports no URL"),
+        # The push URL differs from the fetch URL: the one that decides where
+        # a push lands must be checked too, so agreement is required.
+        (
+            (
+                "https://github.com/takolab/local-agent-concierge.git",
+                "https://github.com/someone/fork.git",
+            ),
+            "someone/fork",
+        ),
+    ],
+)
+def test_a_remote_that_is_not_the_target_repository_is_refused(urls, fragment):
+    from review_loop.push_branch import check_remote_repository
+
+    with pytest.raises(BranchAuthorityError) as error:
+        check_remote_repository(urls, expected_repo=TARGET, remote="origin")
+
+    assert fragment in str(error.value)

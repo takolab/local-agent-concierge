@@ -51,7 +51,8 @@ branch and what CI thought of it.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import os
+from dataclasses import dataclass, field, replace
 from typing import Callable
 
 from .fix_commit import (
@@ -60,17 +61,24 @@ from .fix_commit import (
     FixCommit,
     PushRefused,
     apply_candidate_patch,
+    contains_commit,
     create_fix_commit,
     describe_remote_commit,
     push_fix_commit,
     read_patch,
     read_remote_tip,
+    read_remote_urls,
     require_clean_target,
 )
 from .fix_handoff import FixHandoff
 from .github_client import GitHubApiError
 from .model import CiEvaluation, Verdict, short_sha
-from .push_branch import BranchAuthorityError, PushTarget, resolve
+from .push_branch import (
+    BranchAuthorityError,
+    PushTarget,
+    check_remote_repository,
+    resolve,
+)
 from .push_response import (
     DEFAULT_CI_POLL_SECONDS,
     DEFAULT_CI_TIMEOUT_SECONDS,
@@ -101,6 +109,10 @@ class PushResult:
     #: The commit verified to be on the pull request branch. Set whenever the
     #: branch is known to hold the fix, including when a previous run pushed it.
     pushed_sha: str | None = None
+    #: The candidate patch file this run actually read, resolved to an
+    #: absolute path. Reported because "which file was this?" is part of the
+    #: provenance, and because the path the operator typed may be relative.
+    patch_path: str | None = None
     #: True when this run created and pushed the commit; False when it found
     #: the exact fix already pushed and did nothing.
     push_performed: bool = False
@@ -238,12 +250,75 @@ def run_push(
     sleep: Callable[[float], None] | None = None,
     dry_run: bool = False,
 ) -> PushResult:
-    """Commit one validated candidate patch, push it, and wait for its CI."""
+    """Commit one validated candidate patch, push it, and wait for its CI.
+
+    The patch path is resolved to an absolute path **here**, once, and the
+    resolved value is both used everywhere below and attached to every
+    outcome -- so no failure path can forget to say which file it read.
+    """
+    resolved = os.path.abspath(patch_path)
+    result = _run_push(
+        client=client,
+        workspace=workspace,
+        repo_root=repo_root,
+        handoff=handoff,
+        patch_path=resolved,
+        git_remote=git_remote,
+        git_timeout=git_timeout,
+        ci_timeout=ci_timeout,
+        ci_poll_seconds=ci_poll_seconds,
+        clock=clock,
+        sleep=sleep,
+        dry_run=dry_run,
+    )
+    return replace(result, patch_path=resolved)
+
+
+def _run_push(
+    *,
+    client,
+    workspace,
+    repo_root: str,
+    handoff: FixHandoff,
+    patch_path: str,
+    git_remote: str,
+    git_timeout: float,
+    ci_timeout: float,
+    ci_poll_seconds: float,
+    clock,
+    sleep,
+    dry_run: bool,
+) -> PushResult:
+    """The turn itself, with ``patch_path`` already absolute.
+
+    That absoluteness is load-bearing, not tidiness. The two places the patch
+    is read run in two different directories: :func:`read_patch` opens it from
+    wherever the operator invoked the command, and ``git apply`` runs with
+    ``cwd`` set to a temporary worktree that contains none of the operator's
+    files. A relative path -- ``--patch fix.patch``, which is exactly what the
+    documented flow produces -- therefore passed the identity check and then
+    failed to open, and was reported as though the patch did not apply to the
+    reviewed commit. Resolving once, above, removes the possibility rather
+    than the symptom.
+    """
     import time
 
     clock = clock or time.monotonic
     sleep = sleep or time.sleep
     target = handoff.target
+
+    # Resolve the patch path **here**, against the process's own working
+    # directory, and use the resolved path everywhere after.
+    #
+    # This is not tidiness. The two places the patch is read run in two
+    # different directories: `read_patch` opens it from wherever the operator
+    # invoked the command, and `git apply` runs with `cwd` set to a temporary
+    # worktree that contains none of the operator's files. A relative path --
+    # `--patch fix.patch`, which is exactly what the documented flow produces
+    # -- therefore passed the identity check and then failed to open, and was
+    # reported as though the patch did not apply to the reviewed commit.
+    # Resolving once removes the possibility rather than the symptom.
+    patch_path = os.path.abspath(patch_path)
 
     # 1. The patch file is the validated candidate patch. Checked first,
     #    because it is the cheapest refusal and the one that needs no network:
@@ -271,6 +346,34 @@ def run_push(
         push_target = resolve(payload, repo=target.repo, number=target.number)
     except BranchAuthorityError as exc:
         return _result(PushOutcome.PUSH_BRANCH_REFUSED, (str(exc),), target=target)
+
+    # 2b. Which *repository* receives that ref? The branch came from GitHub,
+    #     but the remote came from the command line, so without this the two
+    #     halves of the destination have different authorities -- and a remote
+    #     holding the same branch at the same commit would be pushed to while
+    #     every message said "this repository".
+    try:
+        remote_urls = read_remote_urls(
+            repo_root, remote=git_remote, timeout=git_timeout
+        )
+    except WorkspaceError as exc:
+        return _result(
+            PushOutcome.PUSH_BRANCH_REFUSED,
+            (str(exc),),
+            target=target,
+            push_target=push_target,
+        )
+    try:
+        check_remote_repository(
+            remote_urls, expected_repo=target.repo, remote=git_remote
+        )
+    except BranchAuthorityError as exc:
+        return _result(
+            PushOutcome.PUSH_BRANCH_REFUSED,
+            (str(exc),),
+            target=target,
+            push_target=push_target,
+        )
 
     if push_target.base_ref != target.base_ref:
         return _result(
@@ -538,24 +641,61 @@ def _commit_and_push(
             sleep=sleep,
         )
 
-    if push_failure is not None:
-        # The push reported a failure *and* the branch does not hold the
-        # commit. Those two facts together are a clean no-write: there is
-        # nothing uncertain about a ref that was read and is not ours.
+    # The ref is not our commit. That single observation is compatible with
+    # two opposite histories -- the push never landed, or it landed and the
+    # branch moved on again -- and only asking git which one settles it. An
+    # earlier version skipped this and read "push reported a failure, and the
+    # ref is not ours" as proof of no-write; that is wrong exactly when a
+    # lost response is followed by someone else's commit, which is the case an
+    # operator most needs told correctly.
+    landed = contains_commit(
+        repo_root,
+        remote=git_remote,
+        branch=push_target.branch,
+        commit=commit.sha,
+        tip=observed,
+        timeout=git_timeout,
+    )
+
+    if landed is True:
+        return _result(
+            PushOutcome.CI_STALE_TARGET,
+            created
+            + ((f"the push reported: {push_failure}",) if push_failure else ())
+            + (
+                f"{push_target.ref} reads back as {observed}, and {commit.sha} is an "
+                "ancestor of it: the push DID land, and the branch has since moved "
+                "on. This run's fix is in the branch's history but is not its head, "
+                "so CI for it is not evidence about the pull request's present "
+                "state",
+            ),
+            target=target,
+            push_target=push_target,
+            commit=commit,
+            pushed_sha=commit.sha,
+            push_performed=True,
+            commit_created=True,
+        )
+
+    if landed is False and push_failure is not None:
+        # The push was refused *and* git proves this run's commit is not in
+        # the branch's history. Where the tip happens to sit is then beside
+        # the point -- it may be the reviewed head, or someone else's later
+        # commit -- because either way nothing of ours is there.
         return _result(
             PushOutcome.PUSH_FAILED,
             created
             + (
                 f"the push was refused: {push_failure}",
-                f"{push_target.ref} reads back as {observed}, not the {commit.sha} "
-                "this run created, so the fix was not written. The fix commit "
-                "existed only in a workspace this run removed"
+                f"{push_target.ref} reads back as {observed}"
                 + (
-                    ""
+                    " (still the reviewed head)"
                     if observed == target.head_sha
-                    else "; note the branch is also no longer at the reviewed head "
-                    f"{target.head_sha}, so a new fix turn is needed"
-                ),
+                    else f", which is not the reviewed head {target.head_sha} either"
+                )
+                + f", and {commit.sha} is not in its history, so nothing this run "
+                "created was written. The fix commit existed only in a workspace "
+                "this run removed",
             ),
             target=target,
             push_target=push_target,
@@ -563,17 +703,29 @@ def _commit_and_push(
             commit_created=True,
         )
 
-    # The push exited zero and the ref is not what it should be. This is the
-    # only genuinely unknown state: the write may have been accepted and
-    # something may have moved the ref afterwards, or it may never have
-    # landed, and this runner will not push again to find out.
+    # Everything else is genuinely unknown, and is reported as unknown: a
+    # push that exited zero without moving the ref, a refused push onto a
+    # branch that has since moved for reasons we cannot attribute, or an
+    # ancestry question git could not answer at all.
     return _result(
         PushOutcome.PUSH_NOT_VERIFIED,
         created
         + (
-            f"git push succeeded but {push_target.ref} reads back as {observed}, "
-            f"not the {commit.sha} this run created. Remote state is not known: do "
-            "not re-run blind, read the branch first",
+            (f"the push reported: {push_failure}",)
+            if push_failure
+            else ("git push reported success",)
+        )
+        + (
+            f"{push_target.ref} reads back as {observed}, not the {commit.sha} this "
+            "run created"
+            + (
+                ", and whether this run's commit reached the remote could not be "
+                "determined"
+                if landed is None
+                else ", and this run's commit is not in its history"
+            )
+            + ". Remote state is not known: do not re-run blind, read the branch "
+            "first",
         ),
         target=target,
         push_target=push_target,

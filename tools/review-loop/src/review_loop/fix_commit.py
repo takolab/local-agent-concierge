@@ -337,6 +337,78 @@ def describe_remote_commit(
     return parent, patch_digest(capture_patch(repo_root, parent, tip, timeout=timeout))
 
 
+def read_remote_urls(
+    repo_root: str,
+    *,
+    remote: str,
+    timeout: float = DEFAULT_GIT_TIMEOUT_SECONDS,
+) -> tuple[str, ...]:
+    """Every URL git would use for ``remote``: fetch and push, deduplicated.
+
+    Both are read because a remote can carry a separate ``pushurl``, and the
+    URL that decides where a push lands is not the one that decides where a
+    fetch comes from. ``git remote get-url`` reports the *effective* URL --
+    any ``url.<base>.insteadOf`` rewriting is already applied -- so what comes
+    back is where git will actually go, not what someone typed into the
+    config.
+    """
+    urls: list[str] = []
+    for argv in (
+        ["remote", "get-url", "--", remote],
+        ["remote", "get-url", "--push", "--", remote],
+    ):
+        try:
+            value = run_git(argv, cwd=repo_root, timeout=timeout)
+        except WorkspaceError as exc:
+            raise WorkspaceError(
+                f"the remote {remote!r} could not be resolved to a URL ({exc}), so "
+                "which repository this push would reach cannot be established"
+            ) from exc
+        for line in value.splitlines():
+            entry = line.strip()
+            if entry and entry not in urls:
+                urls.append(entry)
+    return tuple(urls)
+
+
+def contains_commit(
+    repo_root: str,
+    *,
+    remote: str,
+    branch: str,
+    commit: str,
+    tip: str,
+    timeout: float = DEFAULT_GIT_TIMEOUT_SECONDS,
+) -> bool | None:
+    """Is ``commit`` in the history of the branch's current ``tip``?
+
+    This is the question that separates "the push never landed" from "the push
+    landed and the branch moved on again", and no other observation answers
+    it. A read-back that is not our commit is compatible with both, and the
+    two call for opposite reactions from a human.
+
+    ``None`` means the question could not be answered -- the branch could not
+    be fetched, or git could not compare the two -- which is itself an answer
+    a caller must not round to ``False``.
+    """
+    try:
+        run_git(
+            ["fetch", "--quiet", remote, f"refs/heads/{branch}"],
+            cwd=repo_root,
+            timeout=timeout,
+        )
+        completed = run_git(
+            ["rev-list", "--max-count=1", commit, f"^{tip}"],
+            cwd=repo_root,
+            timeout=timeout,
+        )
+    except WorkspaceError:
+        return None
+    # `rev-list <commit> ^<tip>` lists what is in `commit` but not reachable
+    # from `tip`. Empty means `commit` is an ancestor of `tip`.
+    return completed == ""
+
+
 def push_fix_commit(
     worktree: str,
     *,

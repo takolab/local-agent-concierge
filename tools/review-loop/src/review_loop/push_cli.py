@@ -55,23 +55,25 @@ exit codes:
   0   PUSH_PREPARED           --dry-run: the candidate patch verified and
                               applied; nothing was committed or pushed
   60  PUSH_INPUT_INVALID      the push input is not a validated candidate patch
-  61  PUSH_BRANCH_REFUSED     the branch to push to could not be established
-                              safely (fork head, closed PR, default branch, or
-                              an unusable branch name)
+  61  PUSH_BRANCH_REFUSED     the destination could not be established safely:
+                              a fork head, a closed PR, the default branch, an
+                              unusable branch name, or a --git-remote that
+                              names a different repository
   62  PUSH_TARGET_STALE       the pull request moved, or its branch is
                               somewhere this runner cannot account for
   63  PATCH_IDENTITY_MISMATCH the patch is not the validated candidate patch,
                               does not apply, or produced something else
   64  COMMIT_REFUSED          the workspace was not a clean reviewed head, or
                               the commit is not exactly the candidate patch
-  65  PUSH_FAILED             the push was refused and the branch is verified
-                              unchanged
+  65  PUSH_FAILED             the push was refused and git confirms the
+                              created commit is not in the branch's history
   66  PUSH_NOT_VERIFIED       the push ran and the branch does not read back as
                               the created commit; REMOTE STATE IS NOT KNOWN
   67  CI_FAILED               authoritative CI for the pushed commit failed
   68  CI_PENDING              CI had not finished within --ci-timeout
-  69  CI_STALE_TARGET         the pull request moved off the pushed commit, or
-                              its CI no longer describes the current merge
+  69  CI_STALE_TARGET         the pull request moved off the pushed commit, its
+                              CI no longer describes the current merge, or a
+                              lost response hid a push that did land
   70  CI_AMBIGUOUS            CI state for the pushed commit is undecidable
   71  PUSH_WORKSPACE_INVALID  the workspace could not be prepared or verified
   72  PUSH_API_ERROR          GitHub could not be queried before the push
@@ -88,7 +90,16 @@ fast-forward `git push` of one commit to refs/heads/<the pull request's head
 branch>, over your existing git credential for the remote. It never forces,
 never writes a tag, never creates a branch that does not exist, never pushes
 to a default branch or a fork, and never merges. The branch name comes from
-GitHub's pull request object alone; there is no flag that can change it.
+GitHub's pull request object alone; there is no flag that can change it. The
+destination repository is checked too: every URL git reports for --git-remote
+must name the repository the fix handoff describes, so a mirror holding the
+same branch at the same commit is refused rather than pushed to.
+
+That guarantee is about the git argument vectors this command constructs. Your
+`pre-commit`, `prepare-commit-msg` and `pre-push` hooks still run -- they are
+deliberately not bypassed -- and a hook is an arbitrary program. Your hooks are
+trusted; the runner's own argv is bounded. A hook that edits files is still
+caught, because the commit is re-hashed against the candidate patch.
 
 GitHub itself is read-only here: the same `gh api --method GET` client the
 verification command uses. No comment, label, review or merge is written.
@@ -259,6 +270,10 @@ def render_text(result: PushResult, stream: TextIO, *, workspace_label: str | No
         )
     if workspace_label is not None:
         print(f"Commit workspace:     {workspace_label}", file=stream)
+    print(
+        "Candidate patch:      " + (result.patch_path or "(not resolved)"),
+        file=stream,
+    )
 
     commit = result.commit
     print(
@@ -327,6 +342,7 @@ def render_json(result: PushResult, stream: TextIO) -> None:
         "already_pushed": result.already_pushed,
         "commit_created": result.commit_created,
         "pushed_sha": result.pushed_sha,
+        "patch_path": result.patch_path,
         "github_write_performed": False,
         "target": None
         if target is None

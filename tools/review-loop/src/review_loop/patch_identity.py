@@ -9,13 +9,28 @@ function of the content alone unless it is asked to be:
   objects the repository holds, so the same change diffs differently in a
   fresh clone and in a long-lived one. ``--full-index`` removes the variable.
 * ``diff.noprefix``, ``diff.mnemonicPrefix``, ``diff.algorithm``,
-  ``diff.context`` and an external or textconv driver are all ordinary user
-  configuration, and each changes the bytes without changing the change.
+  ``diff.context``, ``diff.indentHeuristic``, ``diff.orderFile`` and an
+  external or textconv driver are all ordinary user configuration, and each
+  changes the bytes without changing the change.
+* ``core.quotePath`` decides whether a non-ASCII path is rendered literally or
+  octal-escaped, so a fix touching such a file diffs differently on two
+  machines that merely disagree about that setting.
+* **Rename detection** is the subtlest one: the same tree transition renders
+  either as ``rename from``/``rename to`` metadata or as a delete plus an add,
+  depending on ``diff.renames`` -- and, when renames are on, on
+  ``diff.renameLimit`` and therefore on how many files changed. ``--no-renames``
+  removes both variables at once, at the cost of a larger patch for a rename.
 
 So every diff whose bytes are load-bearing goes through :func:`diff_argv`,
-which pins each of those explicitly rather than inheriting them. The result
-is that the digest of a patch is a property of the change, comparable across
-two invocations, two worktrees and two machines.
+which pins each of those explicitly rather than inheriting them.
+
+**What that claim is, exactly.** The digest is a property of the change *for
+the settings listed in this module*. It is not a claim that no git
+configuration anywhere can affect it: ``core.fileMode``, for instance, changes
+what git *sees* in a working tree rather than how a diff is rendered, and is
+deliberately not pinned because forcing it would break clones on filesystems
+that need it off. What is pinned is the rendering, which is what makes two
+runs of the same change on two machines comparable.
 
 The digest itself is deliberately of the **patch text**, not of a resulting
 tree. A tree hash would answer "is the end state the same?", which is a
@@ -29,28 +44,43 @@ commit rather than against the runner's memory of what it applied.
 from __future__ import annotations
 
 import hashlib
+import os
 
 from .reviewer_workspace import DEFAULT_GIT_TIMEOUT_SECONDS, run_git
 
 #: Configuration this runner refuses to inherit, because each entry changes
 #: the bytes of a diff without changing what the diff says.
+#:
+#: ``diff.orderFile`` has no "unset me" flag and git rejects an empty value,
+#: so it is pointed at the null device: an order file with no patterns in it
+#: imposes no ordering, which is the default this runner wants.
 _DIFF_CONFIG: tuple[str, ...] = (
     "-c", "core.abbrev=40",
+    "-c", "core.quotePath=false",
     "-c", "diff.noprefix=false",
     "-c", "diff.mnemonicPrefix=false",
     "-c", "diff.algorithm=myers",
+    "-c", "diff.indentHeuristic=true",
+    "-c", "diff.suppressBlankEmpty=false",
+    "-c", f"diff.orderFile={os.devnull}",
 )
 
 #: Flags that pin the rest of the rendering. ``--binary`` keeps a binary
 #: change representable at all; ``--full-index`` makes the ``index`` lines
-#: exact; the two ``--no-*`` flags refuse any diff driver the repository's
-#: own ``.gitattributes`` might otherwise install.
+#: exact; the two ``--no-*`` driver flags refuse any diff driver the
+#: repository's own ``.gitattributes`` might otherwise install; and
+#: ``--no-renames`` fixes the one rendering choice that would otherwise depend
+#: on how many files the change touched.
 _DIFF_FLAGS: tuple[str, ...] = (
     "--binary",
     "--full-index",
     "--no-color",
     "--no-ext-diff",
     "--no-textconv",
+    "--no-renames",
+    "--no-relative",
+    "--ignore-submodules=none",
+    "--inter-hunk-context=0",
     "-U3",
     "--src-prefix=a/",
     "--dst-prefix=b/",

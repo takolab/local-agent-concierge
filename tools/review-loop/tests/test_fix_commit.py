@@ -10,6 +10,8 @@ exist.
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
 from push_fakes import git
@@ -489,3 +491,73 @@ def test_a_captured_patch_ends_with_a_newline_and_applies(worktree, scenario):
         expected_digest=scenario.patch_sha256,
         expected_paths=scenario.changed_paths,
     )
+
+
+def test_a_non_ascii_path_hashes_the_same_whatever_quotepath_says(worktree):
+    """`core.quotePath` renders a non-ASCII path literally or octal-escaped.
+
+    Two machines that merely disagree about that setting would compute two
+    digests for one change, and the second would refuse a patch the first
+    validated -- a fail-closed availability bug rather than a write-safety
+    one, but a real one for anyone whose fix touches such a file.
+    """
+    path = os.path.join(worktree, "pkg", "ünïcode-ファイル.py")
+    with open(path, "w", encoding="utf-8") as handle:
+        handle.write("value = 1\n")
+    run_git(["add", "--intent-to-add", "--", "pkg/ünïcode-ファイル.py"], cwd=worktree, timeout=60)
+
+    run_git(["config", "core.quotePath", "true"], cwd=worktree, timeout=60)
+    quoted = capture_patch(worktree, "HEAD", timeout=60)
+    run_git(["config", "core.quotePath", "false"], cwd=worktree, timeout=60)
+    literal = capture_patch(worktree, "HEAD", timeout=60)
+
+    assert quoted == literal
+    assert "ünïcode-ファイル.py" in literal
+    assert patch_digest(quoted) == patch_digest(literal)
+
+
+def test_a_rename_hashes_the_same_whatever_rename_detection_says(worktree):
+    """The same tree transition renders two ways depending on `diff.renames`.
+
+    Rename detection also depends on `diff.renameLimit`, and therefore on how
+    many files the change happened to touch -- so leaving it unpinned makes
+    the digest a function of the size of the change as well as its content.
+    """
+    run_git(["mv", "pkg/code.py", "pkg/moved.py"], cwd=worktree, timeout=60)
+
+    run_git(["config", "diff.renames", "true"], cwd=worktree, timeout=60)
+    detected = capture_patch(worktree, "HEAD", timeout=60)
+    run_git(["config", "diff.renames", "false"], cwd=worktree, timeout=60)
+    plain = capture_patch(worktree, "HEAD", timeout=60)
+
+    assert detected == plain
+    assert "rename from" not in detected
+    assert patch_digest(detected) == patch_digest(plain)
+
+
+def test_the_pinned_settings_are_the_ones_the_module_claims(worktree, scenario):
+    """Every setting named in the docstring is actually neutralised."""
+    run_git(
+        ["apply", "--index", "--whitespace=nowarn", "--", scenario.patch_path],
+        cwd=worktree,
+        timeout=60,
+    )
+    baseline = capture_patch(worktree, "HEAD", timeout=60)
+
+    for setting, value in (
+        ("core.abbrev", "4"),
+        ("core.quotePath", "true"),
+        ("diff.noprefix", "true"),
+        ("diff.mnemonicPrefix", "true"),
+        ("diff.algorithm", "patience"),
+        ("diff.context", "9"),
+        ("diff.indentHeuristic", "false"),
+        ("diff.renames", "copies"),
+        ("diff.suppressBlankEmpty", "true"),
+        ("diff.interHunkContext", "7"),
+        ("diff.relative", "true"),
+    ):
+        run_git(["config", setting, value], cwd=worktree, timeout=60)
+        assert capture_patch(worktree, "HEAD", timeout=60) == baseline, setting
+
+    assert patch_digest(baseline) == scenario.patch_sha256

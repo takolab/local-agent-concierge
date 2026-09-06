@@ -61,8 +61,14 @@ def scenario(tmp_path) -> Scenario:
 
 def build_scenario(tmp_path, edits, *, branch: str = DEFAULT_BRANCH_NAME,
                    number: int = DEFAULT_NUMBER) -> Scenario:
-    bare = tmp_path / "origin.git"
-    bare.mkdir()
+    # The bare repository is named `<owner>/<name>.git` on purpose. The push
+    # turn refuses a remote that does not name the repository the handoff
+    # describes, and a remote called `origin.git` names `<tmpdir>/origin` --
+    # so a fixture that ignored this would either fail the check or force the
+    # tests to bypass it. Naming it properly means the real check runs on
+    # every real-git test rather than being stubbed out of them.
+    bare = tmp_path / "takolab" / "local-agent-concierge.git"
+    bare.mkdir(parents=True)
     git(bare, "init", "--quiet", "--bare")
 
     seed = tmp_path / "seed"
