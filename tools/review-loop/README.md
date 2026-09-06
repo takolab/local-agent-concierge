@@ -1333,7 +1333,7 @@ into, and it is verified to be a clean checkout of the reviewed head first — a
 directory holding a previous run's commit fails that check rather than being
 built on.
 
-### What is structurally enforced, and what is only asked for
+### What a push turn enforces, and what it does not claim
 
 | | |
 | --- | --- |
