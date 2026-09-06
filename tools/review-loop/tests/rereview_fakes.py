@@ -87,8 +87,27 @@ def review_document(
     return json.dumps(payload, indent=2)
 
 
+def review_sha256_of(document: str) -> str:
+    """The identity of a review document, via the real loader and digest.
+
+    Computed rather than hard-coded: a fixture holding a literal digest would
+    keep passing after the canonical form changed, which is exactly the drift
+    the digest exists to detect.
+    """
+    from review_loop.review_identity import review_sha256
+    from review_loop.routing import load_handoff
+
+    handoff = load_handoff(document)
+    return review_sha256(handoff.target, handoff.verdict)
+
+
+def _default_review_sha256() -> str:
+    return review_sha256_of(review_document())
+
+
 def push_document(
     *,
+    review: str | None = None,
     outcome: str = "PUSH_READY",
     repo: str = REPO,
     number: int = PR,
@@ -110,13 +129,35 @@ def push_document(
     include_provenance: bool = True,
     source_round: int = 1,
     source_finding_ids: tuple[str, ...] = ("F1", "F2"),
+    source_review_sha256: str | None = None,
+    source_merge_base: str | None = None,
     source_head_sha: str | None = None,
     source_patch_sha256: str = CANDIDATE_DIGEST,
     fix_patch_sha256: str | None = None,
     fix_sha: str | None = None,
     fix_parent_sha: str | None = None,
 ) -> str:
-    """A ``review-loop push --json`` document."""
+    """A ``review-loop push --json`` document.
+
+    Pass ``review=`` the review document this push answers and the provenance
+    is derived from it, so a pair is consistent by construction and a test has
+    to *choose* to break one field. Without it the default review is assumed.
+    """
+    if review is not None:
+        from review_loop.routing import load_handoff
+
+        handoff = load_handoff(review)
+        if reviewed_sha is REVIEWED_SHA:
+            reviewed_sha = handoff.target.head_sha
+        if merge_base is BASE_TIP:
+            merge_base = handoff.target.ci_merge_base_sha
+        if source_finding_ids == ("F1", "F2"):
+            source_finding_ids = tuple(
+                f.finding_id for f in handoff.verdict.open_findings
+            )
+        if source_review_sha256 is None:
+            source_review_sha256 = review_sha256_of(review)
+
     payload = {
         "outcome": outcome,
         "dry_run": dry_run,
@@ -146,7 +187,13 @@ def push_document(
     }
     if include_provenance:
         payload["fix_provenance"] = {
+            "source_review_sha256": DEFAULT_REVIEW_SHA256
+            if source_review_sha256 is None
+            else source_review_sha256,
             "source_round": source_round,
+            "source_ci_merge_base_sha": merge_base
+            if source_merge_base is None
+            else source_merge_base,
             "source_reviewed_head_sha": reviewed_sha
             if source_head_sha is None
             else source_head_sha,
@@ -177,6 +224,12 @@ def push_document(
             "ci_merge_base_sha": merge_base,
         }
     return json.dumps(payload, indent=2)
+
+
+#: The identity of the review :func:`review_document` builds with its
+#: defaults, computed from the real canonicalisation so the fakes cannot
+#: drift from it.
+DEFAULT_REVIEW_SHA256 = _default_review_sha256()
 
 
 def resolution_block(

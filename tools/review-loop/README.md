@@ -25,6 +25,8 @@ and routes its open findings to one bounded Coding Agent turn: a dedicated
 writable worktree at the reviewed commit, an explicit allowed scope derived
 from the findings, a Structured Fix Response validated against the working
 tree, and a patch. It makes **no GitHub request at all** and commits nothing.
+Its document also names the review it answers, so the two later stages can
+pair on that artifact rather than on the labels inside it.
 
 **`review-loop push --fix-json <file> --patch <file>`** is the first stage
 with **authoritative repository write capability**. It proves the patch it
@@ -1591,10 +1593,11 @@ text, say which row was taken.
 
 Both of the first two rows establish the same two git facts — parent and diff
 digest — and both therefore report the same `fix_provenance` block, pairing
-them with the routed review's round, reviewed head and finding ids. That block
-is what lets `review-loop re-review` tell a fix for one finding set from a fix
-for another; it is emitted from the already-pushed row as well precisely so
-that `commit_created: false` does not quietly drop it.
+them with the identity of the review the fix was routed from (see
+[`review_identity.py`](src/review_loop/review_identity.py)). That block is what
+lets `review-loop re-review` tell a fix for one review from a fix for another;
+it is emitted from the already-pushed row as well precisely so that
+`commit_created: false` does not quietly drop it.
 
 A local commit in a prepared worktree is never reused, because the worktree
 does not survive the run. `--commit-cwd` is the exception an operator opts
@@ -1727,13 +1730,43 @@ accepts it, and the re-review would then ask a fresh reviewer to resolve `F3`
 against a commit produced to fix `F1` and `F2`. The commit under review would
 be correctly bound; the *history* recorded about it would be false.
 
-So `review-loop push` reports a `fix_provenance` block, and this stage
-requires it:
+Finding ids do not close this on their own, and it is worth being blunt about
+why: they are labels local to one review turn, and `F1`, `F2` is the
+convention the reviewer prompt itself suggests. Two independent reviews of one
+commit therefore routinely carry the *same* ids over completely different
+findings:
+
+```text
+Review A of H1              Review B of H1
+F1  worker.py  not atomic   F1  process.py  credentials leak
+F2  ci.py      stale CI     F2  README.md   false guarantee
+```
+
+Round, reviewed head and finding-id set are identical. So is the merge
+context, in the other direction: this package already treats a review of `H`
+onto `B1` as a different record from one of the same `H` onto `B2` — that is
+why `base_sha` is in `RecordIdentity` — and a fix provenance that ignored it
+would disagree with that about what "the same review" means.
+
+What identifies a review is therefore the **review itself**. See
+[`review_identity.py`](src/review_loop/review_identity.py): the canonical
+bytes of the validated review model — repository, pull request, head, base
+ref, CI merge base, round, recommendation, escalation reason, and every field
+of every finding in order — and their SHA-256. It travels the whole chain:
+
+```text
+review --json → fix handoff → push --json → re-review
+```
+
+`review-loop push` reports it inside a `fix_provenance` block, and this stage
+requires the block:
 
 ```json
 "fix_provenance": {
+  "source_review_sha256": "…",
   "source_round": 1,
   "source_reviewed_head_sha": "…",
+  "source_ci_merge_base_sha": "…",
   "source_finding_ids": ["F1", "F2"],
   "source_patch_sha256": "…",
   "fix_sha": "…",
@@ -1744,9 +1777,24 @@ requires it:
 
 The `source_*` half names the review whose findings were routed; the `fix_*`
 half is what **git** said about the commit now on the branch. The re-review
-requires the round, the reviewed head and the *whole finding set* to match the
-review document, `fix_sha` to be the pushed commit, `fix_parent_sha` to be the
-reviewed head, and `fix_patch_sha256` to equal the candidate patch digest.
+requires the round, the reviewed head, the merge base and the *whole finding
+set* to match the review document, `fix_sha` to be the pushed commit,
+`fix_parent_sha` to be the reviewed head, and `fix_patch_sha256` to equal the
+candidate patch digest — and then, as the catch-all, that
+`source_review_sha256` equals the digest **recomputed** from the review
+document supplied here. Recomputed, never read back from it: agreement then
+means the two documents are the same validated artifact rather than that they
+carry the same string.
+
+The specific checks run first on purpose. "F3 was never fixed" is a reason an
+operator can act on; the digest is what catches every difference they cannot
+see.
+
+Two fields are deliberately outside the digest. `ci_evidence` is CI
+observation rather than review content and — decisively — `routing` does not
+read it back, so hashing it would make the digest uncomputable downstream.
+`resolved_finding_ids` is likewise not carried by the handoff and is always
+empty in round 1.
 
 The block is emitted on **both** paths to `PUSH_READY`, and that matters more
 than it looks. The already-pushed path — a retry that finds the fix already on
@@ -2099,6 +2147,15 @@ a fresh Major asserts both facts independently and asserts that the record
 does not report `F1` as unresolved; `F1 → UNRESOLVED` with no fresh finding
 asserts that nothing is invented.
 
+The provenance chain is tested at both ends and in the middle: the digest's
+own properties (every field changes it, finding order counts, the same id over
+a different finding differs, `ci_evidence` is outside it, and it survives a
+round trip through the handoff), the two mispairings it exists to refuse — the
+same finding ids over different findings, and the same review against a
+different merge context — and, end to end, the *real* push turn run over real
+git with its real `--json` output fed straight into the pairing. No fixture's
+idea of the document stands in for it.
+
 ## Known limitations
 
 * **Scope is coarse, and can refuse legitimate findings.** A reviewer that
@@ -2204,13 +2261,15 @@ asserts that nothing is invented.
   reviewed head, in this pull request, with CI verified. Nothing establishes
   that the patch inside it addresses those findings — which is why the
   re-review is a real review turn and not a checkbox.
-* **Provenance is carried, not proved.** The push document states which
-  review's findings caused the fix and what git said the fix commit is, and
-  the re-review refuses a pair that disagrees. Both documents are still
-  operator-controlled text: an edited pair that agrees with itself is
-  accepted, and nothing distinguishes a commit this pipeline pushed from a
-  hand-written one in the same position. The check removes accidental
-  mispairing, not a determined one.
+* **Provenance is carried, not proved.** The push document names the exact
+  validated review whose findings caused the fix — by a digest of the review
+  model, not by its finding ids — plus what git said the fix commit is, and
+  the re-review recomputes the digest and refuses a pair that disagrees. Both
+  documents are still operator-controlled text: an edited pair that agrees
+  with itself is accepted, and nothing distinguishes a commit this pipeline
+  pushed from a hand-written one in the same position. It is a checksum over
+  content, not a signature: it removes accidental mispairing, not a
+  determined one.
 * **A residual race on the write.** GitHub offers no compare-and-set on issue
   comments. The window between the final duplicate check and the `POST` is
   narrow but real; two runners racing on the same target could produce two

@@ -81,6 +81,12 @@ class FixHandoff:
     #: report *which review* caused this fix as a read fact rather than as a
     #: constant a later reader has to trust.
     round: int = SUPPORTED_ROUND
+    #: The identity of the validated review whose findings produced this
+    #: patch -- see :mod:`review_loop.review_identity`. Required, because the
+    #: finding ids beside it are labels local to one review turn and do not
+    #: identify the artifact: two independent reviews of the same commit
+    #: routinely both raise ``F1`` and ``F2``.
+    source_review_sha256: str = ""
 
 
 def _require(payload: dict, key: str, *, where: str):
@@ -357,6 +363,16 @@ def load_handoff(document: str, *, expected_repo: str | None = None) -> FixHando
     if patch_path is not None and not isinstance(patch_path, str):
         raise FixHandoffError("the push input's 'patch_path' is not a string")
 
+    source_review = _require(payload, "source_review_sha256", where="the push input")
+    if not isinstance(source_review, str) or not DIGEST_PATTERN.match(source_review):
+        raise FixHandoffError(
+            "the push input's 'source_review_sha256' must be a 64-character "
+            f"lowercase SHA-256 digest, got {source_review!r}. Without it nothing "
+            "downstream can tell which validated review this patch answers -- the "
+            "finding ids alone cannot, because they are labels local to one review "
+            "turn"
+        )
+
     return FixHandoff(
         target=target,
         changed_paths=changed,
@@ -365,4 +381,5 @@ def load_handoff(document: str, *, expected_repo: str | None = None) -> FixHando
         patch_path=patch_path or None,
         finding_ids=finding_ids,
         round=round_number,
+        source_review_sha256=source_review,
     )

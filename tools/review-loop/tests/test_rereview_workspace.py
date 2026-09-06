@@ -129,10 +129,8 @@ def _client(fix_sha):
 
 
 def _request(reviewed, fix):
-    return load_request(
-        review_document(head_sha=reviewed),
-        push_document(reviewed_sha=reviewed, pushed_sha=fix),
-    )
+    review = review_document(head_sha=reviewed)
+    return load_request(review, push_document(review=review, pushed_sha=fix))
 
 
 def test_the_re_reviewer_reads_the_pushed_fix_not_the_reviewed_head(pushed_fix):

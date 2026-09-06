@@ -212,10 +212,8 @@ def test_a_pull_request_retargeted_to_another_base_never_starts_a_reviewer():
     # The fix was pushed against 'release'; GitHub now says the pull request
     # targets master. Its CI is green, and it is green for a different
     # integration than the one the push established.
-    request = _request(
-        review=review_document(base_ref="release"),
-        push=push_document(base_ref="release"),
-    )
+    review = review_document(base_ref="release")
+    request = _request(review=review, push=push_document(review=review, base_ref="release"))
     result, reviewer, writer = _run(request=request)
 
     assert result.outcome is ReReviewOutcome.TARGET_NOT_AT_FIX

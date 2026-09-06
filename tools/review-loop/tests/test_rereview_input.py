@@ -20,6 +20,7 @@ from rereview_fakes import (
     REVIEWED_SHA,
     push_document,
     review_document,
+    review_sha256_of,
 )
 
 
@@ -206,7 +207,9 @@ def test_an_already_pushed_fix_still_binds_to_this_reviews_findings():
 def test_a_push_that_fixed_another_reviews_findings_is_refused():
     # Review A of H1 raises F1 and F2; review B of H1 raises F3. Pairing
     # review B with the push of A's fix lines up on repo, PR, reviewed head
-    # and pushed head -- and is still the wrong pairing.
+    # and pushed head -- and is still the wrong pairing. The finding-set check
+    # names the difference; the identity digest behind it would catch this
+    # pair even if the ids had matched.
     review_b = review_document(
         findings=(
             {
@@ -222,6 +225,89 @@ def test_a_push_that_fixed_another_reviews_findings_is_refused():
     )
     with pytest.raises(ReReviewInputError, match="not fixed: F3"):
         _load(review=review_b, push=push_document())
+
+
+def test_two_reviews_of_one_commit_sharing_finding_ids_are_told_apart():
+    """The identity gap finding-id equality cannot close.
+
+    `F1`, `F2` is the convention the reviewer prompt itself suggests, so two
+    independent reviews of the same commit carrying the same ids over
+    completely different findings is the ordinary case, not an exotic one.
+    Round, reviewed head, merge base and finding-id set are all identical
+    here; only the findings differ.
+    """
+
+    def finding(fid, location, problem, outcome, severity="Major"):
+        return {
+            "finding_id": fid,
+            "severity": severity,
+            "location": location,
+            "problem": problem,
+            "evidence": "the code says so",
+            "required_outcome": outcome,
+            "scope_boundary": None,
+        }
+
+    review_a = review_document(
+        findings=(
+            finding("F1", "worker.py", "claim is not atomic", "make claim atomic"),
+            finding("F2", "ci.py", "stale CI is accepted", "reject stale merge context"),
+        )
+    )
+    review_b = review_document(
+        findings=(
+            finding("F1", "process.py", "credentials reach the reviewer", "remove them"),
+            finding("F2", "README.md", "the guarantee is false", "correct the contract"),
+        )
+    )
+    push_a = push_document(review=review_a)
+
+    # The pair that really belongs together is accepted...
+    assert _load(review=review_a, push=push_a).original_finding_ids == ("F1", "F2")
+
+    # ...and the one that only looks like it does is not.
+    with pytest.raises(ReReviewInputError, match="different validated reviews"):
+        _load(review=review_b, push=push_a)
+
+
+def test_two_reviews_of_one_commit_against_different_bases_are_told_apart():
+    """Same head, same findings, different verified integration state.
+
+    This package already treats a review of `H` onto `B1` as a different
+    record from one of the same `H` onto `B2` -- that is why the merge base is
+    in the record identity. The fix provenance has to agree, or the two
+    disagree about what "the same review" means.
+    """
+    review_b2 = review_document(merge_base=ADVANCED_BASE_TIP)
+    push_b1 = push_document()
+
+    with pytest.raises(ReReviewInputError, match="different integration states"):
+        _load(review=review_b2, push=push_b1)
+
+
+def test_the_review_identity_is_recomputed_not_read_back():
+    # A push document carrying a digest that is merely well-formed is not a
+    # match: the value compared against it comes from canonicalising the
+    # review document supplied here.
+    with pytest.raises(ReReviewInputError, match="different validated reviews"):
+        _load(push=push_document(source_review_sha256="d" * 64))
+
+
+def test_a_malformed_review_identity_is_refused():
+    with pytest.raises(ReReviewInputError, match="source_review_sha256"):
+        _load(push=push_document(source_review_sha256="not-a-digest"))
+
+
+def test_a_push_document_with_no_review_identity_is_refused():
+    document = json.loads(push_document())
+    del document["fix_provenance"]["source_review_sha256"]
+    with pytest.raises(ReReviewInputError, match="source_review_sha256"):
+        _load(push=json.dumps(document))
+
+
+def test_a_provenance_naming_another_merge_base_is_refused():
+    with pytest.raises(ReReviewInputError, match="different integration states"):
+        _load(push=push_document(source_merge_base=ADVANCED_BASE_TIP))
 
 
 def test_a_push_fixing_only_some_of_this_reviews_findings_is_refused():
@@ -341,6 +427,30 @@ def test_a_real_push_document_pairs_with_its_own_review(tmp_path):
         (worktree / "pkg" / "code.py").write_text("value = 2\n")
 
     live = build_scenario(tmp_path, edits)
+    review = review_document(
+        head_sha=live.head_sha,
+        number=live.number,
+        findings=(
+            {
+                "finding_id": "F1",
+                "severity": "Major",
+                "location": "pkg/code.py",
+                "problem": "The value is wrong.",
+                "evidence": "It is 1 and should be 2.",
+                "required_outcome": "It is 2.",
+                "scope_boundary": None,
+            },
+            {
+                "finding_id": "F2",
+                "severity": "Minor",
+                "location": "pkg/code.py",
+                "problem": "And it is undocumented.",
+                "evidence": "No comment explains it.",
+                "required_outcome": "It is explained.",
+                "scope_boundary": None,
+            },
+        ),
+    )
     fix_path = tmp_path / "fix.json"
     fix_path.write_text(
         fix_json(
@@ -351,6 +461,9 @@ def test_a_real_push_document_pairs_with_its_own_review(tmp_path):
             patch_path=live.patch_path,
             number=live.number,
             finding_ids=("F1", "F2"),
+            # The identity of the review above, computed the way the real fix
+            # turn computes it from the review it was routed from.
+            source_review_sha256=review_sha256_of(review),
         )
     )
 
@@ -386,30 +499,6 @@ def test_a_real_push_document_pairs_with_its_own_review(tmp_path):
     assert _json.loads(push_json)["outcome"] == "PUSH_READY"
 
     pushed = live.remote_tip()
-    review = review_document(
-        head_sha=live.head_sha,
-        number=live.number,
-        findings=(
-            {
-                "finding_id": "F1",
-                "severity": "Major",
-                "location": "pkg/code.py",
-                "problem": "The value is wrong.",
-                "evidence": "It is 1 and should be 2.",
-                "required_outcome": "It is 2.",
-                "scope_boundary": None,
-            },
-            {
-                "finding_id": "F2",
-                "severity": "Minor",
-                "location": "pkg/code.py",
-                "problem": "And it is undocumented.",
-                "evidence": "No comment explains it.",
-                "required_outcome": "It is explained.",
-                "scope_boundary": None,
-            },
-        ),
-    )
 
     request = load_request(review, push_json)
 

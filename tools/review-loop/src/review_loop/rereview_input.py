@@ -51,6 +51,7 @@ from dataclasses import dataclass
 from .fix_handoff import DIGEST_PATTERN
 from .model import FULL_SHA_PATTERN
 from .push_response import BOUNDARY_CLEAN
+from .review_identity import review_sha256 as compute_review_sha256
 from .review_target import ReviewTarget
 from .rereview import RE_REVIEW_ROUND
 from .routing import RoutingInputError
@@ -254,6 +255,8 @@ def _check_provenance(
     *,
     pushed_sha: str,
     reviewed_head_sha: str,
+    reviewed_merge_base_sha: str,
+    review_sha256: str,
     round_number: int,
     finding_ids: tuple[str, ...],
 ) -> None:
@@ -291,6 +294,26 @@ def _check_provenance(
     mispairing, which is the one an operator hits without meaning to.
     """
     provenance = _object(payload, "fix_provenance", where="the push input")
+
+    # Read first so a malformed digest is refused before anything else is
+    # reported, and compared last: the specific checks below give an operator
+    # a reason they can act on ("F3 was never fixed"), and the digest is the
+    # backstop that catches every difference they cannot see -- above all two
+    # reviews whose findings share the ids F1 and F2 and nothing else.
+    recorded = _digest(provenance, "source_review_sha256", where="the push provenance")
+
+    source_merge_base = _sha(
+        _require(provenance, "source_ci_merge_base_sha", where="the push provenance"),
+        "source_ci_merge_base_sha",
+        where="the push provenance",
+    )
+    if source_merge_base != reviewed_merge_base_sha:
+        raise ReReviewInputError(
+            f"the push input fixes a review of this head merged onto "
+            f"{source_merge_base}, but the review it is paired with was of the same "
+            f"head merged onto {reviewed_merge_base_sha}; those are different "
+            "integration states and different reviews"
+        )
 
     if provenance.get("source_round") != round_number:
         raise ReReviewInputError(
@@ -367,6 +390,17 @@ def _check_provenance(
         raise ReReviewInputError(
             f"the pushed commit's diff hashes to {fix_digest}, not to the candidate "
             f"patch {candidate_digest} the fix turn validated"
+        )
+
+    # The catch-all. Everything above compares one visible fact at a time and
+    # can agree between two genuinely different reviews; this compares the
+    # review itself, recomputed from the document supplied here.
+    if recorded != review_sha256:
+        raise ReReviewInputError(
+            f"the push input fixes the review identified by {recorded}, but the "
+            f"review it is paired with is {review_sha256}; the two agree on every "
+            "field checked above and are still different validated reviews -- most "
+            "often the same finding ids raised over different findings"
         )
 
     # The optional 'commit' block, when present, must agree with all of it.
@@ -472,6 +506,11 @@ def load_request(
         payload,
         pushed_sha=pushed_sha,
         reviewed_head_sha=reviewed_head,
+        reviewed_merge_base_sha=review.target.ci_merge_base_sha,
+        # Recomputed from the review document supplied here, never read back
+        # from it: agreement then means the two documents are the same
+        # validated artifact rather than that they carry the same string.
+        review_sha256=compute_review_sha256(review.target, verdict),
         round_number=verdict.round,
         finding_ids=tuple(f.finding_id for f in verdict.open_findings),
     )

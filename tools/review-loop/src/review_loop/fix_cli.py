@@ -412,6 +412,12 @@ def render_json(result: FixResult, stream: TextIO) -> None:
         "github_requests_performed": 0,
         "commit_or_push_performed": False,
         "patch_path": result.patch_path,
+        # Which validated review this fix answers, as a digest of the review
+        # model itself rather than of the labels inside it. Finding ids are
+        # local to one review turn, so a set of them does not identify the
+        # artifact; this does, and it is what the push and re-review stages
+        # pair against.
+        "source_review_sha256": result.source_review_sha256,
         "target": None
         if target is None
         else {

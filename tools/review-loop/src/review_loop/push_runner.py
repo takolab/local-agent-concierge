@@ -122,10 +122,19 @@ class FixProvenance:
     strictly weaker for no reason.
     """
 
+    #: The identity of the validated review itself. The one field here that
+    #: distinguishes two *different* reviews of the same commit -- everything
+    #: below it can be identical for both, finding ids included.
+    source_review_sha256: str
     #: The review round the routed findings belong to.
     source_round: int
     #: The commit the review was written against, and the fix's parent.
     source_reviewed_head_sha: str
+    #: The base commit CI had merged that review's head onto. Part of the
+    #: review target here for the same reason it is part of a recorded
+    #: review's identity: the same head onto a different base is a different
+    #: integration state, and so a different review.
+    source_ci_merge_base_sha: str
     #: The finding ids the fix turn answered, all of them.
     source_finding_ids: tuple[str, ...]
     #: The candidate patch the fix turn validated.
@@ -221,8 +230,10 @@ def _provenance(
             f"{fix_sha}; reaching here without them is a programming error"
         )
     return FixProvenance(
+        source_review_sha256=handoff.source_review_sha256,
         source_round=handoff.round,
         source_reviewed_head_sha=handoff.target.head_sha,
+        source_ci_merge_base_sha=handoff.target.ci_merge_base_sha,
         source_finding_ids=handoff.finding_ids,
         source_patch_sha256=handoff.patch_sha256,
         fix_sha=fix_sha,

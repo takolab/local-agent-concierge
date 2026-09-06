@@ -485,8 +485,10 @@ def render_json(result: PushResult, stream: TextIO) -> None:
         "fix_provenance": None
         if provenance is None
         else {
+            "source_review_sha256": provenance.source_review_sha256,
             "source_round": provenance.source_round,
             "source_reviewed_head_sha": provenance.source_reviewed_head_sha,
+            "source_ci_merge_base_sha": provenance.source_ci_merge_base_sha,
             "source_finding_ids": list(provenance.source_finding_ids),
             "source_patch_sha256": provenance.source_patch_sha256,
             "fix_sha": provenance.fix_sha,

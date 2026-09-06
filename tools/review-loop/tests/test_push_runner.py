@@ -485,6 +485,42 @@ def test_the_provenance_names_the_findings_the_fix_turn_answered(scenario):
     assert result.fix_provenance.source_finding_ids == ("F1", "F2")
 
 
+def test_the_provenance_carries_the_source_reviews_identity_and_merge_base(scenario):
+    client = client_for(scenario)
+    result = push(
+        scenario,
+        client=client,
+        timeline=Timeline({1: green(scenario, client, sha_getter=scenario.remote_tip)}),
+    )
+    handoff = handoff_for(scenario)
+
+    assert result.fix_provenance.source_review_sha256 == handoff.source_review_sha256
+    assert len(result.fix_provenance.source_review_sha256) == 64
+    assert (
+        result.fix_provenance.source_ci_merge_base_sha
+        == handoff.target.ci_merge_base_sha
+    )
+
+
+def test_a_fix_document_that_names_no_source_review_is_refused(scenario):
+    import json as _json
+
+    from review_loop.fix_handoff import FixHandoffError, load_handoff as load
+
+    document = _json.loads(fix_json(
+        head_sha=scenario.head_sha,
+        changed_paths=scenario.changed_paths,
+        patch_sha256=scenario.patch_sha256,
+        patch_bytes=scenario.patch_bytes,
+        patch_path=scenario.patch_path,
+        number=scenario.number,
+    ))
+    del document["source_review_sha256"]
+
+    with pytest.raises(FixHandoffError, match="source_review_sha256"):
+        load(_json.dumps(document))
+
+
 def test_no_provenance_is_reported_when_nothing_was_pushed(scenario):
     git(scenario.seed, "commit", "--quiet", "--allow-empty", "-m", "unrelated")
     theirs = git(scenario.seed, "rev-parse", "HEAD")
