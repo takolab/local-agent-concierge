@@ -417,7 +417,9 @@ def _excerpt(text: str | None) -> str:
     return collapsed[: MAX_BRIEF_EXCERPT_CHARS - 1].rstrip() + "…"
 
 
-def _brief_identity_lines(target: ReviewTarget, request) -> list[str]:
+def _brief_identity_lines(
+    target: ReviewTarget, request, rereview_comment_id: int | None
+) -> list[str]:
     """The pull request state and the evidence chain, as the brief states them."""
     evidence = (
         ", ".join(
@@ -443,6 +445,12 @@ def _brief_identity_lines(target: ReviewTarget, request) -> list[str]:
         f"Re-review: round {request.rereview.round} of "
         f"{request.rereview.reviewed_head_sha}",
         f"Re-review recommendation: {request.rereview.recommendation.value}",
+        # The comment this brief rests on, as found on the pull request by the
+        # turn that wrote this line -- not as claimed by the document it read.
+        # A brief whose record could not be confirmed is never produced, so
+        # this is always a comment a reader can open.
+        "Re-review record: comment "
+        + (str(rereview_comment_id) if rereview_comment_id is not None else "(unconfirmed)"),
     ]
 
 
@@ -476,7 +484,14 @@ def _fresh_summary_lines(request) -> list[str]:
     ] or ["(none)"]
 
 
-def render_merge_brief(target: ReviewTarget, request, facts, classification) -> str:
+def render_merge_brief(
+    target: ReviewTarget,
+    request,
+    facts,
+    classification,
+    *,
+    rereview_comment_id: int | None = None,
+) -> str:
     """Render one Merge Decision Brief for a verified, current pull request state.
 
     Only ever called with evidence the runner has just re-established against
@@ -493,7 +508,7 @@ def render_merge_brief(target: ReviewTarget, request, facts, classification) -> 
         MERGE_BRIEF_HEADING,
         "",
         f"Round: {request.rereview.round}",
-        *_brief_identity_lines(target, request),
+        *_brief_identity_lines(target, request, rereview_comment_id),
         "",
         f"Merge context: current — authoritative CI tested this head merged onto "
         f"{target.ci_merge_base_sha}, which is still the {target.base_ref} tip",

@@ -34,8 +34,29 @@ answer this review's findings, a re-review that was never valid, or a
 re-review that was only ever a dry run. It does not mean the documents are
 authentic -- they are operator-controlled files, as every handoff here is, and
 someone who can write all three can make them agree. What they cannot do is
-make the *pull request* agree: the runner re-reads head, base, merge context
-and CI from GitHub before any of this is allowed to become a brief.
+make the *pull request* agree: the runner re-reads head, base, merge context,
+CI **and the re-review's own record** from GitHub before any of this is
+allowed to become a brief.
+
+**Why a document with no re-review payload is refused rather than
+rehydrated.** The re-review turn's early duplicate exit reports
+``COMMENT_ALREADY_EXISTS`` before a reviewer runs, so its document proves a
+record exists without saying what the record says. Recovering the missing
+model by parsing the rendered ``## Independent AI Re-Review`` comment back
+into a :class:`~review_loop.rereview.ReReview` would be the one thing
+:mod:`review_loop.routing` refuses in its opening paragraph: deriving a
+verdict a second time from a source that was never a verdict, using rules
+that could drift from the ones that validated it. It would also make a
+comment *rendering* -- lossy by design, and free to change for human
+readability -- into a machine contract that no longer could.
+
+The goal behind that idea is still met, and by a stronger route. What
+``COMMENT_ALREADY_EXISTS`` ought to identify is *the exact validated evidence
+downstream relies on*, and identity is precisely what this pipeline already
+computes: :func:`review_loop.comment_format.rereview_identity_for` names one
+re-review by pull request, pushed head, merge base, round and role. So the
+runner looks that record up on the pull request and confirms it, while the
+document supplies the model. The label is trusted for nothing.
 """
 
 from __future__ import annotations
@@ -61,12 +82,35 @@ from .routing import RoutingInputError
 from .routing import load_handoff as load_review_handoff
 from .verdict import Finding, Recommendation
 
-#: The only re-review outcomes that carry a validated re-review recorded on
-#: the pull request. Both mean the same thing about the evidence -- a
-#: validated re-review of this exact pushed fix exists as a comment -- and
-#: differ only in whether *this* run wrote it.
+#: The re-review outcomes whose document *can* carry a validated re-review of
+#: a comment that is on the pull request.
+#:
+#: "Can" is the operative word, and it is why the outcome is a filter here
+#: rather than the evidence. A label describes what one past run believed;
+#: this stage needs two facts, and takes neither from it:
+#:
+#: 1. **the re-review model**, which must be in the document and must
+#:    re-validate -- checked in :func:`_rereview` below, and
+#: 2. **that it is recorded**, which is a fact about the pull request right
+#:    now, and is therefore read back from GitHub by
+#:    :mod:`review_loop.decision_runner` rather than inferred from any of
+#:    these strings.
+#:
+#: ``GITHUB_WRITE_FAILED`` is in the set for exactly that reason. It is the
+#: lost-response document: the ``POST`` was issued, the response did not come
+#: back, and that run could not tell a rejected request from a comment it
+#: really created. It carries the full validated re-review, so whether its
+#: write landed is a question this stage can simply go and answer -- and if it
+#: did not, the record check refuses the brief, which is the same fail-closed
+#: answer by a route that does not depend on guessing.
+#:
+#: Two ``COMMENT_ALREADY_EXISTS`` paths exist in the re-review runner and they
+#: are not equivalent. The pre-write duplicate check has a validated
+#: re-review in hand and reports it; the early exit, which runs *before* the
+#: reviewer to avoid paying for a result it may not post, has nothing but the
+#: comment id. The second is refused below, by name.
 BRIEFABLE_RE_REVIEW_OUTCOMES = frozenset(
-    {"RE_REVIEW_VALID", "COMMENT_ALREADY_EXISTS"}
+    {"RE_REVIEW_VALID", "COMMENT_ALREADY_EXISTS", "GITHUB_WRITE_FAILED"}
 )
 
 
@@ -206,6 +250,26 @@ def _list(payload: dict, key: str, *, where: str) -> list:
 
 def _rereview(payload: dict, *, pushed_fix_sha: str, original_ids: tuple[str, ...]):
     """Re-admit the serialised re-review through its own validator."""
+    if payload.get("rereview") is None:
+        # The re-review runner's early duplicate exit reaches this: it returns
+        # COMMENT_ALREADY_EXISTS before starting a reviewer, so it never holds
+        # a re-review model to serialise. The outcome is honest and the
+        # document is simply not evidence about what the re-review *said*.
+        #
+        # Named specifically rather than falling through to "missing field
+        # 'rereview'", because the operator's next step depends on which
+        # document they are holding, and the generic message points at
+        # neither. Rehydrating it by parsing the recorded comment back into a
+        # verdict is deliberately not done -- see this module's note on why.
+        raise DecisionInputError(
+            f"the re-review input reports {payload.get('outcome')!r} with no "
+            "'re-review' payload, so it establishes only that a record exists and "
+            "not what that record says. This is the re-review turn's early "
+            "duplicate exit, which returns before a reviewer runs. Brief from the "
+            "document of the run that produced the re-review: its outcome is "
+            "RE_REVIEW_VALID, or GITHUB_WRITE_FAILED if its write response was "
+            "lost, and either carries the validated re-review this needs"
+        )
     block = _object(payload, "rereview", where="the re-review input")
 
     envelope: dict[str, str] = {

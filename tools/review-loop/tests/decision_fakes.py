@@ -183,6 +183,70 @@ def rereview_document(
     return document
 
 
+class ReaderThatFillsUp:
+    """A comment reader that is empty once, then holds ``body``.
+
+    Reproduces the re-review turn's *pre-write* duplicate path, which is the
+    one that finds a record between its early check and its write and
+    therefore still has a validated re-review in hand. A fixed reader can
+    only reach the early exit, so without this the two
+    ``COMMENT_ALREADY_EXISTS`` paths are indistinguishable in tests -- which
+    is exactly how their difference went unnoticed.
+    """
+
+    def __init__(self, body: str) -> None:
+        self._body = body
+        self.calls = 0
+
+    def list_comments(self, number: int):
+        self.calls += 1
+        if self.calls <= 1:
+            return ()
+        return FakeCommentReader([self._body]).list_comments(number)
+
+
+def rereview_retry_document(
+    tmp_path,
+    *,
+    review: str | None = None,
+    push: str | None = None,
+    reviewer_output: str | None = None,
+    reader=None,
+    writer=None,
+) -> str:
+    """Re-run the real re-review turn against a pull request that already has one.
+
+    Returns whatever the real command emits, which is the point: the document
+    under test is the duplicate path's own output, not an edited copy of the
+    success path's.
+    """
+    review = review_document() if review is None else review
+    push = push_document(review=review) if push is None else push
+
+    out = io.StringIO()
+    main(
+        [
+            "re-review",
+            "--review-json",
+            write(tmp_path, "retry-review.json", review),
+            "--push-json",
+            write(tmp_path, "retry-push.json", push),
+            "--json",
+        ],
+        client=green_client(),
+        reader=reader,
+        writer=FakeCommentWriter(comment_id=8888) if writer is None else writer,
+        reviewer=FakeReviewer(
+            ReviewerRun(
+                stdout=all_resolved() if reviewer_output is None else reviewer_output
+            )
+        ),
+        expected_author=AUTOMATION_LOGIN,
+        stream=out,
+    )
+    return out.getvalue()
+
+
 def chain(
     tmp_path,
     *,
@@ -209,6 +273,20 @@ def chain(
     )
 
 
+def records(rereview: str, *extra) -> FakeCommentReader:
+    """A comment reader holding the re-review record, plus anything else.
+
+    The default in these tests, because it is the only realistic state: a
+    merge brief is produced for a pull request that *has* the re-review
+    comment on it, and the runner now confirms exactly that. A reader with
+    nothing in it describes a pull request whose re-review was never recorded
+    or has been deleted, which is its own test rather than the baseline.
+    """
+    body = json.loads(rereview).get("comment_body")
+    assert body, "the re-review fixture recorded no comment body"
+    return FakeCommentReader([body, *extra])
+
+
 def edited(document: str, mutate) -> str:
     """Return ``document`` with ``mutate`` applied to its parsed payload."""
     payload = json.loads(document)
@@ -230,6 +308,7 @@ def invoke(
         chain(tmp_path) if documents is None else documents
     )
     writer = FakeCommentWriter() if writer is None else writer
+    reader = records(rereview) if reader is None else reader
     out = io.StringIO()
     code = main(
         [
@@ -243,7 +322,7 @@ def invoke(
             *extra,
         ],
         client=green_client() if client is None else client,
-        reader=FakeCommentReader() if reader is None else reader,
+        reader=reader,
         writer=writer,
         expected_author=AUTOMATION_LOGIN,
         stream=out,

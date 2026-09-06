@@ -163,6 +163,15 @@ def render_text(result: DecisionResult, stream: TextIO) -> None:
             f"(recommendation={request.rereview.recommendation.value})",
             file=stream,
         )
+        print(
+            "Re-review record:     "
+            + (
+                f"comment {result.rereview_record_id}"
+                if result.rereview_record_id is not None
+                else "(not confirmed on the pull request)"
+            ),
+            file=stream,
+        )
 
     facts = result.facts
     if facts is None:
@@ -307,7 +316,11 @@ def render_json(result: DecisionResult, stream: TextIO) -> None:
             "recommendation": request.rereview.recommendation.value,
             "escalation_reason": request.rereview.escalation_reason,
             "outcome": request.rereview_outcome,
+            # What the document said, and what this turn actually found. The
+            # second is the one a brief rests on; the first is kept so a
+            # disagreement is visible rather than silently resolved.
             "comment_id": request.rereview_comment_id,
+            "confirmed_comment_id": result.rereview_record_id,
         },
         # Six explicit lists rather than any boolean. Each names the
         # collection it reads and what it reports, so no field can be read as

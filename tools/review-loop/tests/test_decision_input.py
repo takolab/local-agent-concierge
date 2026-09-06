@@ -12,6 +12,7 @@ import json
 import pytest
 
 from review_loop.decision import DecisionInputError
+from review_loop.github_client import GitHubApiError
 from review_loop.decision_input import load_request
 from review_loop.rereview import Resolution
 from review_loop.review_identity import review_sha256
@@ -19,11 +20,14 @@ from review_loop.routing import load_handoff
 from review_loop.verdict import Recommendation, Severity
 
 from decision_fakes import (
+    ReaderThatFillsUp,
     chain,
     edited,
     fresh_major,
     one_unresolved,
+    rereview_retry_document,
 )
+from fakes import FakeCommentReader, FakeCommentWriter
 from rereview_fakes import LATER_SHA, PUSHED_SHA, REVIEWED_SHA, push_document, review_document
 
 
@@ -248,26 +252,81 @@ def test_a_re_review_that_did_not_end_in_a_valid_re_review_is_refused(tmp_path):
         load((review, push, stale))
 
 
-def test_an_already_recorded_re_review_is_accepted(tmp_path):
-    """``COMMENT_ALREADY_EXISTS`` means the same thing about the evidence.
+def test_a_pre_write_duplicate_document_is_accepted(tmp_path):
+    """One of the two real ``COMMENT_ALREADY_EXISTS`` paths carries evidence.
 
-    A validated re-review of this exact pushed fix exists as a comment; the
-    two outcomes differ only in whether that run is the one that wrote it.
+    The re-review turn checks for a duplicate again immediately before its
+    write -- the check that catches a retry whose earlier POST succeeded and
+    whose response was lost. That path has a validated re-review in hand and
+    reports it, so the document is usable.
+
+    Produced by really running the re-review turn against a pull request
+    whose comment appears between its two reads, not by editing a successful
+    document's outcome field.
     """
     review, push, rereview = chain(tmp_path)
-    retried = edited(
-        rereview,
-        lambda p: p.update(
-            {
-                "outcome": "COMMENT_ALREADY_EXISTS",
-                "comment_id": None,
-                "existing_comment_id": 4242,
-            }
-        ),
+    body = json.loads(rereview)["comment_body"]
+    retried = rereview_retry_document(
+        tmp_path, review=review, push=push, reader=ReaderThatFillsUp(body)
     )
+    assert json.loads(retried)["outcome"] == "COMMENT_ALREADY_EXISTS"
+
     request = load((review, push, retried))
     assert request.rereview_outcome == "COMMENT_ALREADY_EXISTS"
-    assert request.rereview_comment_id == 4242
+    assert [r.finding_id for r in request.rereview.resolutions] == ["F1", "F2"]
+
+
+def test_the_early_duplicate_exit_document_is_refused_by_name(tmp_path):
+    """The other real path establishes that a record exists, not what it says.
+
+    The early exit returns before a reviewer runs, so `rereview` is null. The
+    outcome is briefable and this particular document is not, and the refusal
+    has to say which of the two the operator is holding -- "missing field
+    'rereview'" would point at neither, and the fix is to reach for a
+    different document rather than to repair this one.
+    """
+    review, push, rereview = chain(tmp_path)
+    early = rereview_retry_document(
+        tmp_path,
+        review=review,
+        push=push,
+        reader=FakeCommentReader([json.loads(rereview)["comment_body"]]),
+    )
+    payload = json.loads(early)
+    assert payload["outcome"] == "COMMENT_ALREADY_EXISTS"
+    assert payload["rereview"] is None
+
+    with pytest.raises(DecisionInputError) as info:
+        load((review, push, early))
+    message = str(info.value)
+    assert "early duplicate exit" in message
+    assert "RE_REVIEW_VALID" in message and "GITHUB_WRITE_FAILED" in message
+
+
+def test_a_lost_write_response_document_is_briefable(tmp_path):
+    """The retry gap this contract exists to close.
+
+    A POST that lands and whose response is lost gives `GITHUB_WRITE_FAILED`
+    -- a document that carries the full validated re-review and does not know
+    whether its write took effect. Whether it did is not this document's to
+    say, and not something the loader guesses: it is accepted here, and the
+    runner confirms the record against the pull request.
+    """
+    review, push, rereview = chain(tmp_path)
+    lost = rereview_retry_document(
+        tmp_path,
+        review=review,
+        push=push,
+        reader=FakeCommentReader(),
+        writer=FakeCommentWriter(error=GitHubApiError("HTTP 502 (response lost)")),
+    )
+    payload = json.loads(lost)
+    assert payload["outcome"] == "GITHUB_WRITE_FAILED"
+    assert payload["rereview"] is not None
+
+    request = load((review, push, lost))
+    assert request.rereview_outcome == "GITHUB_WRITE_FAILED"
+    assert [r.finding_id for r in request.rereview.resolutions] == ["F1", "F2"]
 
 
 def test_a_dry_run_re_review_is_refused(tmp_path):

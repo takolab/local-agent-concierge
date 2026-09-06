@@ -30,6 +30,7 @@ from decision_fakes import (
     green_client,
     invoke,
     one_escalated,
+    records,
     one_unresolved,
     write,
 )
@@ -179,7 +180,7 @@ def test_a_dry_run_never_constructs_a_writer(tmp_path):
             "--dry-run",
         ],
         client=green_client(),
-        reader=FakeCommentReader(),
+        reader=records(rereview),
         writer=None,
         expected_author=AUTOMATION_LOGIN,
         stream=io.StringIO(),
@@ -311,7 +312,7 @@ def test_a_retry_over_the_same_state_writes_nothing_a_second_time(tmp_path):
     first_code, _, first_writer = invoke(tmp_path, documents=documents)
     assert first_code == 0
 
-    reader = FakeCommentReader([first_writer.posted[0][1]])
+    reader = records(documents[2], first_writer.posted[0][1])
     code, out, writer = invoke(tmp_path, documents=documents, reader=reader)
 
     assert code == 0

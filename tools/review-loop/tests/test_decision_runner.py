@@ -32,6 +32,8 @@ from fakes import (
 )
 from decision_fakes import (
     chain,
+    records,
+    rereview_retry_document,
     fresh_blocking,
     fresh_major,
     fresh_minor,
@@ -52,15 +54,16 @@ def run(
     writer=None,
     dry_run=False,
 ):
-    request = load_request(
-        *(chain(tmp_path, reviewer_output=reviewer_output)
-          if documents is None
-          else documents)
+    documents = (
+        chain(tmp_path, reviewer_output=reviewer_output)
+        if documents is None
+        else documents
     )
+    request = load_request(*documents)
     writer = FakeCommentWriter() if writer is None else writer
     result = run_decision(
         client=green_client() if client is None else client,
-        reader=FakeCommentReader() if reader is None else reader,
+        reader=records(documents[2]) if reader is None else reader,
         writer=None if dry_run else writer,
         request=request,
         expected_author=AUTOMATION_LOGIN,
@@ -284,15 +287,141 @@ def test_a_closed_pull_request_is_not_current(tmp_path):
     assert writer.posted == []
 
 
+# -- the re-review's own record, confirmed rather than assumed ----------------
+
+
+def test_the_brief_names_the_comment_that_records_its_re_review(tmp_path):
+    documents = chain(tmp_path)
+    reader = records(documents[2])
+    result, _ = run(tmp_path, documents=documents, reader=reader)
+
+    recorded_id = reader.list_comments(PR)[0].comment_id
+    assert result.rereview_record_id == recorded_id
+    assert f"Re-review record: comment {recorded_id}" in result.brief
+
+
+def test_a_re_review_that_is_not_recorded_produces_no_brief(tmp_path):
+    """A brief must never cite evidence a human cannot go and read.
+
+    The documents are valid and the pull request is current; what is missing
+    is the re-review comment itself -- deleted, or never written by the run
+    that produced the document. Read back rather than assumed, so the
+    difference is caught here instead of appearing as a brief pointing at
+    nothing.
+    """
+    result, writer = run(tmp_path, reader=FakeCommentReader())
+
+    assert result.outcome is DecisionOutcome.EVIDENCE_NOT_CURRENT
+    assert result.rereview_record_id is None
+    assert writer.posted == []
+    assert "is not there for a human to read" in " ".join(result.reasons)
+
+
+def test_a_re_review_record_from_another_account_is_not_this_evidence(tmp_path):
+    """The same provenance rule the duplicate checks use, applied to the input.
+
+    The marker is public and deterministic, so a copy of it in someone else's
+    comment proves only that someone wrote one.
+    """
+    documents = chain(tmp_path)
+    body = json.loads(documents[2])["comment_body"]
+    reader = FakeCommentReader([("someone-else", body)])
+
+    result, writer = run(tmp_path, documents=documents, reader=reader)
+
+    assert result.outcome is DecisionOutcome.EVIDENCE_NOT_CURRENT
+    assert writer.posted == []
+
+
+def test_a_record_for_another_merge_context_is_not_this_evidence(tmp_path):
+    """A re-review of the same commit onto a different base is a different record."""
+    other = json.loads(chain(tmp_path, merge_base=ADVANCED_BASE_TIP)[2])["comment_body"]
+    result, writer = run(tmp_path, reader=FakeCommentReader([other]))
+
+    assert result.outcome is DecisionOutcome.EVIDENCE_NOT_CURRENT
+    assert writer.posted == []
+
+
+def test_a_lost_write_response_is_resolved_by_reading_the_pull_request(tmp_path):
+    """The end-to-end retry recovery, over the real documents.
+
+    Run one: the POST lands and the response is lost, so the re-review turn
+    reports `GITHUB_WRITE_FAILED` while the comment is really there. That
+    document carries the validated re-review, and this turn settles the part
+    it could not: the record is on the pull request, so the brief is produced.
+    """
+    review, push, rereview = chain(tmp_path)
+    body = json.loads(rereview)["comment_body"]
+    lost = rereview_retry_document(
+        tmp_path,
+        review=review,
+        push=push,
+        reader=FakeCommentReader(),
+        writer=FakeCommentWriter(error=GitHubApiError("HTTP 502 (response lost)")),
+    )
+    assert json.loads(lost)["outcome"] == "GITHUB_WRITE_FAILED"
+
+    result, writer = run(
+        tmp_path,
+        documents=(review, push, lost),
+        reader=FakeCommentReader([body]),
+    )
+
+    assert result.outcome is DecisionOutcome.BRIEF_RECORDED
+    assert result.next_action is NextAction.READY_FOR_HUMAN_MERGE_DECISION
+    assert result.rereview_record_id is not None
+    assert len(writer.posted) == 1
+
+
+def test_a_write_that_really_failed_produces_no_brief(tmp_path):
+    """The other half of the same document: the POST was rejected.
+
+    Same outcome label, same carried re-review, and no comment on the pull
+    request. The label cannot tell the two apart; reading the pull request
+    can, and does.
+    """
+    review, push, _ = chain(tmp_path)
+    lost = rereview_retry_document(
+        tmp_path,
+        review=review,
+        push=push,
+        reader=FakeCommentReader(),
+        writer=FakeCommentWriter(error=GitHubApiError("HTTP 422 (rejected)")),
+    )
+
+    result, writer = run(
+        tmp_path, documents=(review, push, lost), reader=FakeCommentReader()
+    )
+
+    assert result.outcome is DecisionOutcome.EVIDENCE_NOT_CURRENT
+    assert writer.posted == []
+
+
+def test_the_record_is_not_looked_up_when_the_state_is_already_stale(tmp_path):
+    """A record for a merge context nobody is looking at settles nothing."""
+    reader = FakeCommentReader()
+    run(tmp_path, client=green_client(base_tip=ADVANCED_BASE_TIP), reader=reader)
+    assert reader.calls == 0
+
+
+def test_one_listing_answers_both_questions(tmp_path):
+    """The re-review's record and the brief's own duplicate check share a read."""
+    documents = chain(tmp_path)
+    reader = records(documents[2])
+    run(tmp_path, documents=documents, reader=reader)
+    assert reader.calls == 1
+
+
 # -- identity and idempotency -------------------------------------------------
 
 
 def test_an_exact_retry_writes_nothing(tmp_path):
-    first, writer = run(tmp_path)
+    documents = chain(tmp_path)
+    first, writer = run(tmp_path, documents=documents)
     assert first.github_write_performed is True
 
-    reader = FakeCommentReader([writer.posted[0][1]])
-    second, second_writer = run(tmp_path, reader=reader)
+    reader = records(documents[2], writer.posted[0][1])
+    second, second_writer = run(tmp_path, documents=documents, reader=reader)
 
     assert second.outcome is DecisionOutcome.COMMENT_ALREADY_EXISTS
     assert second.exit_code == 0
@@ -315,11 +444,12 @@ def test_a_brief_for_another_merge_context_does_not_suppress_this_one(tmp_path):
     )
     assert BASE_TIP in stale_brief
 
+    documents = chain(tmp_path, merge_base=ADVANCED_BASE_TIP)
     result, writer = run(
         tmp_path,
-        documents=chain(tmp_path, merge_base=ADVANCED_BASE_TIP),
+        documents=documents,
         client=green_client(merge_base=ADVANCED_BASE_TIP),
-        reader=FakeCommentReader([stale_brief]),
+        reader=records(documents[2], stale_brief),
     )
 
     assert result.outcome is DecisionOutcome.BRIEF_RECORDED
@@ -345,10 +475,11 @@ def _target_and_parts(tmp_path, *, merge_base):
 
 
 def test_a_marker_from_another_account_does_not_suppress_a_brief(tmp_path):
-    first, writer = run(tmp_path)
-    forged = [("someone-else", writer.posted[0][1])]
+    documents = chain(tmp_path)
+    first, writer = run(tmp_path, documents=documents)
+    reader = records(documents[2], ("someone-else", writer.posted[0][1]))
 
-    result, second_writer = run(tmp_path, reader=FakeCommentReader(forged))
+    result, second_writer = run(tmp_path, documents=documents, reader=reader)
 
     assert result.outcome is DecisionOutcome.BRIEF_RECORDED
     assert len(second_writer.posted) == 1
@@ -389,10 +520,11 @@ def test_a_dry_run_writes_nothing_and_still_classifies(tmp_path):
 
 
 def test_a_dry_run_requires_no_writer_at_all(tmp_path):
-    request = load_request(*chain(tmp_path))
+    documents = chain(tmp_path)
+    request = load_request(*documents)
     result = run_decision(
         client=green_client(),
-        reader=FakeCommentReader(),
+        reader=records(documents[2]),
         writer=None,
         request=request,
         expected_author=AUTOMATION_LOGIN,
@@ -402,11 +534,12 @@ def test_a_dry_run_requires_no_writer_at_all(tmp_path):
 
 
 def test_a_real_run_without_a_writer_is_a_programming_error(tmp_path):
-    request = load_request(*chain(tmp_path))
+    documents = chain(tmp_path)
+    request = load_request(*documents)
     with pytest.raises(ValueError, match="writer is required"):
         run_decision(
             client=green_client(),
-            reader=FakeCommentReader(),
+            reader=records(documents[2]),
             writer=None,
             request=request,
             expected_author=AUTOMATION_LOGIN,
@@ -444,15 +577,22 @@ def test_the_turn_only_reads_github_and_posts_one_comment(tmp_path):
     }
 
 
-def test_a_comment_listing_failure_does_not_write(tmp_path):
+def test_a_comment_listing_failure_classifies_nothing_and_writes_nothing(tmp_path):
+    """Fail closed, and specifically: do not classify.
+
+    The listing answers whether the re-review is recorded at all, so a run
+    that could not read it does not know whether the evidence a brief would
+    cite exists. Reporting `READY_FOR_HUMAN_MERGE_DECISION` from the findings
+    alone would be a decision-shaped answer derived from evidence this turn
+    could not confirm.
+    """
     reader = FakeCommentReader(error=GitHubApiError("HTTP 502"))
     result, writer = run(tmp_path, reader=reader)
 
     assert result.outcome is DecisionOutcome.API_ERROR
     assert writer.posted == []
-    # The classification is still reported: it was derived before the read
-    # failed, and it is still what the evidence says.
-    assert result.next_action is NextAction.READY_FOR_HUMAN_MERGE_DECISION
+    assert result.next_action is None
+    assert result.brief is None
 
 
 def test_a_brief_above_githubs_comment_limit_is_not_posted(tmp_path, monkeypatch):

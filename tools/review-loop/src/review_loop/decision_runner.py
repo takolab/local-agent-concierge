@@ -8,7 +8,19 @@ working tree and forms no opinion. Everything it says was established by an
 earlier turn, and its only job is to say it in one place, currently, with the
 next workflow action derived from it mechanically.
 
-Added: **a stale chain is not classified, it is refused.** The three
+Added, and there are two of them.
+
+**The re-review's record is confirmed, not assumed.** The documents say a
+validated re-review exists as a comment; whether it is on the pull request is
+a fact about the present state, so it is read back by its own identity -- the
+same pull request, pushed head, merge base, round and role the re-review turn
+recorded it under, from the account this runner posts as. That is what makes
+``COMMENT_ALREADY_EXISTS`` and ``GITHUB_WRITE_FAILED`` usable inputs without
+believing either label: one claims a record it did not write, the other does
+not know whether it wrote one, and this turn simply looks. A brief must never
+cite evidence a human cannot go and read.
+
+**A stale chain is not classified, it is refused.** The three
 documents describe a re-review of one exact commit merged onto one exact
 base. If the pull request has moved off that state, the documents are still
 true and no longer relevant, and the difference between those two things is
@@ -66,6 +78,11 @@ class DecisionResult:
     current_target: ReviewTarget | None = None
     facts: DecisionFacts | None = None
     classification: Classification | None = None
+    #: The comment that actually records the re-review this brief rests on,
+    #: as found on the pull request by this turn. ``None`` when the record
+    #: could not be confirmed, which is a reason the brief is not produced --
+    #: never a brief that quietly cites evidence nobody can read.
+    rereview_record_id: int | None = None
     #: The rendered artifact: a Merge Decision Brief when the evidence is
     #: current, and the stale-chain diagnostic when it is not. Only the first
     #: is ever written to GitHub.
@@ -197,7 +214,52 @@ def run_decision(
             "the pull request's current verified state could not be established",
         )
 
-    # 2. Gather the facts and classify. Both happen even when the evidence is
+    # 2. Confirm the re-review's own record, from the listing that will also
+    #    answer the duplicate question below: one request, two questions.
+    #
+    #    This is what makes the input contract honest. The documents say a
+    #    validated re-review exists as a comment; a `COMMENT_ALREADY_EXISTS`
+    #    document claims a record it did not write, and a
+    #    `GITHUB_WRITE_FAILED` one does not know whether it wrote a record at
+    #    all. Neither label is evidence, and neither has to be: whether the
+    #    comment is on the pull request now is a question this turn can go and
+    #    answer, by the same identity the re-review turn recorded it under.
+    #
+    #    Skipped when the state is already known to be stale -- a record for a
+    #    merge context nobody is looking at settles nothing, and the reason
+    #    the operator needs is the one already in hand.
+    rereview_identity = comment_format.rereview_identity_for(
+        recorded, request.rereview
+    )
+    comments = ()
+    rereview_record_id = None
+    if not not_current:
+        try:
+            comments = reader.list_comments(recorded.number)
+        except GitHubApiError as exc:
+            return result(
+                DecisionOutcome.API_ERROR,
+                (f"could not read existing comments: {exc}",),
+                evaluation=evaluation,
+                current_target=current,
+            )
+        rereview_record_id = comment_format.find_record(
+            comments, rereview_identity, expected_author=expected_author
+        )
+        if rereview_record_id is None:
+            # Not an input error: the document may have been perfectly valid
+            # when it was written, and a record can be deleted afterwards.
+            # What is untrue *now* is that a human can go and read the
+            # evidence this brief would rest on, which is a fact about the
+            # present state and belongs with the other ones.
+            not_current = (
+                f"no round {request.rereview.round} re-review of "
+                f"{recorded.head_sha} merged onto {recorded.ci_merge_base_sha} is "
+                "recorded on this pull request by this automation; the evidence a "
+                "brief would cite is not there for a human to read",
+            )
+
+    # 3. Gather the facts and classify. Both happen even when the evidence is
     #    stale: the classification is then EVIDENCE_NOT_CURRENT by the first
     #    rule in `classify`, and the finding facts are still worth reporting
     #    as what the re-review said -- clearly labelled as historical.
@@ -222,9 +284,16 @@ def run_decision(
             brief=comment_format.render_stale_brief(request, facts),
         )
 
-    # Past this point the evidence is current, which means `_currency_reasons`
-    # gave no reason and therefore returned a freshly verified target.
-    body = comment_format.render_merge_brief(current, request, facts, classification)
+    # 4. Render. Past this point the evidence is current, which means
+    #    `_currency_reasons` gave no reason, so it returned a freshly verified
+    #    target, and the re-review's record was found in `comments`.
+    body = comment_format.render_merge_brief(
+        current,
+        request,
+        facts,
+        classification,
+        rereview_comment_id=rereview_record_id,
+    )
     if len(body) > MAX_COMMENT_CHARS:
         # Not a classification failure: the evidence is fine and the artifact
         # is unpostable. Reported as a write failure so the exit code says a
@@ -241,34 +310,23 @@ def run_decision(
             facts=facts,
             classification=classification,
             brief=body,
+            rereview_record_id=rereview_record_id,
         )
 
     identity = comment_format.merge_brief_identity_for(
         current, request.rereview.round
     )
 
-    # 3. The duplicate check. One check, immediately before the write, unlike
-    #    the review turns' two: they run an expensive reviewer in between and
-    #    check early to avoid paying for a result they may not post, while
-    #    nothing here happens between this read and the POST. It is therefore
-    #    the check that matters -- the one catching a retry whose earlier POST
-    #    succeeded and whose response was lost.
-    try:
-        already = comment_format.find_record(
-            reader.list_comments(current.number),
-            identity,
-            expected_author=expected_author,
-        )
-    except GitHubApiError as exc:
-        return result(
-            DecisionOutcome.API_ERROR,
-            (f"could not read existing comments: {exc}",),
-            evaluation=evaluation,
-            current_target=current,
-            facts=facts,
-            classification=classification,
-            brief=body,
-        )
+    # 5. The duplicate check, answered from the listing already read above.
+    #    One check, taken immediately before the write, unlike the review
+    #    turns' two: they run an expensive reviewer in between and check early
+    #    to avoid paying for a result they may not post, while nothing here
+    #    happens between that read and the POST. It is therefore the check
+    #    that matters -- the one catching a retry whose earlier POST succeeded
+    #    and whose response was lost.
+    already = comment_format.find_record(
+        comments, identity, expected_author=expected_author
+    )
     if already is not None:
         return result(
             DecisionOutcome.COMMENT_ALREADY_EXISTS,
@@ -282,6 +340,7 @@ def run_decision(
             facts=facts,
             classification=classification,
             brief=body,
+            rereview_record_id=rereview_record_id,
             existing_comment_id=already,
         )
 
@@ -294,6 +353,7 @@ def run_decision(
             facts=facts,
             classification=classification,
             brief=body,
+            rereview_record_id=rereview_record_id,
         )
 
     try:
@@ -310,6 +370,7 @@ def run_decision(
             facts=facts,
             classification=classification,
             brief=body,
+            rereview_record_id=rereview_record_id,
         )
 
     return result(
@@ -320,6 +381,7 @@ def run_decision(
         facts=facts,
         classification=classification,
         brief=body,
+        rereview_record_id=rereview_record_id,
         comment_id=comment_id,
         github_write_performed=True,
     )

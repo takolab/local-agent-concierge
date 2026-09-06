@@ -2248,6 +2248,69 @@ What that establishes is that the documents describe one chain. It does not
 establish that they are authentic — they are operator-controlled files, as
 every handoff here is. What they cannot do is make the *pull request* agree.
 
+### Which re-review documents carry evidence
+
+A re-review turn can end several ways, and the outcome label is **not** the
+fact this stage needs. Two facts are, and neither is taken from it:
+
+1. **The re-review model**, which must be in the document and must
+   re-validate.
+2. **That it is recorded**, which is a fact about the pull request *now*, and
+   is therefore read back from GitHub — see below.
+
+So the accepted outcomes are the ones whose document *can* carry both:
+
+| Re-review outcome | Carries the model | Why it is accepted |
+| --- | --- | --- |
+| `RE_REVIEW_VALID` | yes | this run recorded it |
+| `COMMENT_ALREADY_EXISTS` (pre-write check) | yes | a previous run recorded it; this one had the re-review in hand |
+| `COMMENT_ALREADY_EXISTS` (early exit) | **no** | refused — see below |
+| `GITHUB_WRITE_FAILED` | yes | the lost-response document: whether the `POST` landed is decided here, by reading the pull request |
+
+The two `COMMENT_ALREADY_EXISTS` paths are not equivalent, and the difference
+matters. The re-review turn checks for a duplicate **twice**: once early, to
+avoid paying for a reviewer whose result it may not post, and once again
+immediately before the write. The second has a validated re-review in hand
+and reports it. The first returns before a reviewer runs, so its document
+proves that *a record exists* without saying what the record *says* — and it
+is refused with a message naming that path, because the operator's next step
+is to reach for a different document, not to repair this one.
+
+**Why it is not rehydrated.** Recovering the missing model by parsing the
+rendered `## Independent AI Re-Review` comment back into a verdict is the one
+thing `routing.py` refuses in its opening paragraph: deriving a verdict a
+second time from a source that was never a verdict, using rules that could
+drift from the ones that validated it. It would also turn a comment
+*rendering* — lossy by design, and free to change for human readability —
+into a machine contract that no longer could.
+
+The goal behind that idea is met by a stronger route. What
+`COMMENT_ALREADY_EXISTS` ought to identify is *the exact validated evidence
+downstream relies on*, and identity is what this pipeline already computes:
+`comment_format.rereview_identity_for` names one re-review by pull request,
+pushed head, merge base, round and role. The runner looks that record up and
+confirms it; the document supplies the model. **The label is trusted for
+nothing.**
+
+### The re-review's record, confirmed
+
+Before anything is classified, the runner finds the re-review's own comment
+on the pull request — by that identity, from the account it would post as —
+and the brief names it:
+
+```text
+Re-review record: comment 5562039871
+```
+
+If it is not there, the classification is `EVIDENCE_NOT_CURRENT` and nothing
+is recorded. A brief must never cite evidence a human cannot go and read,
+whether it was deleted afterwards or the run that claimed it never wrote it.
+
+The lookup shares one comment listing with the brief's own duplicate check —
+one request, two questions — and is skipped entirely when the state is
+already known to be stale, since a record for a merge context nobody is
+looking at settles nothing.
+
 ### Current-state revalidation
 
 A stale re-review is historical evidence, not merge-decision evidence, so the
@@ -2261,6 +2324,7 @@ pull request is re-read from GitHub before anything is classified:
 | The base advanced and the CI evidence went stale | `EVIDENCE_NOT_CURRENT` |
 | The base advanced, CI re-ran green, and the merge context is now one nobody re-reviewed | `EVIDENCE_NOT_CURRENT` |
 | The pull request is no longer open, or cannot be resolved | `EVIDENCE_NOT_CURRENT` |
+| The re-review's own comment is not on the pull request | `EVIDENCE_NOT_CURRENT` |
 
 **Same head is not sufficient.** The last two rows are the same commit with a
 different integration state, which is exactly the case a head-only check
@@ -2299,6 +2363,7 @@ Original recommendation: changes_requested
 Fix commit: 5a0d6cbb… (parent 3b514700…)
 Re-review: round 2 of 5a0d6cbb…
 Re-review recommendation: approved
+Re-review record: comment 5562039871
 
 Merge context: current — authoritative CI tested this head merged onto
 6a2f7cfe…, which is still the master tip
@@ -2370,7 +2435,13 @@ Consequences, all tested:
 | The inputs are not a review, the `PUSH_READY` push of its fix and the validated re-review of that push | `DECISION_INPUT_INVALID` | 90 | none |
 | The pull request has moved out from under the re-review | `EVIDENCE_NOT_CURRENT` | 91 | none |
 | Current, but the `POST` failed or the brief exceeds GitHub's comment limit | `GITHUB_WRITE_FAILED` | 92 | none |
-| GitHub unreachable | `API_ERROR` | 93 | none |
+| GitHub unreachable, or the comments could not be listed | `API_ERROR` | 93 | none |
+
+A failed comment listing classifies **nothing**: that listing is what says
+whether the re-review is recorded at all, so a run that could not read it
+does not know whether the evidence a brief would cite exists. Reporting
+`READY_FOR_HUMAN_MERGE_DECISION` from the findings alone would be a
+decision-shaped answer derived from evidence the turn could not confirm.
 
 Exit code 0 means *a current merge decision brief exists for this exact pull
 request state*. It does not mean the pull request may merge, and it does not
@@ -2456,6 +2527,14 @@ actually writes. A hand-written document there would encode one test author's
 idea of the re-review turn's output and would keep passing after that turn
 changed — which is exactly the drift this stage exists to detect.
 
+Both re-review duplicate paths are produced for real rather than simulated:
+a fixed comment reader reaches the early exit, and `ReaderThatFillsUp` —
+empty once, then holding the comment — reaches the pre-write check. Without
+that distinction the two `COMMENT_ALREADY_EXISTS` documents are
+indistinguishable in tests, which is how their difference went unnoticed in
+the first place. The lost-response document is produced the same way, by
+running the real turn with a writer that raises after the comment exists.
+
 The classification itself is tested as what it is: a pure function, exercised
 directly over constructed models, with one test per case the design
 distinguishes — all resolved, fresh Minor only, an unresolved original, a
@@ -2481,6 +2560,15 @@ idea of the document stands in for it.
 
 ## Known limitations
 
+* **An early-exit duplicate document cannot be briefed on its own.** If the
+  only re-review document you hold is a retry that hit the early duplicate
+  check, it says a record exists but not what the record says, and
+  `merge-brief` refuses it. Normally the run that produced the re-review has
+  a usable document — `RE_REVIEW_VALID`, or `GITHUB_WRITE_FAILED` if its
+  write response was lost — and that is the one to use. The case with no way
+  out is a re-review recorded from a machine or a run whose output you do not
+  have; recovering it would mean parsing the comment back into a verdict,
+  which this pipeline refuses on purpose.
 * **Scope is coarse, and can refuse legitimate findings.** A reviewer that
   describes a location without naming a path, or that names only paths outside
   the pull request's change set, gets `REVIEW_REQUIRES_HUMAN` rather than a
