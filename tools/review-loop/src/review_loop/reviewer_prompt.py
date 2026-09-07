@@ -89,7 +89,9 @@ Format rules, all enforced mechanically:
 
 * `Reviewed head SHA` must be exactly {head_sha}. An abbreviated SHA is
   rejected and your review is discarded.
-* `Round` is 1. Re-review is not supported yet.
+* `Round` is 1. This is an initial review; a re-review of a pushed fix is
+  round 2 and is a separate turn with its own contract, not something to
+  report here.
 * Repeat the `Finding ID` ... `Scope boundary` group once per open finding.
   Omit the group entirely when there are none.
 * `approved` requires zero findings; `changes_requested` requires at least

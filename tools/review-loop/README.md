@@ -2792,6 +2792,26 @@ idea of the document stands in for it.
   second fix routed from a re-review's findings, and the loop that would
   follow, are not implemented — the numbering and the record identity are
   designed to extend that way, but no code does it yet.
+* **The supported workflow only re-reviews a fix that arrives with a
+  `review-loop push --json` handoff.** When someone *else* fixes a recorded
+  finding first — the pull request's own author, or the agent that wrote it —
+  the head moves, and the supported path can no longer produce that handoff:
+  the recorded review becomes evidence about a commit the pull request left
+  behind, `fix` stops at `CODING_AGENT_WORKSPACE_INVALID` because
+  `refs/pull/N/head` no longer resolves to the reviewed commit, and so
+  `re-review` and `merge-brief` are not reachable through the CLI. What
+  remains is another **round 1** review of the new head, which records a
+  second comment rather than replacing the first, because the head is part of
+  the record identity. This is a limit on where the loop can be used, not only
+  on how far it goes: the re-review stage is built to answer "did *the fix we
+  pushed* resolve these findings?", not "is this finding resolved now?".
+
+  What this is **not** is a provenance guarantee. As *Provenance is carried,
+  not proved* below says, the handoffs are operator-controlled documents: a
+  sufficiently privileged operator can write a mutually consistent pair by
+  hand, and nothing here would distinguish it from one `review-loop push`
+  produced. The bound is on the supported workflow, not on what is technically
+  constructible.
 * **Whether a fix resolves a finding is a reviewer's judgement, not a
   mechanised one.** The runner establishes which commit was read, that every
   original finding was answered exactly once, and that each answer carries
