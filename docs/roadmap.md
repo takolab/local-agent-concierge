@@ -1057,8 +1057,8 @@ gap was then validated live against a pull request in another repository, in
 [`docs/delegated-development/review-loop-live-experiment-2.md`](delegated-development/review-loop-live-experiment-2.md),
 which supported progressing to the next bounded slice. A third run, after the
 v1 consolidation audit, recorded the first finding this loop produced that a
-pull request's own author acted on — and found that a fix pushed by anyone
-other than `review-loop push` leaves the loop with no round 2 to offer:
+pull request's own author acted on — and found that once another actor pushes
+the fix, the supported workflow has no round 2 to offer:
 [`docs/delegated-development/review-loop-live-experiment-3.md`](delegated-development/review-loop-live-experiment-3.md).
 
 That slice is now `review-loop fix`: the validated findings of one review turn
