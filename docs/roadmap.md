@@ -1055,7 +1055,11 @@ That run found that the runner bound the verdict to an exact SHA but not the
 reviewer's working directory; the workspace-binding refinement that closed the
 gap was then validated live against a pull request in another repository, in
 [`docs/delegated-development/review-loop-live-experiment-2.md`](delegated-development/review-loop-live-experiment-2.md),
-which supported progressing to the next bounded slice.
+which supported progressing to the next bounded slice. A third run, after the
+v1 consolidation audit, recorded the first finding this loop produced that a
+pull request's own author acted on — and found that once another actor pushes
+the fix, the supported workflow has no round 2 to offer:
+[`docs/delegated-development/review-loop-live-experiment-3.md`](delegated-development/review-loop-live-experiment-3.md).
 
 That slice is now `review-loop fix`: the validated findings of one review turn
 are routed to one bounded Coding Agent turn in a dedicated writable worktree at
