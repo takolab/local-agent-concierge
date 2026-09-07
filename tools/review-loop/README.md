@@ -7,7 +7,7 @@ bounded Coding Agent turn against that same exact state, and commits and
 pushes the patch that produces — proving, at each step, exactly which change
 is being carried forward.
 
-It has five commands, and only the fourth can change the repository.
+It has six commands, and only the fourth can change the repository.
 
 **`review-loop --pr N`** answers two questions, read-only:
 
@@ -45,11 +45,21 @@ original finding get resolved, and what does a fresh review of the pull
 request as it now stands find? Both answers are recorded, separately, as one
 `## Independent AI Re-Review` comment.
 
-Everything after that — a second fix round, the multi-round loop, the Merge
-Decision Brief, merge — is not here. **The full Finding → Fix → Re-Review
-loop is not automated.** This is one review turn, one bounded fix turn, one
-commit-and-push turn and one re-review turn, each bound to one verified
-state, with the human keeping every decision about acceptance and merge.
+**`review-loop merge-brief --review-json <file> --push-json <file>
+--rereview-json <file>`** turns all of that into one artifact a human can
+decide on. It rebuilds the whole evidence chain from the three documents that
+recorded it, re-verifies that the chain still describes the pull request's
+current head, base, merge context and authoritative CI, derives the next
+workflow action from the resulting facts, and records a single
+`## Merge Decision Brief` comment. It classifies and presents; it does not
+merge, fix, review, or decide.
+
+Everything after that — a second fix round, the multi-round loop, automatic
+routing from a classification into another fix, merge — is not here. **The
+full Finding → Fix → Re-Review loop is not automated.** This is one review
+turn, one bounded fix turn, one commit-and-push turn, one re-review turn and
+one classification turn, each bound to one verified state, with the human
+keeping every decision about acceptance and merge.
 
 ## Verification: `review-loop --pr N`
 
@@ -2079,7 +2089,9 @@ merge.
 ### What a re-review turn does not do
 
 It does not route a second fix, does not invoke a Coding Agent, does not push,
-does not merge, and does not produce a Merge Decision Brief. It does not
+and does not merge. It does not produce the Merge Decision Brief either —
+that is `review-loop merge-brief`, a separate turn over this one's output. It
+does not
 increase the reviewer's authority in any way: the same subprocess contract,
 the same read-only instruction, the same allowlisted environment, no
 credential of its own, no push authority, no GitHub write. The runner
@@ -2091,6 +2103,415 @@ And it does not decide. `Blocking = 0` and `Major = 0` and every original
 unresolved finding gets another attempt, deciding whether a fresh finding is
 worth fixing, and merging are all a human's, and there is no code path here
 that could take any of them.
+
+## The merge decision surface: `review-loop merge-brief`
+
+```bash
+review-loop merge-brief \
+  --review-json review.json \
+  --push-json push.json \
+  --rereview-json rereview.json
+```
+
+Everything before this command produced evidence. This one turns it into a
+single artifact a human can act on, and answers seven questions in one place:
+
+```text
+What exact pull request state am I looking at?
+What happened to every original finding?
+Are there fresh findings?
+Is authoritative CI current?
+Is the merge context current?
+Is there any escalation?
+What is the mechanically-derived next workflow action?
+```
+
+Then it stops. **It does not decide.**
+
+### Facts, routing, and human authority
+
+The design is one separation, held in three places:
+
+```text
+facts            gathered from the chain, never derived from each other
+routing          one pure function of those facts
+human authority  untouched
+```
+
+`F1 = RESOLVED`, `F2 = RESOLVED`, no fresh findings, CI `READY`, merge context
+current — those are facts. From them the runner derives
+`READY_FOR_HUMAN_MERGE_DECISION`. That is **not** `MERGE`, and there is no
+code path in this package that could make it one. Likewise `F1 = UNRESOLVED`
+classifies as `FIX_REQUIRED`, and no Coding Agent is invoked, no finding is
+routed and no commit is made.
+
+### The classification
+
+| Next action | Meaning |
+| --- | --- |
+| `READY_FOR_HUMAN_MERGE_DECISION` | Every required piece of evidence is current and nothing in it prevents a human from considering a merge. |
+| `FIX_REQUIRED` | The evidence is current and another bounded fix is the likely next workflow action. Nothing is started. |
+| `HUMAN_ESCALATION` | The evidence is current and requires a human's judgement before the loop can continue. Never downgraded to `FIX_REQUIRED`. |
+| `EVIDENCE_NOT_CURRENT` | The re-review is no longer authoritative for the pull request's present state. No brief is produced and nothing is recorded. |
+
+Derived in that order, from `review_loop.decision.classify` — a pure function
+of `DecisionFacts`, with no I/O, so reading it is the whole specification:
+
+1. **Currency first.** Any reason the re-review no longer describes the
+   current state ends it here. Nothing about the findings is asked, because
+   no answer about them would be about the current state.
+2. **Anything Blocking or escalated escalates.** An `ESCALATE` resolution, a
+   fresh `Blocking` finding, an outstanding original `Blocking` finding, or a
+   re-review that recommends `escalate`.
+3. **Anything outstanding or freshly Major needs another fix.** An
+   `UNRESOLVED` original finding of any severity, or a fresh `Major` one.
+4. **Otherwise the human decides.**
+
+Fresh `Minor` findings do not withhold that decision. They are listed in the
+brief, and accepting or deferring them is part of what the human is deciding
+— not something this runner may pre-empt in either direction.
+
+### Recommendation is not classification
+
+The re-reviewer's own recommendation is one fact among several, and it can
+only ever *raise* the classification, never lower it.
+
+`approved` does not produce `READY_FOR_HUMAN_MERGE_DECISION` if the head has
+moved, if CI is no longer green, or if the base advanced underneath it —
+those are the conditions under which a recommendation is stale rather than
+wrong, and the recommendation cannot see them. In the other direction, a
+re-review that resolved everything and raised one `Minor` finding *must*
+recommend `changes_requested`, because the re-review contract refuses
+`approved` alongside any fresh finding — so copying the recommendation would
+make a `Minor` finding indistinguishable from a `Major` one.
+
+What only the recommendation can say is that the reviewer is escalating, and
+that is the one thing it is read for.
+
+### Original and fresh findings stay apart
+
+The brief never flattens the two collections, and the failure it is avoiding
+is concrete:
+
+```text
+Original finding resolutions (round 1):
+
+F1 — Major — RESOLVED
+
+Fresh findings (round 2):
+
+R2.F1 — Major — The new error path leaks the upstream request id.
+```
+
+classifies as `FIX_REQUIRED` while preserving both facts: **the original fix
+worked**, and **the pull request still needs another fix**. A single "Major
+findings: 1" would state neither.
+
+The structured output says the same thing with six explicit lists rather than
+any boolean:
+
+```text
+resolved_original_finding_ids
+unresolved_original_finding_ids
+escalated_original_finding_ids
+fresh_blocking_finding_ids
+fresh_major_finding_ids
+fresh_minor_finding_ids
+```
+
+There is deliberately no field like `major_findings_remain`, which reads
+across both collections while counting one of them — and would report `false`
+for a pull request with an `UNRESOLVED` original `Major` finding.
+
+### The chain, rebuilt rather than believed
+
+All three documents are required, and none is trusted as authority:
+
+* `review_loop.rereview_input.load_request` re-runs the review-to-push
+  pairing in full — the fix commit's parent is the reviewed head, its diff
+  hashes to the candidate patch the fix turn validated, the push wrote one
+  ref, and the review it fixed is the review supplied here, compared by a
+  `review_sha256` **recomputed** from that document rather than read out of
+  the push document that recorded it.
+* The re-review document is checked to be the re-review *of that push*
+  — same repository, pull request, pushed fix, original head, round and
+  finding-id list — and then re-admitted through
+  `review_loop.rereview_validation.validate`, the same function that
+  admitted it in the first place, reached by rebuilding the parser's own
+  intermediate form from the JSON. Not a second implementation of the rules:
+  the rules.
+* A re-review that was only ever a `--dry-run` is refused. It was valid and
+  it was never recorded, so a brief citing it would point at evidence a human
+  cannot read.
+
+What that establishes is that the documents describe one chain. It does not
+establish that they are authentic — they are operator-controlled files, as
+every handoff here is. What they cannot do is make the *pull request* agree.
+
+### Which re-review documents carry evidence
+
+A re-review turn can end several ways, and the outcome label is **not** the
+fact this stage needs. Two facts are, and neither is taken from it:
+
+1. **The re-review model**, which must be in the document and must
+   re-validate.
+2. **That it is recorded**, which is a fact about the pull request *now*, and
+   is therefore read back from GitHub — see below.
+
+So the accepted outcomes are the ones whose document *can* carry both:
+
+| Re-review outcome | Carries the model | Why it is accepted |
+| --- | --- | --- |
+| `RE_REVIEW_VALID` | yes | this run recorded it |
+| `COMMENT_ALREADY_EXISTS` (pre-write check) | yes | a previous run recorded it; this one had the re-review in hand |
+| `COMMENT_ALREADY_EXISTS` (early exit) | **no** | refused — see below |
+| `GITHUB_WRITE_FAILED` | yes | the lost-response document: whether the `POST` landed is decided here, by reading the pull request |
+
+The two `COMMENT_ALREADY_EXISTS` paths are not equivalent, and the difference
+matters. The re-review turn checks for a duplicate **twice**: once early, to
+avoid paying for a reviewer whose result it may not post, and once again
+immediately before the write. The second has a validated re-review in hand
+and reports it. The first returns before a reviewer runs, so its document
+proves that *a record exists* without saying what the record *says* — and it
+is refused with a message naming that path, because the operator's next step
+is to reach for a different document, not to repair this one.
+
+**Why it is not rehydrated.** Recovering the missing model by parsing the
+rendered `## Independent AI Re-Review` comment back into a verdict is the one
+thing `routing.py` refuses in its opening paragraph: deriving a verdict a
+second time from a source that was never a verdict, using rules that could
+drift from the ones that validated it. It would also turn a comment
+*rendering* — lossy by design, and free to change for human readability —
+into a machine contract that no longer could.
+
+The goal behind that idea is met by a stronger route. What
+`COMMENT_ALREADY_EXISTS` ought to identify is *the exact validated evidence
+downstream relies on*, and identity is what this pipeline already computes:
+`comment_format.rereview_identity_for` names one re-review by pull request,
+pushed head, merge base, round and role. The runner looks that record up and
+confirms it; the document supplies the model. **The label is trusted for
+nothing.**
+
+### The re-review's record, confirmed — identity *and* contents
+
+Before anything is classified, the runner finds the re-review's own comment
+on the pull request, and the brief names it:
+
+```text
+Re-review record: comment 5562039871
+```
+
+Two questions are asked of it, because **identity is not contents**:
+
+1. **Is a re-review of this integration state recorded?** — the marker
+   (`repo`, `pr`, `head`, `base`, `round`, `role`) from the account this
+   runner would post as.
+2. **Is it *this* re-review?** — the supplied model is rendered forward
+   through the same `render_rereview` that wrote the record, and the recorded
+   body must be exactly that.
+
+The second question exists because a `RecordIdentity` names the pull request,
+the commit, the merge context, the round and the role — and **two different
+valid re-reviews of the same commit share every one of them**. The gap that
+leaves is reachable, not theoretical:
+
+```text
+run A   POST rejected      → GITHUB_WRITE_FAILED, carries A's model
+run B   reviewer disagrees → RE_REVIEW_VALID, records B's model
+
+brief from A's document
+→ marker matches B's comment
+→ A's findings briefed, B's comment cited
+```
+
+A's document is legitimate. Its identity is B's identity. Without the second
+check the brief could read `READY_FOR_HUMAN_MERGE_DECISION` while pointing at
+a comment reporting a fresh Major finding.
+
+**The direction is what keeps this safe.** Nothing in the recorded comment is
+parsed or interpreted; a validated model is rendered forward and the bytes
+are compared. Structured evidence produces a rendering, never the reverse —
+the same rule that makes rehydrating an early-exit document unacceptable.
+Only line endings and trailing whitespace are normalised, because GitHub is
+free to hand back CRLF for a body posted with LF; nothing else is tolerated.
+
+The consequence is worth stating: the rendered re-review comment is now a
+compatibility surface. Change `render_rereview`'s wording and re-reviews
+recorded by an older runner stop matching a model rendered by the new one.
+That fails closed — a brief is refused, never wrongly produced — and it is
+the same trade `review_identity.CANONICAL_VERSION` already makes, where a
+changed canonical form is deliberately a different identity rather than a
+silent collision.
+
+Either question failing gives `EVIDENCE_NOT_CURRENT` with nothing recorded,
+and the two reasons are worded differently on purpose: *nothing is recorded*
+and *what is recorded is not this* send an operator to do different things.
+
+The lookup shares one comment listing with the brief's own duplicate check —
+one request, two questions — and is skipped entirely when the state is
+already known to be stale, since a record for a merge context nobody is
+looking at settles nothing.
+
+The brief's *own* duplicate check stays identity-only, and the asymmetry is
+about which way each one fails. A re-review record that is not this evidence
+would have been published as though it were — fail-open, so contents are
+checked. A recorded brief whose body differs only makes this run decline to
+post a second one — already fail-closed, and re-posting on every difference
+would add a duplicate brief each time the wording changed.
+
+### Current-state revalidation
+
+A stale re-review is historical evidence, not merge-decision evidence, so the
+pull request is re-read from GitHub before anything is classified:
+
+| Change | Result |
+| --- | --- |
+| The head moved off the re-reviewed fix | `EVIDENCE_NOT_CURRENT` |
+| Authoritative CI for that head is no longer `READY` | `EVIDENCE_NOT_CURRENT` |
+| The pull request was retargeted to another base branch | `EVIDENCE_NOT_CURRENT` |
+| The base advanced and the CI evidence went stale | `EVIDENCE_NOT_CURRENT` |
+| The base advanced, CI re-ran green, and the merge context is now one nobody re-reviewed | `EVIDENCE_NOT_CURRENT` |
+| The pull request is no longer open, or cannot be resolved | `EVIDENCE_NOT_CURRENT` |
+| The re-review's own comment is not on the pull request | `EVIDENCE_NOT_CURRENT` |
+| A re-review of this state is recorded, but not the one supplied | `EVIDENCE_NOT_CURRENT` |
+
+**Same head is not sufficient.** The last two rows are the same commit with a
+different integration state, which is exactly the case a head-only check
+would wave through.
+
+When the evidence is not current the command prints a **diagnostic** instead
+of a brief — it says what the re-review was about and why that is no longer
+the pull request — and that diagnostic carries no machine marker, so it can
+never become a record that a later run would find and treat as this state's
+decision. `--json` keeps the two apart for the same reason: the text arrives
+under `diagnostic` and `decision_brief` is `null`, so a consumer reading a
+decision from that key cannot be handed one that is not current.
+
+`EVIDENCE_NOT_CURRENT` is not a negative decision. `FIX_REQUIRED` says
+something true about the pull request; `EVIDENCE_NOT_CURRENT` says this
+runner has nothing current to say about it, and collapsing the second into
+the first would report a state nobody established.
+
+### The recorded comment
+
+```text
+## Merge Decision Brief
+
+Round: 2
+Repository: takolab/local-agent-concierge
+Pull request: #27
+Head SHA: 5a0d6cbb0f0f4b0e0d0b9a1c2d3e4f5061728394
+Base: master at 6a2f7cfe8cc8cb4af22b7824d1c70e6fce389bb8
+Authoritative CI: READY — .github/workflows/pytest.yml (run 1: success)
+
+Evidence chain:
+
+Original review: round 1 of 3b514700c1c2c257a39a7037f1a21ca5b9064106
+Review identity: d804528457bc66392ebad7e80d17211a759af884ed0e3b09a12069940b792453
+Original recommendation: changes_requested
+Fix commit: 5a0d6cbb… (parent 3b514700…)
+Re-review: round 2 of 5a0d6cbb…
+Re-review recommendation: approved
+Re-review record: comment 5562039871
+
+Merge context: current — authoritative CI tested this head merged onto
+6a2f7cfe…, which is still the master tip
+
+Original finding resolutions (round 1):
+
+F1 — Major — RESOLVED
+F2 — Minor — RESOLVED
+
+Fresh findings (round 2):
+
+(none)
+
+Unresolved original findings: (none)
+Escalated original findings: (none)
+Fresh Blocking: (none)
+Fresh Major: (none)
+Fresh Minor: (none)
+Escalation: none
+
+Next action: READY_FOR_HUMAN_MERGE_DECISION
+
+- every original finding is RESOLVED
+- no fresh Blocking or Major finding was raised
+- the pull request is still at the re-reviewed commit, with authoritative CI
+  READY against the current merge context
+
+Human decision required: merge / do not merge / request another fix / escalate
+```
+
+Every SHA is written in full in the real comment; they are abbreviated above
+only to fit. The finding text is reproduced as a short excerpt — the full
+text is in the review and re-review comments this brief names, and a human
+who needs it goes there.
+
+### Identity and idempotency
+
+The same marker as the other records, with the role carrying the difference:
+
+```text
+head  = the pull request's current verified head (the re-reviewed fix)
+base  = the merge base authoritative CI tested it onto
+round = 2
+role  = merge-decision-brief
+```
+
+Consequences, all tested:
+
+* A retry over the same exact state finds its own record and writes nothing.
+* **The same head against a different merge context is not a duplicate.**
+  `base_sha` is part of the identity, so a brief about the fix merged onto
+  `B1` does not suppress a brief about the same fix merged onto `B2`. This is
+  the regression a head-only identity would reintroduce: a decision made
+  against a base the pull request has since moved past.
+* A stale chain records nothing at all, so a historical brief cannot suppress
+  a current one and a diagnostic cannot masquerade as one.
+* The re-review record of the same commit and merge context does not suppress
+  the brief, and the brief does not suppress it: different roles, two
+  artifacts.
+* A marker copied into someone else's comment suppresses nothing — a record
+  is a matching marker **from the account this runner would post as**.
+
+### Failure semantics
+
+| Situation | Outcome | Exit | Comment written |
+| --- | --- | --- | --- |
+| A current brief | `BRIEF_RECORDED` | 0 | one |
+| Already recorded | `COMMENT_ALREADY_EXISTS` | 0 | none |
+| The inputs are not a review, the `PUSH_READY` push of its fix and the validated re-review of that push | `DECISION_INPUT_INVALID` | 90 | none |
+| The pull request has moved out from under the re-review | `EVIDENCE_NOT_CURRENT` | 91 | none |
+| Current, but the `POST` failed or the brief exceeds GitHub's comment limit | `GITHUB_WRITE_FAILED` | 92 | none |
+| GitHub unreachable, or the comments could not be listed | `API_ERROR` | 93 | none |
+
+A failed comment listing classifies **nothing**: that listing is what says
+whether the re-review is recorded at all, so a run that could not read it
+does not know whether the evidence a brief would cite exists. Reporting
+`READY_FOR_HUMAN_MERGE_DECISION` from the findings alone would be a
+decision-shaped answer derived from evidence the turn could not confirm.
+
+Exit code 0 means *a current merge decision brief exists for this exact pull
+request state*. It does not mean the pull request may merge, and it does not
+even mean the classification was `READY_FOR_HUMAN_MERGE_DECISION`:
+`FIX_REQUIRED` and `HUMAN_ESCALATION` are equally successful runs that
+recorded one artifact. What the evidence concluded is in the brief, never in
+the exit status.
+
+### What a merge-brief turn does not do
+
+It starts no subprocess of any kind — no reviewer, no Coding Agent — reads no
+working tree, and forms no opinion of its own. It does not commit, push,
+merge, approve, close, label, delete a branch, re-run CI, or route a finding
+anywhere. It adds no credential and no new authority: its entire write
+surface is the one it inherits, a single issue comment through the same
+writer the review turns use, on the one path that ends in a current brief.
+
+The human keeps every decision — merge, do not merge, request another fix,
+accept or defer a Minor finding, escalate, expand scope, make an exception —
+and the brief exists to make those decisions cheaper to take, not to take
+them.
 
 ## Tests
 
@@ -2147,6 +2568,46 @@ a fresh Major asserts both facts independently and asserts that the record
 does not report `F1` as unresolved; `F1 → UNRESOLVED` with no fresh finding
 asserts that nothing is invented.
 
+The merge-brief tests add one thing the earlier stages did not need. Its
+last input is not built by a fixture at all: `decision_fakes.rereview_document`
+**runs the real `review-loop re-review`** over the offline fakes and captures
+its `--json` output, so what the brief reads back is what that command
+actually writes. A hand-written document there would encode one test author's
+idea of the re-review turn's output and would keep passing after that turn
+changed — which is exactly the drift this stage exists to detect.
+
+The record check is tested from both ends. The positive control asserts that
+a document's model renders back to exactly the bytes that were recorded —
+the property every refusal below rests on. The refusals then use two
+internally valid re-reviews of the same repository, pull request, head, merge
+base and round, first asserting that their markers *do* match each other (so
+an identity-only check would have accepted the wrong one) and then that the
+brief is refused: recorded fresh Major against supplied all-resolved, the
+reverse, the lost-response route that reaches this by accident, an edited
+comment, and CRLF line endings that must *not* decide it.
+
+Both re-review duplicate paths are produced for real rather than simulated:
+a fixed comment reader reaches the early exit, and `ReaderThatFillsUp` —
+empty once, then holding the comment — reaches the pre-write check. Without
+that distinction the two `COMMENT_ALREADY_EXISTS` documents are
+indistinguishable in tests, which is how their difference went unnoticed in
+the first place. The lost-response document is produced the same way, by
+running the real turn with a writer that raises after the comment exists.
+
+The classification itself is tested as what it is: a pure function, exercised
+directly over constructed models, with one test per case the design
+distinguishes — all resolved, fresh Minor only, an unresolved original, a
+fresh Major, a fresh Blocking, an escalated original, and an escalating
+recommendation with nothing outstanding. Evidence separation has its own
+regression, asserting that `F1 → RESOLVED` beside a fresh `Major` reports
+both facts and rewrites neither. Currency is tested against a moved head, a
+retargeted base, failing CI, a closed pull request, an advanced base with
+stale CI, and an advanced base whose CI re-ran green — the last being the
+case a head-only check waves through. The security boundary is asserted on
+the calls actually made: read-only GitHub questions plus at most one comment,
+with no reviewer, agent, push or merge collaborator threaded through the turn
+at all.
+
 The provenance chain is tested at both ends and in the middle: the digest's
 own properties (every field changes it, finding order counts, the same id over
 a different finding differs, `ci_evidence` is outside it, and it survives a
@@ -2158,6 +2619,15 @@ idea of the document stands in for it.
 
 ## Known limitations
 
+* **An early-exit duplicate document cannot be briefed on its own.** If the
+  only re-review document you hold is a retry that hit the early duplicate
+  check, it says a record exists but not what the record says, and
+  `merge-brief` refuses it. Normally the run that produced the re-review has
+  a usable document — `RE_REVIEW_VALID`, or `GITHUB_WRITE_FAILED` if its
+  write response was lost — and that is the one to use. The case with no way
+  out is a re-review recorded from a machine or a run whose output you do not
+  have; recovering it would mean parsing the comment back into a verdict,
+  which this pipeline refuses on purpose.
 * **Scope is coarse, and can refuse legitimate findings.** A reviewer that
   describes a location without naming a path, or that names only paths outside
   the pull request's change set, gets `REVIEW_REQUIRES_HUMAN` rather than a
@@ -2306,13 +2776,13 @@ idea of the document stands in for it.
 This slice ends at "one validated review recorded against one verified pull
 request state, one bounded local fix routed from it, that fix committed and
 pushed to the pull request's own branch with authoritative CI observed for
-the exact pushed commit, and one fresh Independent Re-Review of that exact
-commit reporting original finding resolution and fresh findings as two
-separate facts". Out of scope here, and left for later slices: a second
-Coding Agent round, automatic routing of an unresolved or fresh finding, the
-multi-round loop, the Merge Decision Brief, automatic merge, force-push
-recovery, general-purpose branch write support, any server or daemon, and any
-persistent state.
+the exact pushed commit, one fresh Independent Re-Review of that exact commit
+reporting original finding resolution and fresh findings as two separate
+facts, and one Merge Decision Brief classifying that evidence for a human".
+Out of scope here, and left for later slices: a second Coding Agent round,
+automatic routing of a `FIX_REQUIRED` classification into another fix, the
+multi-round loop, automatic merge, force-push recovery, general-purpose
+branch write support, any server or daemon, and any persistent state.
 
 Stated as the pipeline:
 
@@ -2327,27 +2797,35 @@ Candidate Patch
 → Push
 → Authoritative CI
 
-this slice
+PR #36
 PUSH_READY
 → Fresh Independent Re-Review
 → Finding Resolution Evidence
 + Fresh Findings
 
+this slice
+Validated Re-Review
+→ Current-state revalidation
+→ Deterministic next-action classification
+→ Merge Decision Brief
+→ Human decision
+
 not implemented
 → Automatic additional fix round
+→ Automatic routing from FIX_REQUIRED into a Coding Agent
 → Multi-round loop
-→ Merge Decision Brief
-→ Merge
+→ Automatic merge
 ```
 
 **The full Finding → Fix → Re-Review loop is still not automated.** Every
-stage of it now exists, and nothing joins them: a re-review that reports an
-unresolved original finding, or a fresh Blocking one, produces a record and
-stops. What is automated is routing, bounded local fixing, getting a
-validated fix onto the branch with its CI observed, and producing fresh
-independent evidence about that fix — with a human still deciding whether the
-finding was right, whether the fix is right, whether anything gets another
-attempt, and whether anything merges.
+stage of it now exists, and nothing joins them: a brief that classifies
+`FIX_REQUIRED` produces a record and stops, exactly as the re-review it was
+derived from does. What is automated is routing, bounded local fixing,
+getting a validated fix onto the branch with its CI observed, producing fresh
+independent evidence about that fix, and presenting all of it as one current
+decision surface — with a human still deciding whether the finding was right,
+whether the fix is right, whether anything gets another attempt, and whether
+anything merges.
 
 That live trial has now happened, on PR #30, and is recorded in
 [`docs/delegated-development/review-loop-live-experiment-1.md`](../../docs/delegated-development/review-loop-live-experiment-1.md).
@@ -2365,9 +2843,14 @@ what `review-loop push` above now does, and it is the first stage that can
 change this repository.
 
 `PUSH_READY` → fresh Independent Re-Review → finding resolution evidence is
-what `review-loop re-review` above now does. The next slices are an
-additional fix round routed from a re-review's findings, the multi-round
-loop, and the Merge Decision Brief. None of that is here, and the human gate
-is why: this pipeline automates *routing, bounded local fixing, getting a
-validated fix onto the branch, and producing independent evidence about it*.
-It does not automate acceptance.
+what `review-loop re-review` above now does.
+
+Validated re-review → current-state revalidation → deterministic next-action
+classification → Merge Decision Brief is what `review-loop merge-brief` above
+now does. The next slices are an additional fix round routed from a
+`FIX_REQUIRED` classification, and the multi-round loop. Neither is here, and
+the human gate is why: this pipeline automates *routing, bounded local
+fixing, getting a validated fix onto the branch, producing independent
+evidence about it, and presenting that evidence as one current decision
+surface*. It does not automate acceptance, and there is no code path in it
+that merges anything.

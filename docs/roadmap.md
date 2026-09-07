@@ -1045,9 +1045,10 @@ request's exact head SHA, verifies whether that commit's GitHub Actions CI
 allows a review to start, and — with `review-loop review` — runs one
 Independent AI Review turn against that exact state, recording the validated
 verdict as a single pull request comment. `review-loop fix`, `review-loop
-push` and `review-loop re-review` extend that into a bounded fix, a pushed
-fix commit with authoritative CI, and fresh independent evidence about
-whether the fix resolved anything. Its first live end-to-end run against a
+push`, `review-loop re-review` and `review-loop merge-brief` extend that into
+a bounded fix, a pushed fix commit with authoritative CI, fresh independent
+evidence about whether the fix resolved anything, and one compact human
+decision surface derived from all of it. Its first live end-to-end run against a
 real pull request and a real AI reviewer is recorded in
 [`docs/delegated-development/review-loop-live-experiment-1.md`](delegated-development/review-loop-live-experiment-1.md).
 That run found that the runner bound the verdict to an exact SHA but not the
@@ -1080,6 +1081,12 @@ PR #36
 PUSH_READY
 → Fresh Independent Re-Review
 → Finding Resolution Evidence
+
+PR #37
+Validated Re-Review
+→ Deterministic next-action classification
+→ Merge Decision Brief
+→ Human decision
 ```
 
 The candidate patch's bytes must hash to the digest the fix turn recorded; the
@@ -1106,20 +1113,48 @@ stands* finds. Both are recorded, separately, as one
 context. An unresolved original finding and a newly discovered one are both
 valid outcomes that record evidence and stop.
 
+The slice after *that* is `review-loop merge-brief`, which turns the whole
+chain into one artifact a human can act on. It rebuilds the review → fix →
+push → CI → re-review chain from the three documents that recorded it,
+re-verifies that the chain still describes the pull request's current head,
+base, merge context and authoritative CI, and derives one next workflow
+action from the resulting facts:
+
+```text
+READY_FOR_HUMAN_MERGE_DECISION
+FIX_REQUIRED
+HUMAN_ESCALATION
+EVIDENCE_NOT_CURRENT
+```
+
+The separation it holds is the point. Facts are gathered, routing is one pure
+function of them, and human authority is untouched:
+`READY_FOR_HUMAN_MERGE_DECISION` is not `MERGE`, and `FIX_REQUIRED` starts no
+fix. Original finding resolutions and fresh findings stay two collections, so
+"the original fix worked" and "the pull request still needs another fix" can
+both be true and both be stated. Stale evidence gets a diagnostic and no
+record at all: a re-review of a commit the pull request has moved off is
+history, not a merge decision. The result is recorded as one
+`## Merge Decision Brief` comment bound to the current head *and* the current
+merge context — so a base that advanced under an old brief produces a new
+one rather than being suppressed by it.
+
 **The full Finding → Fix → Re-Review loop is still not automated.** Every
 stage now exists and nothing joins them. Specifically unimplemented:
 
 ```text
 automatic additional fix round
+automatic routing from FIX_REQUIRED into a Coding Agent
 multi-round loop
-Merge Decision Brief
 automatic merge
 ```
 
 The human keeps every decision about whether a finding is accepted, whether a
 fix is right, whether an unresolved or newly found finding gets another
 attempt, and whether anything merges. `Blocking = 0` and every original
-finding resolved are evidence, not merge authority.
+finding resolved are evidence, not merge authority — and
+`READY_FOR_HUMAN_MERGE_DECISION` is a classification of that evidence, not an
+approval of it.
 
 ## Branch Naming
 
