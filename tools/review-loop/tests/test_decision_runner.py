@@ -412,6 +412,150 @@ def test_one_listing_answers_both_questions(tmp_path):
     assert reader.calls == 1
 
 
+# -- the record's contents, not just its identity -----------------------------
+
+
+def test_the_confirmed_record_is_the_rendering_of_the_supplied_evidence(tmp_path):
+    """The positive control, and the property the refusals below rest on.
+
+    A re-review comment is a deterministic function of the validated model and
+    the target it was verified against, so the model carried in the document
+    renders back to exactly the bytes that were recorded. If that stopped
+    being true, every check in this section would silently become a refusal.
+    """
+    documents = chain(tmp_path, reviewer_output=fresh_major())
+    request = load_request(*documents)
+    recorded_body = json.loads(documents[2])["comment_body"]
+
+    rendered = comment_format.render_rereview(
+        request.recorded_target, request.chain, request.rereview
+    )
+    assert comment_format.rendered_record_matches(recorded_body, rendered)
+
+    result, _ = run(tmp_path, documents=documents, reader=records(documents[2]))
+    assert result.outcome is DecisionOutcome.BRIEF_RECORDED
+    assert result.rereview_record_id is not None
+
+
+def test_a_different_re_review_of_the_same_state_is_not_this_evidence(tmp_path):
+    """Identity is not contents, and the difference decides the brief.
+
+    The pull request records a re-review reporting a fresh Major finding. The
+    supplied document is an internally valid re-review of the same repository,
+    pull request, head, merge base and round -- everything `RecordIdentity`
+    names -- that resolved everything and found nothing. Its marker matches
+    the recorded comment, so an identity-only check confirms it and the brief
+    reads READY while citing a comment that says the opposite.
+    """
+    recorded = json.loads(chain(tmp_path, reviewer_output=fresh_major())[2])
+    supplied = chain(tmp_path)
+
+    # The gap being closed: the two are indistinguishable by identity alone.
+    request = load_request(*supplied)
+    identity = comment_format.rereview_identity_for(
+        request.recorded_target, request.rereview
+    )
+    assert comment_format.body_records(recorded["comment_body"], identity)
+
+    result, writer = run(
+        tmp_path,
+        documents=supplied,
+        reader=FakeCommentReader([recorded["comment_body"]]),
+    )
+
+    assert result.outcome is DecisionOutcome.EVIDENCE_NOT_CURRENT
+    assert result.next_action is not NextAction.READY_FOR_HUMAN_MERGE_DECISION
+    assert result.rereview_record_id is None
+    assert writer.posted == []
+    assert "not the rendering of the re-review supplied here" in " ".join(result.reasons)
+
+
+def test_the_reverse_direction_is_refused_too(tmp_path):
+    """Recorded `approved`, supplied a fresh Major: same marker, different evidence.
+
+    Refused for the same reason and not because one classification is worse
+    than the other -- the check is about which re-review is recorded, not
+    about what it concluded.
+    """
+    recorded = json.loads(chain(tmp_path)[2])
+    supplied = chain(tmp_path, reviewer_output=fresh_major())
+
+    result, writer = run(
+        tmp_path,
+        documents=supplied,
+        reader=FakeCommentReader([recorded["comment_body"]]),
+    )
+
+    assert result.outcome is DecisionOutcome.EVIDENCE_NOT_CURRENT
+    assert writer.posted == []
+
+
+def test_a_lost_response_document_is_refused_when_another_run_recorded_something_else(
+    tmp_path,
+):
+    """The route this gap is actually reached by, end to end.
+
+    Run A's `POST` is rejected, so it reports `GITHUB_WRITE_FAILED` while
+    carrying its own validated model. Run B's reviewer then reaches a
+    different conclusion and records it. A's document is legitimate, its
+    identity matches B's record, and briefing it would report A's findings
+    while citing B's comment.
+    """
+    review, push, _ = chain(tmp_path)
+    run_a = rereview_retry_document(
+        tmp_path,
+        review=review,
+        push=push,
+        reader=FakeCommentReader(),
+        writer=FakeCommentWriter(error=GitHubApiError("HTTP 422 (rejected)")),
+    )
+    assert json.loads(run_a)["outcome"] == "GITHUB_WRITE_FAILED"
+
+    run_b_body = json.loads(
+        chain(tmp_path, review=review, push=push, reviewer_output=fresh_major())[2]
+    )["comment_body"]
+
+    result, writer = run(
+        tmp_path,
+        documents=(review, push, run_a),
+        reader=FakeCommentReader([run_b_body]),
+    )
+
+    assert result.outcome is DecisionOutcome.EVIDENCE_NOT_CURRENT
+    assert writer.posted == []
+    assert "different re-reviews of the same integration state" in " ".join(
+        result.reasons
+    )
+
+
+def test_an_edited_re_review_comment_is_no_longer_the_record(tmp_path):
+    """A record that was changed after it was written is not the evidence.
+
+    The marker survives an edit; the rendering does not, which is the point.
+    """
+    documents = chain(tmp_path)
+    tampered = json.loads(documents[2])["comment_body"].replace(
+        "RESOLVED: F1, F2", "RESOLVED: F1"
+    )
+    result, writer = run(
+        tmp_path, documents=documents, reader=FakeCommentReader([tampered])
+    )
+
+    assert result.outcome is DecisionOutcome.EVIDENCE_NOT_CURRENT
+    assert writer.posted == []
+
+
+def test_line_endings_do_not_decide_whether_a_record_matches(tmp_path):
+    """Transport, not text. GitHub may hand back CRLF for a body posted as LF."""
+    documents = chain(tmp_path)
+    crlf = json.loads(documents[2])["comment_body"].replace("\n", "\r\n")
+    result, _ = run(
+        tmp_path, documents=documents, reader=FakeCommentReader([crlf])
+    )
+
+    assert result.outcome is DecisionOutcome.BRIEF_RECORDED
+
+
 # -- identity and idempotency -------------------------------------------------
 
 

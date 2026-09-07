@@ -10,15 +10,34 @@ next workflow action derived from it mechanically.
 
 Added, and there are two of them.
 
-**The re-review's record is confirmed, not assumed.** The documents say a
-validated re-review exists as a comment; whether it is on the pull request is
-a fact about the present state, so it is read back by its own identity -- the
-same pull request, pushed head, merge base, round and role the re-review turn
-recorded it under, from the account this runner posts as. That is what makes
-``COMMENT_ALREADY_EXISTS`` and ``GITHUB_WRITE_FAILED`` usable inputs without
-believing either label: one claims a record it did not write, the other does
-not know whether it wrote one, and this turn simply looks. A brief must never
-cite evidence a human cannot go and read.
+**The re-review's record is confirmed, not assumed -- and so are its
+contents.** The documents say a validated re-review exists as a comment;
+whether it is on the pull request is a fact about the present state, so it is
+read back by its own identity -- the same pull request, pushed head, merge
+base, round and role the re-review turn recorded it under, from the account
+this runner posts as. That is what makes ``COMMENT_ALREADY_EXISTS`` and
+``GITHUB_WRITE_FAILED`` usable inputs without believing either label: one
+claims a record it did not write, the other does not know whether it wrote
+one, and this turn simply looks.
+
+Identity alone would not finish the job, and the gap it leaves is reachable
+rather than theoretical. Two different valid re-reviews of the same commit
+share every field of a :class:`~review_loop.comment_format.RecordIdentity`,
+so a document holding *one* of them would be confirmed by the record of the
+*other*: run A's write is rejected, run B's reviewer reaches a different
+conclusion and records it, and A's document -- which legitimately reports
+``GITHUB_WRITE_FAILED`` and carries A's model -- then finds B's comment and
+briefs A's findings as though they were the recorded evidence. The brief
+would cite a comment that says something else.
+
+So the supplied model is rendered forward through the same
+:func:`~review_loop.comment_format.render_rereview` that wrote the record,
+and the recorded body must be exactly that. The direction matters: nothing in
+the comment is ever parsed or interpreted, so this keeps the rule the rest of
+the package states -- structured evidence produces a rendering, never the
+reverse -- while binding the record to its contents. A brief must never cite
+evidence a human cannot go and read, and never cite evidence that says
+something other than what the brief says it says.
 
 **A stale chain is not classified, it is refused.** The three
 documents describe a re-review of one exact commit merged onto one exact
@@ -223,7 +242,12 @@ def run_decision(
     #    `GITHUB_WRITE_FAILED` one does not know whether it wrote a record at
     #    all. Neither label is evidence, and neither has to be: whether the
     #    comment is on the pull request now is a question this turn can go and
-    #    answer, by the same identity the re-review turn recorded it under.
+    #    answer.
+    #
+    #    Two questions, because identity is not contents. "Is a re-review of
+    #    this integration state recorded?" is answered by the marker; "is it
+    #    *this* re-review?" is answered by rendering the supplied model
+    #    forward and requiring the record to be exactly that.
     #
     #    Skipped when the state is already known to be stale -- a record for a
     #    merge context nobody is looking at settles nothing, and the reason
@@ -243,10 +267,10 @@ def run_decision(
                 evaluation=evaluation,
                 current_target=current,
             )
-        rereview_record_id = comment_format.find_record(
+        record = comment_format.find_record_comment(
             comments, rereview_identity, expected_author=expected_author
         )
-        if rereview_record_id is None:
+        if record is None:
             # Not an input error: the document may have been perfectly valid
             # when it was written, and a record can be deleted afterwards.
             # What is untrue *now* is that a human can go and read the
@@ -258,6 +282,25 @@ def run_decision(
                 "recorded on this pull request by this automation; the evidence a "
                 "brief would cite is not there for a human to read",
             )
+        elif not comment_format.rendered_record_matches(
+            record.body,
+            comment_format.render_rereview(recorded, request.chain, request.rereview),
+        ):
+            # A record exists for this integration state and is not this one.
+            # Deliberately a different sentence from the one above, because
+            # the operator's next move is different: nothing is missing, they
+            # are holding a re-review document that is not the re-review this
+            # pull request records.
+            not_current = (
+                f"comment {record.comment_id} records a round "
+                f"{request.rereview.round} re-review of {recorded.head_sha}, but it "
+                "is not the rendering of the re-review supplied here; the two are "
+                "different re-reviews of the same integration state, and a brief "
+                "would describe one while citing the other. Brief from the document "
+                "of the run that produced the recorded re-review",
+            )
+        else:
+            rereview_record_id = record.comment_id
 
     # 3. Gather the facts and classify. Both happen even when the evidence is
     #    stale: the classification is then EVIDENCE_NOT_CURRENT by the first
@@ -324,6 +367,15 @@ def run_decision(
     #    happens between that read and the POST. It is therefore the check
     #    that matters -- the one catching a retry whose earlier POST succeeded
     #    and whose response was lost.
+    #
+    #    Identity alone is enough *here*, unlike for the re-review record
+    #    above, and the asymmetry is about which way each one fails. There, a
+    #    record that is not this evidence would have been published as though
+    #    it were: fail-open, so contents are checked. Here, a recorded brief
+    #    whose body somehow differs -- a renderer change, or someone editing
+    #    the comment -- means this run declines to post a second one: already
+    #    fail-closed, and re-posting on every difference would put a duplicate
+    #    brief on the pull request each time the wording changed.
     already = comment_format.find_record(
         comments, identity, expected_author=expected_author
     )

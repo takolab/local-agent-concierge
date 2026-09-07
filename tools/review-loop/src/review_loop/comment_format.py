@@ -160,14 +160,67 @@ def find_record(comments, identity: RecordIdentity, *, expected_author: str) -> 
     Shared by the review and re-review turns rather than written twice: the
     two records differ by round and role inside ``identity``, and a second
     copy of this rule is a second place for it to drift.
+
+    **Identity is not contents.** :class:`RecordIdentity` names the pull
+    request, the commit, the merge context, the round and the role -- which is
+    exactly right for "has this already been recorded?", and not enough for
+    "is this record the one my document describes?". Two different valid
+    re-reviews of the same commit share every field here. A caller that needs
+    the second question answered wants :func:`find_record_comment` and a
+    comparison against the canonical rendering of the evidence it holds; see
+    :func:`rendered_record_matches`.
+    """
+    found = find_record_comment(comments, identity, expected_author=expected_author)
+    return None if found is None else found.comment_id
+
+
+def find_record_comment(comments, identity: RecordIdentity, *, expected_author: str):
+    """The comment recording this identity, if any.
+
+    :func:`find_record` is this reduced to an id, and both rules live here so
+    there is one implementation of "is this a record we wrote?". Returned
+    whole rather than as an id because a caller checking *what* the record
+    says needs its body, and re-scanning the listing to find it again would be
+    a second place for the two rules to drift apart.
     """
     for comment in comments:
         if not body_records(comment.body, identity):
             continue
         if comment.author.casefold() != expected_author.casefold():
             continue
-        return comment.comment_id
+        return comment
     return None
+
+
+def rendered_record_matches(body: str, expected: str) -> bool:
+    """Whether a recorded comment is exactly this rendering of the evidence.
+
+    The comparison runs in the safe direction. Rendering a validated model
+    forward and comparing bytes is not parsing a comment back into a model:
+    nothing in the recorded text is ever interpreted, and a body that differs
+    by so much as a word is simply not a match. That keeps the rule this
+    package states elsewhere -- structured evidence produces a rendering,
+    never the reverse -- while still binding a record to its contents.
+
+    Only two liberties are taken, and both are about transport rather than
+    text: line endings are normalised, because GitHub is free to hand back
+    CRLF for a body posted with LF, and trailing whitespace at the very end is
+    ignored for the same reason. Nothing else is tolerated.
+
+    The consequence is worth stating plainly: the rendered comment becomes a
+    compatibility surface. Change :func:`render_rereview`'s wording and
+    re-reviews recorded by an older runner no longer match a model rendered by
+    the new one. That fails closed -- a brief is refused, never wrongly
+    produced -- and it is the same trade
+    :data:`review_loop.review_identity.CANONICAL_VERSION` already makes: a
+    changed canonical form is a different identity, on purpose, rather than a
+    silent collision.
+    """
+    return _normalise_body(body) == _normalise_body(expected)
+
+
+def _normalise_body(body: str) -> str:
+    return (body or "").replace("\r\n", "\n").replace("\r", "\n").rstrip()
 
 
 def _render_finding(finding) -> list[str]:
@@ -549,6 +602,8 @@ def render_merge_brief(
         "re-derived from the review, fix, push and re-review artifacts and "
         "re-verified against this pull request's current head, base, merge context "
         "and authoritative CI immediately before this comment was written. The "
+        "re-review named above was confirmed to be recorded on this pull request "
+        "and to say exactly what this brief reports it says. The "
         "next action is a mechanical classification of that evidence, **not an "
         "approval and not a merge**: nothing here merges anything, starts another "
         "fix, or invokes a Coding Agent. Merging, declining, requesting another "

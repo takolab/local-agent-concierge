@@ -2292,24 +2292,72 @@ pushed head, merge base, round and role. The runner looks that record up and
 confirms it; the document supplies the model. **The label is trusted for
 nothing.**
 
-### The re-review's record, confirmed
+### The re-review's record, confirmed — identity *and* contents
 
 Before anything is classified, the runner finds the re-review's own comment
-on the pull request — by that identity, from the account it would post as —
-and the brief names it:
+on the pull request, and the brief names it:
 
 ```text
 Re-review record: comment 5562039871
 ```
 
-If it is not there, the classification is `EVIDENCE_NOT_CURRENT` and nothing
-is recorded. A brief must never cite evidence a human cannot go and read,
-whether it was deleted afterwards or the run that claimed it never wrote it.
+Two questions are asked of it, because **identity is not contents**:
+
+1. **Is a re-review of this integration state recorded?** — the marker
+   (`repo`, `pr`, `head`, `base`, `round`, `role`) from the account this
+   runner would post as.
+2. **Is it *this* re-review?** — the supplied model is rendered forward
+   through the same `render_rereview` that wrote the record, and the recorded
+   body must be exactly that.
+
+The second question exists because a `RecordIdentity` names the pull request,
+the commit, the merge context, the round and the role — and **two different
+valid re-reviews of the same commit share every one of them**. The gap that
+leaves is reachable, not theoretical:
+
+```text
+run A   POST rejected      → GITHUB_WRITE_FAILED, carries A's model
+run B   reviewer disagrees → RE_REVIEW_VALID, records B's model
+
+brief from A's document
+→ marker matches B's comment
+→ A's findings briefed, B's comment cited
+```
+
+A's document is legitimate. Its identity is B's identity. Without the second
+check the brief could read `READY_FOR_HUMAN_MERGE_DECISION` while pointing at
+a comment reporting a fresh Major finding.
+
+**The direction is what keeps this safe.** Nothing in the recorded comment is
+parsed or interpreted; a validated model is rendered forward and the bytes
+are compared. Structured evidence produces a rendering, never the reverse —
+the same rule that makes rehydrating an early-exit document unacceptable.
+Only line endings and trailing whitespace are normalised, because GitHub is
+free to hand back CRLF for a body posted with LF; nothing else is tolerated.
+
+The consequence is worth stating: the rendered re-review comment is now a
+compatibility surface. Change `render_rereview`'s wording and re-reviews
+recorded by an older runner stop matching a model rendered by the new one.
+That fails closed — a brief is refused, never wrongly produced — and it is
+the same trade `review_identity.CANONICAL_VERSION` already makes, where a
+changed canonical form is deliberately a different identity rather than a
+silent collision.
+
+Either question failing gives `EVIDENCE_NOT_CURRENT` with nothing recorded,
+and the two reasons are worded differently on purpose: *nothing is recorded*
+and *what is recorded is not this* send an operator to do different things.
 
 The lookup shares one comment listing with the brief's own duplicate check —
 one request, two questions — and is skipped entirely when the state is
 already known to be stale, since a record for a merge context nobody is
 looking at settles nothing.
+
+The brief's *own* duplicate check stays identity-only, and the asymmetry is
+about which way each one fails. A re-review record that is not this evidence
+would have been published as though it were — fail-open, so contents are
+checked. A recorded brief whose body differs only makes this run decline to
+post a second one — already fail-closed, and re-posting on every difference
+would add a duplicate brief each time the wording changed.
 
 ### Current-state revalidation
 
@@ -2325,6 +2373,7 @@ pull request is re-read from GitHub before anything is classified:
 | The base advanced, CI re-ran green, and the merge context is now one nobody re-reviewed | `EVIDENCE_NOT_CURRENT` |
 | The pull request is no longer open, or cannot be resolved | `EVIDENCE_NOT_CURRENT` |
 | The re-review's own comment is not on the pull request | `EVIDENCE_NOT_CURRENT` |
+| A re-review of this state is recorded, but not the one supplied | `EVIDENCE_NOT_CURRENT` |
 
 **Same head is not sufficient.** The last two rows are the same commit with a
 different integration state, which is exactly the case a head-only check
@@ -2526,6 +2575,16 @@ its `--json` output, so what the brief reads back is what that command
 actually writes. A hand-written document there would encode one test author's
 idea of the re-review turn's output and would keep passing after that turn
 changed — which is exactly the drift this stage exists to detect.
+
+The record check is tested from both ends. The positive control asserts that
+a document's model renders back to exactly the bytes that were recorded —
+the property every refusal below rests on. The refusals then use two
+internally valid re-reviews of the same repository, pull request, head, merge
+base and round, first asserting that their markers *do* match each other (so
+an identity-only check would have accepted the wrong one) and then that the
+brief is refused: recorded fresh Major against supplied all-resolved, the
+reverse, the lost-response route that reaches this by accident, an edited
+comment, and CRLF line endings that must *not* decide it.
 
 Both re-review duplicate paths are produced for real rather than simulated:
 a fixed comment reader reaches the early exit, and `ReaderThatFillsUp` —
