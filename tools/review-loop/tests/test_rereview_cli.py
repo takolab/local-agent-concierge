@@ -312,3 +312,45 @@ def test_the_help_text_states_that_zero_is_not_a_merge_decision():
 
     assert "does not mean the findings were resolved" in epilog
     assert "two separate facts" in epilog
+
+
+def test_the_help_documents_every_re_review_outcome_exit_code():
+    """The epilog is the operator's copy of the contract; keep it complete."""
+    from review_loop.rereview_cli import build_rereview_parser
+
+    text = build_rereview_parser().format_help()
+
+    for outcome, code in RE_REVIEW_EXIT_CODES.items():
+        assert outcome.value in text
+        assert str(code) in text
+
+
+def test_target_not_ready_is_the_one_outcome_without_a_code_of_its_own():
+    """It reports the verification verdict's own code, so it must not gain one.
+
+    Asserted rather than assumed because the table would otherwise look
+    incomplete to a later reader, who might "fix" it by inventing a code and
+    silently duplicate the PENDING / FAILED / AMBIGUOUS / STALE_TARGET
+    vocabulary this stage deliberately reuses.
+    """
+    assert set(RE_REVIEW_EXIT_CODES) == set(ReReviewOutcome) - {
+        ReReviewOutcome.TARGET_NOT_READY
+    }
+
+
+def test_re_review_exit_codes_do_not_collide_with_the_earlier_commands():
+    from review_loop.fix_response import FIX_EXIT_CODES
+    from review_loop.model import EXIT_CODES
+    from review_loop.push_response import PUSH_EXIT_CODES
+    from review_loop.verdict import REVIEW_EXIT_CODES
+
+    earlier = (
+        {code for code in EXIT_CODES.values() if code}
+        | {code for code in REVIEW_EXIT_CODES.values() if code}
+        | {code for code in FIX_EXIT_CODES.values() if code}
+        | {code for code in PUSH_EXIT_CODES.values() if code}
+    )
+    rereview = {code for code in RE_REVIEW_EXIT_CODES.values() if code}
+
+    assert not earlier & rereview
+    assert len(rereview) == len([c for c in RE_REVIEW_EXIT_CODES.values() if c])

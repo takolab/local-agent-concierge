@@ -511,9 +511,10 @@ def _resolution_summary_lines(request) -> list[str]:
     """One line per original finding: which, how severe, and what became of it.
 
     Severity comes from the round-1 record and the resolution from round 2,
-    joined only for display. The line never states a severity for a finding
-    the re-review resolved, because "RESOLVED" is not a severity and a reader
-    scanning a column of them must not be able to read one as the other.
+    joined only for display -- ``F1 - Major - RESOLVED`` reads as "the Major
+    finding raised in round 1 is resolved", never as a severity of its own.
+    The two always occupy their own column, so a reader scanning a list of
+    them cannot read a resolution as a severity or the reverse.
     """
     from .rereview import Resolution
 

@@ -319,3 +319,57 @@ def test_a_retry_over_the_same_state_writes_nothing_a_second_time(tmp_path):
     assert writer.posted == []
     assert "Outcome:              COMMENT_ALREADY_EXISTS" in out
     assert "GitHub write performed: No" in out
+
+
+# -- the exit-code contract ---------------------------------------------------
+
+
+def test_the_help_documents_every_merge_brief_outcome_exit_code():
+    """The epilog is the operator's copy of the contract; keep it complete."""
+    from review_loop.decision_cli import build_decision_parser
+
+    text = build_decision_parser().format_help()
+
+    for outcome, code in DECISION_EXIT_CODES.items():
+        assert outcome.value in text
+        assert str(code) in text
+
+
+def test_every_merge_brief_outcome_has_an_exit_code():
+    assert set(DECISION_EXIT_CODES) == set(DecisionOutcome)
+
+
+def test_merge_brief_exit_codes_do_not_collide_with_the_earlier_commands():
+    """Its own block, so no brief outcome reads as an earlier stage's.
+
+    The module states this as a design constraint; an operator branching on
+    the code is what makes it load-bearing, and a reused number would route
+    them to the wrong recovery.
+    """
+    from review_loop.fix_response import FIX_EXIT_CODES
+    from review_loop.model import EXIT_CODES
+    from review_loop.push_response import PUSH_EXIT_CODES
+    from review_loop.rereview import RE_REVIEW_EXIT_CODES
+    from review_loop.verdict import REVIEW_EXIT_CODES
+
+    earlier = (
+        {code for code in EXIT_CODES.values() if code}
+        | {code for code in REVIEW_EXIT_CODES.values() if code}
+        | {code for code in FIX_EXIT_CODES.values() if code}
+        | {code for code in PUSH_EXIT_CODES.values() if code}
+        | {code for code in RE_REVIEW_EXIT_CODES.values() if code}
+    )
+    decision = {code for code in DECISION_EXIT_CODES.values() if code}
+
+    assert not earlier & decision
+    assert len(decision) == len([c for c in DECISION_EXIT_CODES.values() if c])
+
+
+def test_zero_is_only_ever_a_recorded_or_already_recorded_brief():
+    """Never a classification. FIX_REQUIRED and READY both exit 0."""
+    zero = {o for o, code in DECISION_EXIT_CODES.items() if code == 0}
+
+    assert zero == {
+        DecisionOutcome.BRIEF_RECORDED,
+        DecisionOutcome.COMMENT_ALREADY_EXISTS,
+    }

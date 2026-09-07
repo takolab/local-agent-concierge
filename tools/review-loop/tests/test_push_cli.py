@@ -513,6 +513,17 @@ def test_the_push_runner_never_receives_a_comment_writer():
     assert "reader" not in parameters
 
 
+def test_the_help_documents_every_push_outcome_exit_code():
+    """The epilog is the operator's copy of the contract; keep it complete."""
+    from review_loop.push_cli import build_push_parser
+
+    text = build_push_parser().format_help()
+
+    for outcome, code in PUSH_EXIT_CODES.items():
+        assert outcome.value in text
+        assert str(code) in text
+
+
 def test_push_exit_codes_do_not_collide_with_the_earlier_commands():
     from review_loop.fix_response import FIX_EXIT_CODES
     from review_loop.model import EXIT_CODES

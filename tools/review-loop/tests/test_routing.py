@@ -157,7 +157,11 @@ def test_a_pull_request_number_that_is_not_a_positive_integer_is_refused(number)
 
 
 def test_a_later_round_is_refused():
-    """Re-review is a later slice, so a round-2 handoff is unsupported input."""
+    """Round 2 is `review-loop re-review`'s, and it has its own loader.
+
+    A round-2 document reaching this one would be a re-review being routed as
+    though it were an initial review, so it is unsupported input here.
+    """
     with pytest.raises(RoutingInputError, match="round 2"):
         load_handoff(review_json(finding(), round=2))
 

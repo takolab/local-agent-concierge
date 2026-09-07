@@ -3,9 +3,11 @@
 A local command that runs one Independent AI Review turn against a pull
 request, records the result only when it can prove which exact pull request
 state that review describes, routes the findings that review produced to one
-bounded Coding Agent turn against that same exact state, and commits and
-pushes the patch that produces — proving, at each step, exactly which change
-is being carried forward.
+bounded Coding Agent turn against that same exact state, commits and pushes
+the patch that produces, re-reviews that pushed commit with a fresh
+independent reviewer, and presents the whole chain as one Merge Decision Brief
+for a human — proving, at each step, exactly which change is being carried
+forward, and never taking the merge decision itself.
 
 It has six commands, and only the fourth can change the repository.
 
@@ -60,6 +62,68 @@ full Finding → Fix → Re-Review loop is not automated.** This is one review
 turn, one bounded fix turn, one commit-and-push turn, one re-review turn and
 one classification turn, each bound to one verified state, with the human
 keeping every decision about acceptance and merge.
+
+## The loop, end to end
+
+Every stage is a separate command, run by hand, with its `--json` document
+carried forward to the next. Nothing chains them: an operator decides, at each
+boundary, whether to take the next step at all.
+
+```bash
+# 0. May a review start against the exact head?
+review-loop --pr 42 --dry-run
+
+# 1. One Independent AI Review of that exact commit.
+review-loop review --pr 42 \
+  --reviewer-command "my-reviewer --read-only" --json > review.json
+
+# 2. One bounded Coding Agent turn, routed from its open findings.
+#    No GitHub request at all; the patch is the only thing that survives.
+review-loop fix --review-json review.json \
+  --agent-command "my-agent" --write-patch fix.patch --json > fix.json
+
+# --- a human reads fix.patch here; nothing has been written anywhere yet ---
+
+# 3. Commit that exact patch on the reviewed head, push it to the pull
+#    request's own branch, wait for authoritative CI on the pushed commit.
+review-loop push --fix-json fix.json --patch fix.patch --json > push.json
+
+# 4. One fresh Independent Re-Review of the pushed fix.
+review-loop re-review --review-json review.json --push-json push.json \
+  --reviewer-command "my-reviewer --read-only" --json > rereview.json
+
+# 5. One Merge Decision Brief over the whole chain.
+review-loop merge-brief --review-json review.json --push-json push.json \
+  --rereview-json rereview.json --json > brief.json
+
+# --- a human merges, declines, asks for another fix, or escalates ---
+```
+
+| Stage | Command | Artifact it produces | What it writes | What stops it |
+| --- | --- | --- | --- | --- |
+| Verify | `review-loop --pr N` | a CI verdict for the exact head | nothing | any verdict but `READY`; anything it cannot explain becomes `AMBIGUOUS` rather than `READY` |
+| Review | `review-loop review` | a validated Structured Verdict, and one `## Independent AI Review` comment | one issue comment | CI not `READY`, a verdict describing another commit, a head that moved while the reviewer ran |
+| Fix | `review-loop fix` | a validated Structured Fix Response and a candidate patch | nothing at all — no GitHub request is made | a `Blocking` finding, a finding whose scope cannot be bounded, a working tree that disagrees with the response |
+| Push | `review-loop push` | an exact fix commit on the pull request branch, with authoritative CI observed | exactly one fast-forward `git push` to one derived ref | a patch that is not the validated one, a branch that moved, a remote answer that settles nothing |
+| Re-review | `review-loop re-review` | original finding resolutions **and** fresh findings, as two collections, in one `## Independent AI Re-Review` comment | one issue comment | the head is no longer the pushed fix, CI is no longer green, the base advanced under it |
+| Merge brief | `review-loop merge-brief` | one classification of the whole chain, in one `## Merge Decision Brief` comment | one issue comment | any of the above being no longer current, or a re-review record that is not the one supplied |
+
+Two properties hold at every boundary, and they are what the rest of this
+document is mostly about:
+
+* **Evidence is bound to an exact commit, and to an exact integration state.**
+  Same head is not the same state: a base that advanced, or CI that re-ran
+  against a different merge, makes a document historical rather than
+  authoritative. No stage inherits the previous one's answer — `review`,
+  `push`, `re-review` and `merge-brief` each re-read the pull request from
+  GitHub and fail closed, and `fix`, which makes no GitHub request at all,
+  binds its worktree to `refs/pull/N/head` through git instead.
+* **Nothing here decides.** `READY_FOR_HUMAN_MERGE_DECISION` is not `MERGE`,
+  `FIX_REQUIRED` starts no fix, and there is no code path in this package that
+  merges, approves, or routes a finding into another agent turn.
+
+Each stage's own section below is the contract; run `review-loop <stage>
+--help` for its full option list and exit codes.
 
 ## Verification: `review-loop --pr N`
 
@@ -378,6 +442,10 @@ worktree — is a deliberate later change, not something this slice pretends to
 have done.
 * `--reviewer-timeout` (default 900s) abandons a reviewer that does not
   finish; stdout above 1 MB is refused rather than parsed.
+* `--print-raw-output` echoes a malformed reviewer's stdout to stderr for
+  debugging. Off by default, because raw output is untrusted and may contain
+  anything the reviewer read. `review-loop fix` and `review-loop re-review`
+  carry the same flag for the same reason.
 
 No new credential is introduced: GitHub access is the existing `gh auth login`
 session, and the reviewer's own authentication is whatever that command
@@ -505,7 +573,8 @@ comments are recorded as evidence-bearing artifacts.
 A verdict is rejected in full — no comment, no partial record — when:
 
 * `Reviewed head SHA` is not **exactly** the target's 40-character SHA
-* `Round` is anything but `1` (re-review is a later slice)
+* `Round` is anything but `1` — an initial review is round 1 by definition,
+  and round 2 belongs to `review-loop re-review`
 * `Recommendation` is unknown, or contradicts its own findings:
   `approved` with any finding, `changes_requested` with none, or `escalate`
   with neither a finding nor an `Escalation reason`
@@ -741,10 +810,11 @@ The steps, in order, and why the order is the design:
 
 Exit code `0` means *there is nothing left for this step to do* — either a
 validated fix exists, or the review gave this step nothing to act on. Every
-other value is a distinct reason, so a later slice can branch on why. The
-codes occupy a block of their own: no fix outcome collides with a
-verification verdict (0–20) or a review outcome (30–35), and a test asserts
-that.
+other value is a distinct reason, so an operator — or the stage after this
+one — can branch on why. The codes occupy a block of their own, and every
+stage does the same: verification takes 0–20, review 30–35, fix 40–51, push
+60–75, re-review 80–88 and merge-brief 90–93, so no outcome of one stage can
+be read as an outcome of another. A test per stage asserts it.
 
 ### What a fix turn guarantees, and what it does not
 
@@ -894,7 +964,9 @@ they are three different facts:
 **The agent must not commit.** `HEAD` is re-read afterwards and a moved one
 fails the run: a committed fix is a change `git status` no longer reports,
 which is exactly where a hidden change would hide. Committing, and everything
-after it, is the next slice's decision — with a human in it.
+after it, belongs to
+[`review-loop push`](#committing-and-pushing-the-fix-review-loop-push) — with a
+human deciding, between the two commands, whether the patch is used at all.
 
 The worktree is removed on every path, so **use `--write-patch`**: without it
 the fix is reported and then discarded with the directory it lived in. For the
@@ -1069,9 +1141,9 @@ roles lives in one place:
   `TMPDIR`, `USER`, plus whatever `--agent-env NAME` names. No credential
   variable is on that list. A coding agent legitimately needs more than a
   reviewer, and it gets exactly what is named;
-* **a timeout** (default 1800s, longer than the reviewer's, because making a
-  change and running its tests is not the same work as reading) and an
-  **output size limit**;
+* **a timeout** (`--agent-timeout`, default 1800s, longer than the reviewer's,
+  because making a change and running its tests is not the same work as
+  reading) and an **output size limit**;
 * **stdout only** — a response block written to stderr has not been produced.
 
 ### GitHub and credential boundary
@@ -1530,8 +1602,8 @@ that verification resolved must be the exact commit that was pushed.**
 * A third commit pushed on top ends the run as `CI_STALE_TARGET`.
 * Immediately after a push GitHub can still report the previous head; that is
   lag and is waited out, boundedly. If the head never becomes the pushed
-  commit within `--ci-timeout`, the run ends `CI_AMBIGUOUS` rather than
-  guessing.
+  commit within `--ci-timeout` (default 1800s, observed every `--ci-poll`
+  seconds, default 20), the run ends `CI_AMBIGUOUS` rather than guessing.
 
 The result vocabulary reuses the verification verdicts rather than inventing
 a second set of words for the same facts — READY, FAILED, PENDING,
@@ -2662,13 +2734,13 @@ idea of the document stands in for it.
   A deliberate narrowing, not an oversight — but it means a candidate patch is
   never evidence that the pull request is currently green. `review-loop push`
   re-establishes it, because it writes.
-* **The loop stops at one re-review.** A fresh Independent Re-Review of the
-  pushed fix now exists, and it reports whether each original finding was
-  resolved and what a fresh review of the current state found. What does not
-  exist is anything that *acts* on that: no second Coding Agent round, no
-  automatic routing of an unresolved or fresh finding, no multi-round loop,
-  no Merge Decision Brief and no merge. `RE_REVIEW_VALID` means "here is
-  evidence about this exact commit", not "this is done".
+* **The loop stops at the brief.** A fresh Independent Re-Review of the pushed
+  fix exists, and one Merge Decision Brief classifying it exists. What does not
+  exist is anything that *acts* on either: no second Coding Agent round, no
+  automatic routing of a `FIX_REQUIRED` classification back into a fix, no
+  multi-round loop, and no merge. `RE_REVIEW_VALID` means "here is evidence
+  about this exact commit", and `READY_FOR_HUMAN_MERGE_DECISION` means "here is
+  that evidence, current, in one place". Neither means "this is done".
 * **A run can end with the repository changed and the answer unknown.**
   `PUSH_NOT_VERIFIED` is a real outcome, not a defensive one: a push that
   exits zero and does not read back as the created commit leaves state this

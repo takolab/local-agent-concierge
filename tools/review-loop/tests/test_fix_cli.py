@@ -572,8 +572,20 @@ def test_a_repository_without_the_base_branch_cannot_bound_a_fix(
     assert agent.prompts == [], "no agent runs without an established boundary"
 
 
+def test_the_help_documents_every_fix_outcome_exit_code():
+    """The epilog is the operator's copy of the contract; keep it complete."""
+    from review_loop.fix_cli import build_fix_parser
+    from review_loop.fix_response import FIX_EXIT_CODES
+
+    text = build_fix_parser().format_help()
+
+    for outcome, code in FIX_EXIT_CODES.items():
+        assert outcome.value in text
+        assert str(code) in text
+
+
 def test_every_outcome_has_a_distinct_exit_code():
-    """A later slice branches on these; collapsing two would hide a case."""
+    """The stages after this one branch on these; collapsing two hides a case."""
     from review_loop.fix_response import FIX_EXIT_CODES
 
     assert set(FIX_EXIT_CODES) == set(FixRunOutcome)

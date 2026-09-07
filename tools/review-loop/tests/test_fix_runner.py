@@ -644,7 +644,7 @@ def test_claiming_a_fix_with_a_clean_tree_is_a_scope_violation(workspace, repo):
 
 
 def test_a_commit_made_by_the_agent_is_a_scope_violation(workspace, repo):
-    """Committing is the next slice's decision, with a human in it."""
+    """Committing belongs to `review-loop push`, with a human in between."""
     _, sha = repo
 
     def commit(worktree):

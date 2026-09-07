@@ -98,7 +98,12 @@ def build_decision_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--repo",
         default=None,
-        help="target repository as owner/name (default: read from the documents)",
+        help=(
+            "assert that the documents describe this repository, as "
+            "owner/name. It is a check, not a selector: the repository this "
+            "command reads from GitHub and records against always comes from "
+            "the validated documents."
+        ),
     )
     parser.add_argument(
         "--dry-run",
