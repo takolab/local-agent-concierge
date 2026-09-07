@@ -15,10 +15,11 @@ workspace whose final state means anything.
 **After the agent runs** three kinds of change are distinguished, because
 they are three different facts:
 
-* **Tracked and untracked changes** are the fix. They are what a later slice
-  would commit and push, so they are compared -- as a set -- against what the
-  agent said it changed, and against the routed scope. This is the check that
-  makes ``Files changed`` a claim rather than a courtesy.
+* **Tracked and untracked changes** are the fix. They are what
+  ``review-loop push`` would commit and push, so they are compared -- as a
+  set -- against what the agent said it changed, and against the routed scope.
+  This is the check that makes ``Files changed`` a claim rather than a
+  courtesy.
 * **Build and test residue** -- ``__pycache__``, ``.pytest_cache``,
   ``.hypothesis``, a virtualenv -- is expected. Telling the agent to run the
   tests and then failing the run because the tests wrote a cache directory

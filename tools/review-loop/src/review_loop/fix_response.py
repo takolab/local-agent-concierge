@@ -64,10 +64,10 @@ class FixOutcome(Enum):
 class FixRunOutcome(Enum):
     """How one fix turn ended.
 
-    The failure modes stay distinct because a later slice -- push, CI wait,
-    re-review -- has to branch on them. "The agent could not fix it" and "the
-    agent edited files it was not allowed to touch" both end without a usable
-    fix, and they call for opposite responses.
+    The failure modes stay distinct because the stages after this one --
+    push, CI wait, re-review -- have to branch on them. "The agent could not
+    fix it" and "the agent edited files it was not allowed to touch" both end
+    without a usable fix, and they call for opposite responses.
     """
 
     #: Every routed finding came back ``fixed``, and the working tree agrees.

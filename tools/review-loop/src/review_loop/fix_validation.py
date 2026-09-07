@@ -2,9 +2,9 @@
 
 Everything here fails closed, and for a sharper reason than on the review
 side. A rejected verdict costs one wasted reviewer run. A wrongly accepted
-fix response is a claim that a finding is resolved, attached to a diff that a
-later slice is meant to push -- so the cost of believing it is a change
-nobody checked, applied to a commit nobody meant.
+fix response is a claim that a finding is resolved, attached to a diff that
+``review-loop push`` is meant to push -- so the cost of believing it is a
+change nobody checked, applied to a commit nobody meant.
 
 Validation happens in two passes, and the second is the one that matters.
 

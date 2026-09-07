@@ -24,8 +24,9 @@ from enum import Enum
 VERDICT_BEGIN = "BEGIN INDEPENDENT REVIEW VERDICT v1"
 VERDICT_END = "END INDEPENDENT REVIEW VERDICT v1"
 
-#: The only round this slice supports. Re-review is a later slice, and a
-#: verdict claiming to be one is unsupported input, not a verdict to record.
+#: The only round an initial review has. Round 2 belongs to
+#: ``review-loop re-review``, which has its own contract, so a verdict
+#: claiming to be one is unsupported input here, not a verdict to record.
 SUPPORTED_ROUND = 1
 
 #: Bounds on a single verdict. These are not tuning knobs: an unreasonable
