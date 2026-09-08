@@ -815,11 +815,40 @@ None of that is a decision made here, and none of it changes the HTTP
 response in any way. Both behaviors are asserted in
 `test_trace_propagation.py` so they are recorded as deliberate.
 
-The one piece of header handling this repository does do is lowercasing
-header names before handing them to `extract()`: HTTP header names are
-case-insensitive, and a `dict` lookup is not, so a caller sending
-`Traceparent` would otherwise silently start a new trace. That is
-carrier normalization, not trace-context parsing.
+The only header handling this repository does is representing the HTTP
+headers faithfully as a carrier — two things, neither of which
+interprets trace context:
+
+1. **Lowercasing header names.** HTTP header names are case-insensitive
+   and the propagator's `dict` lookup is not, so a caller sending
+   `Traceparent` would otherwise silently start a new trace.
+2. **Combining repeated header fields** into one comma-separated value,
+   in wire order. W3C Trace Context allows `tracestate` to be split
+   across several header fields and requires a receiver to treat them as
+   the combined list. Materializing the carrier as a plain
+   `{k: v for k, v in ...}` keeps only the last such field and silently
+   drops the rest — the trace still joins, because that rides on
+   `traceparent`, so nothing looks broken while vendor state from every
+   earlier field disappears. Raised by this repo's Independent AI Review
+   on this slice's own PR, and confirmed directly before fixing: two
+   `tracestate: vendora=valuea` / `tracestate: vendorb=valueb` fields
+   reached the propagator as `vendorb=valueb` alone.
+
+Combining reads from `items()` rather than `get_all()` so the same code
+serves both `http.server`'s `HTTPMessage` and an ordinary `Mapping`, and
+it is well-defined for both: `email.message.Message.items()` — which
+`HTTPMessage` inherits — returns every field in parse order, duplicates
+included, while a plain `dict` cannot hold duplicates at all. The
+guarantee itself is held by a real HTTP regression test that sends two
+`tracestate` fields and follows them through the SERVER span and CLIENT
+span to the header Hermes actually receives, not by that reasoning.
+
+One consequence worth stating: two `traceparent` fields now combine into
+a value the propagator rejects, so such a request starts a fresh root
+trace instead of silently inheriting whichever field happened to arrive
+last. That is the safer of the two outcomes — an intermediary appending a
+second `traceparent` cannot quietly redirect the trace — and it is
+asserted rather than left as an unexamined side effect.
 
 **Baggage.** The default propagator is `tracecontext,baggage`, so
 `extract()` does parse a caller's `baggage` header. It does not reach
@@ -1132,7 +1161,7 @@ This slice resolves none of the open questions already logged in
   distinctive `HermesAgent` `api_key` (via the same
   real-`HermesAgent`-at-an-unreachable-port idiom as the test above) never
   appearing anywhere in the captured log output.
-- `test_trace_propagation.py` (Slice 5) — 37 tests driving the real
+- `test_trace_propagation.py` (Slice 5) — 40 tests driving the real
   `OrchestratorHTTPServer` over real HTTP, with a real stub Hermes server
   receiving the Orchestrator's real outgoing request, so what is asserted
   is the actual `traceparent` bytes on the wire alongside the spans an
@@ -1161,10 +1190,19 @@ This slice resolves none of the open questions already logged in
   `exception` event on the CLIENT span an exception actually propagates
   through.
 
-  Also pinned: a caller's `baggage` header reaching neither Hermes nor
-  span data, and a set of hostile `traceparent` / `tracestate` values
-  (malformed tracestate, a 4 KB value, whitespace padding, baggage with
-  no traceparent) never failing a dispatch.
+  Also pinned: repeated `tracestate` header fields surviving in order all
+  the way to the header Hermes receives (and the ordinary single-field
+  case alongside it, so the split case is not the only thing keeping
+  `tracestate` propagation alive); repeated `traceparent` fields starting
+  a fresh root trace rather than resolving to either of them; a caller's
+  `baggage` header reaching neither Hermes nor span data; and a set of
+  hostile `traceparent` / `tracestate` values (malformed tracestate, a
+  4 KB value, whitespace padding, baggage with no traceparent) never
+  failing a dispatch.
+
+  The two repeated-field tests use `http.client` directly rather than
+  `urllib`, because a `dict` of headers cannot express the same field
+  name twice — the very thing under test.
 
   Four of these were confirmed load-bearing by mutation during
   implementation rather than assumed: removing the `extract()` call,

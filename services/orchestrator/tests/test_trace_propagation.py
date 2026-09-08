@@ -13,6 +13,7 @@ in-memory exporter and Hermes is a local stub.
 
 from __future__ import annotations
 
+import http.client
 import json
 import threading
 import time
@@ -240,6 +241,40 @@ def _wait_for_spans(
         time.sleep(0.01)
 
 
+def _dispatch_with_raw_headers(
+    base_url: str,
+    agent_name: str,
+    header_fields: list[tuple[str, str]],
+) -> tuple[int, dict]:
+    """POST /dispatch with header fields sent exactly as given.
+
+    `urllib` (and `_dispatch` above) take headers as a `dict`, which
+    cannot express the same field name appearing twice -- the very thing
+    these tests need to send. `http.client` can, via repeated
+    `putheader()` calls.
+    """
+    payload = json.dumps(
+        {"agent_name": agent_name, "request": _request_data()}
+    ).encode("utf-8")
+
+    host_and_port = base_url.removeprefix("http://")
+    connection = http.client.HTTPConnection(host_and_port, timeout=10)
+
+    try:
+        connection.putrequest("POST", "/dispatch")
+        connection.putheader("Content-Type", "application/json")
+        connection.putheader("Content-Length", str(len(payload)))
+        for name, value in header_fields:
+            connection.putheader(name, value)
+        connection.endheaders()
+        connection.send(payload)
+
+        response = connection.getresponse()
+        return response.status, json.loads(response.read())
+    finally:
+        connection.close()
+
+
 def _span_named(spans: list[ReadableSpan], name: str) -> ReadableSpan:
     matches = _wait_for_spans(spans, 1, name=name)
     assert len(matches) == 1, f"expected exactly one {name!r} span, got {len(matches)}"
@@ -295,6 +330,103 @@ def test_traceparent_header_name_is_matched_case_insensitively(
 
     server_span = _span_named(exported_spans, telemetry.DISPATCH_SPAN_NAME)
     assert _hex_trace_id(server_span) == INCOMING_TRACE_ID
+
+
+def test_repeated_tracestate_fields_survive_the_whole_path(
+    running_server, stub_hermes, exported_spans
+):
+    """W3C Trace Context lets `tracestate` be split across several header
+    fields, which a receiver must treat as the combined list, in order.
+
+    Materializing the carrier as a plain `dict` keeps only the last such
+    field and silently drops the rest -- the trace still joins (that
+    rides on `traceparent`), so nothing looks broken, but vendor state
+    from every earlier field is gone. This asserts the whole path:
+
+        two incoming tracestate fields
+          -> Orchestrator SERVER span context
+          -> CLIENT span
+          -> the tracestate header Hermes actually receives
+
+    Member keys must be lowercase to be valid W3C `tracestate` keys --
+    an uppercase key is rejected by the propagator, which would make this
+    test pass vacuously against an empty tracestate either way.
+    """
+    base_url, _ = running_server
+
+    status, _ = _dispatch_with_raw_headers(
+        base_url,
+        HERMES_AGENT_NAME,
+        [
+            ("traceparent", VALID_TRACEPARENT),
+            ("tracestate", "vendora=valuea"),
+            ("tracestate", "vendorb=valueb"),
+        ],
+    )
+    assert status == 200
+
+    server_span = _span_named(exported_spans, telemetry.DISPATCH_SPAN_NAME)
+    client_span = _span_named(exported_spans, telemetry.HERMES_SPAN_NAME)
+
+    expected = {"vendora": "valuea", "vendorb": "valueb"}
+    assert dict(server_span.get_span_context().trace_state) == expected
+    assert dict(client_span.get_span_context().trace_state) == expected
+
+    outgoing = stub_hermes.received_headers[0]["tracestate"]
+    assert "vendora=valuea" in outgoing
+    assert "vendorb=valueb" in outgoing
+    # Order is part of the requirement, not incidental.
+    assert outgoing.index("vendora=valuea") < outgoing.index("vendorb=valueb")
+
+
+def test_a_single_tracestate_field_still_reaches_hermes(
+    running_server, stub_hermes, exported_spans
+):
+    """The ordinary, un-split case, so the test above cannot be the only
+    thing keeping `tracestate` propagation alive.
+    """
+    base_url, _ = running_server
+
+    status, _ = _dispatch(
+        base_url,
+        HERMES_AGENT_NAME,
+        headers={"traceparent": VALID_TRACEPARENT, "tracestate": "vendora=valuea"},
+    )
+    assert status == 200
+
+    assert stub_hermes.received_headers[0]["tracestate"] == "vendora=valuea"
+
+
+def test_repeated_traceparent_fields_start_a_fresh_root_trace(
+    running_server, exported_spans
+):
+    """Two `traceparent` fields must not silently resolve to one of them.
+
+    Combining them yields a value the propagator rejects, so the request
+    becomes a new root trace rather than inheriting whichever field
+    happened to arrive last -- the safer outcome, and the one an
+    intermediary appending a second field cannot exploit. Recorded here
+    because it is a real behavior change, not a side effect nobody
+    checked.
+    """
+    base_url, _ = running_server
+    other = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"
+
+    status, body = _dispatch_with_raw_headers(
+        base_url,
+        ECHO_AGENT_NAME,
+        [("traceparent", VALID_TRACEPARENT), ("traceparent", other)],
+    )
+
+    # Dispatch itself is unaffected, as with any other unusable header.
+    assert status == 200
+    assert body["summary"] == "recorded"
+
+    server_span = _span_named(exported_spans, telemetry.DISPATCH_SPAN_NAME)
+    assert server_span.parent is None
+    trace_id = _hex_trace_id(server_span)
+    assert trace_id != INCOMING_TRACE_ID
+    assert trace_id != "0af7651916cd43dd8448eb211c80319c"
 
 
 @pytest.mark.parametrize(

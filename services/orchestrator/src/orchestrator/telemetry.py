@@ -238,7 +238,40 @@ def _mark_error(span: Span, error_type: str) -> None:
 
 
 def _carrier(headers: Mapping[str, str]) -> dict[str, str]:
-    """Lowercase header names so a case-insensitive HTTP header survives
-    a case-sensitive `dict` lookup inside the propagator.
+    """Represent the HTTP headers faithfully as a propagator carrier.
+
+    Two things happen here, both about *representing* the carrier, not
+    about interpreting trace context:
+
+    1. Header names are lowercased, because HTTP header names are
+       case-insensitive while the propagator's `dict` lookup is not. A
+       caller sending `Traceparent` would otherwise silently start a new
+       trace.
+    2. A header field that appears more than once is combined into one
+       comma-separated value, in wire order. W3C Trace Context allows
+       `tracestate` to be split across several header fields and requires
+       a receiver to treat them as the combined list; a plain
+       `{k: v for k, v in ...}` would keep only the last field and
+       silently drop the rest.
+
+    Combining is done from `items()` rather than `get_all()` so this
+    works for both `http.server`'s `HTTPMessage` and an ordinary
+    `Mapping` (as used in unit tests), and it is well-defined for both:
+    `email.message.Message.items()` -- which `HTTPMessage` inherits --
+    returns every field in the order it was parsed, duplicates included,
+    while a plain `dict` cannot contain duplicates at all.
+
+    A side effect worth knowing: two `traceparent` fields now combine
+    into one value the propagator rejects, so such a request starts a
+    fresh root trace instead of silently inheriting whichever field
+    happened to arrive last. That is the safer of the two outcomes and is
+    asserted in `test_trace_propagation.py`.
     """
-    return {name.lower(): value for name, value in headers.items()}
+    carrier: dict[str, str] = {}
+
+    for name, value in headers.items():
+        key = name.lower()
+        existing = carrier.get(key)
+        carrier[key] = value if existing is None else f"{existing},{value}"
+
+    return carrier

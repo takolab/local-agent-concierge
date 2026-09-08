@@ -108,9 +108,12 @@ delay or fail a dispatch.
 ## Verification status
 
 Automated, in CI (`services/orchestrator/tests/test_trace_propagation.py`,
-37 tests): parent/child relationships and trace ids across the SERVER
+40 tests): parent/child relationships and trace ids across the SERVER
 span, the CLIENT span, and the `traceparent` header actually received by
-a stub Hermes server; fallback for missing and malformed headers; context
+a stub Hermes server; fallback for missing and malformed headers;
+repeated `tracestate` header fields surviving in order all the way to the
+header Hermes receives, and repeated `traceparent` fields starting a
+fresh root trace instead of resolving to either of them; context
 isolation between requests and after exceptions; the closed attribute and
 `error.type` sets; and sentinel-based redaction checks.
 
