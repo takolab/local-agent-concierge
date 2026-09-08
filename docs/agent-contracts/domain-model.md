@@ -346,6 +346,16 @@ before `AgentRequest` is wired into the Orchestrator or another runtime:
    active OpenTelemetry trace ID. Distributed trace propagation should
    likely continue to rely on W3C Trace Context / `traceparent` rather
    than this field becoming the propagation mechanism itself.
+
+   *Partially settled in practice, not in schema.* The Orchestrator now
+   propagates W3C Trace Context in HTTP headers and deliberately leaves
+   `trace_id` alone — it never reconstructs a parent context from the
+   field, never lets it override the incoming HTTP context, and never
+   writes it back (`docs/orchestrator/domain-model.md`, "Trace Context
+   Propagation (Slice 5)"; `docs/observability/orchestrator-trace-context.md`).
+   That fixes one consumer's behavior. What a caller is *supposed* to put
+   in `trace_id`, and whether the field should exist at all once real
+   trace context flows, is still open.
 2. **`permissions` enforcement boundary.** The schema stays opaque here
    by design; once the Orchestrator and tool integrations exist, where a
    permission like `calendar.read` is actually enforced (Orchestrator,

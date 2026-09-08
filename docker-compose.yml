@@ -158,9 +158,19 @@ services:
     # only calls Hermes Agent lazily, inside handle(), so the Orchestrator
     # container itself does not need Hermes to be up to start or pass its
     # own health check. See docs/orchestrator/domain-model.md.
+    #
+    # Deliberately no `depends_on: otel-collector` either, unlike
+    # hermes-agent: dispatch must not depend on the Collector being up.
+    # Spans leave through a BatchSpanProcessor on a background thread, so
+    # an absent or failing Collector cannot delay or fail a request. CI's
+    # runtime smoke test (.github/workflows/pytest.yml) starts this
+    # service on its own, with no Collector reachable at the endpoint
+    # below, which makes that smoke test a live check of exactly this
+    # property.
     environment:
       HERMES_API_BASE_URL: "http://hermes-agent:8642"
       HERMES_API_SERVER_KEY: "${HERMES_API_SERVER_KEY:?HERMES_API_SERVER_KEY must be set in .env}"
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
 
     ports:
       - "127.0.0.1:8700:8700"

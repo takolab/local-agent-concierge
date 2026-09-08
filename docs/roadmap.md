@@ -838,8 +838,8 @@ The backend strategy for this milestone should follow the results of the Phoenix
 
 ### Tasks
 
-* [ ] Add OpenTelemetry instrumentation to the Orchestrator
-* [ ] Add OpenTelemetry instrumentation to Agent calls
+* [ ] Add OpenTelemetry instrumentation to the Orchestrator — *partial: HTTP boundaries only, see below*
+* [ ] Add OpenTelemetry instrumentation to Agent calls — *partial: the Hermes Agent adapter only, see below*
 * [ ] Add OpenTelemetry instrumentation to the Memory Service
 * [ ] Add OpenTelemetry instrumentation to the Approval Service
 * [ ] Add OpenTelemetry instrumentation to additional tool calls
@@ -850,10 +850,36 @@ The backend strategy for this milestone should follow the results of the Phoenix
 * [ ] Add spans for approval waits
 * [ ] Add spans for external API requests
 * [ ] Record latency and error information
-* [ ] Propagate trace identifiers between containers
+* [ ] Propagate trace identifiers between containers — *partial: Slack Gateway → Hermes Agent, and caller → Orchestrator → Hermes Agent; see below*
 * [ ] Enforce telemetry redaction rules
 * [ ] Decide whether to retain both Phoenix and MLflow or standardize on one backend
 * [ ] Document the tracing model
+
+### Orchestrator Trace Context (partial)
+
+`services/orchestrator` participates in the distributed trace as of the
+Slice 5 PR: `POST /dispatch` starts a SERVER span parented by the
+incoming request's W3C trace context, and the Hermes Agent adapter's
+outgoing call runs in a CLIENT span whose context is injected into that
+request. Caller, Orchestrator, and Hermes Agent HTTP boundaries are one
+trace.
+
+Deliberately recorded as **partial**, not complete, because this covers
+only the two HTTP boundaries:
+
+* No spans for agent selection, model calls, memory retrieval, approval
+  waits, or tool calls — the rest of this milestone's task list.
+* Nothing calls the Orchestrator yet, so no *Slack* request flows through
+  it. The Slack Gateway still calls Hermes Agent directly. Milestone 7's
+  "Preserve trace and conversation identifiers" therefore stays unchecked
+  as well: `AgentRequest.trace_id` is still populated by no caller, and is
+  deliberately not the propagation mechanism (see
+  `docs/observability/orchestrator-trace-context.md`).
+* Verified by automated tests in CI, including against the real
+  container. **Not** verified end-to-end against the live stack in
+  Phoenix or MLflow — that needs a real caller first.
+* Hermes Agent's known outbound-MCP propagation gap is unchanged and
+  still upstream-tracked.
 
 ### Planned Flow
 

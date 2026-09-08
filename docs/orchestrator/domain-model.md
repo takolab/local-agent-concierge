@@ -36,14 +36,25 @@ mechanism is unchanged by Slice 3.
 Agent-raised exception — now emits a server-side log line carrying
 `agent_name` and the dispatched `AgentRequest`'s `task_id`,
 `conversation_id`, and `trace_id`. This is plain stdlib `logging`, not
-OpenTelemetry trace propagation (still tracked under Milestone 9, still
-not implemented anywhere in this package) — see "Dispatch Correlation
-Logging (Slice 4)" below for why these are different things and why that
+OpenTelemetry trace propagation — see "Dispatch Correlation Logging
+(Slice 4)" below for why these are different things and why that
 distinction matters here. Slices 1-3's dispatch/registry/HTTP-boundary/
 `HermesAgent` mechanism is unchanged by Slice 4; only `http_server.py`'s
 `_handle_dispatch` gained log calls.
 
-None of these four slices implement request classification, automatic
+**Slice 5** makes the Orchestrator a participant in the distributed
+trace instead of a break in it: `POST /dispatch` starts an OpenTelemetry
+SERVER span parented by the incoming request's W3C trace context, and
+`HermesAgent`'s outgoing call runs in a CLIENT span whose context is
+injected into that request's headers. The caller, the Orchestrator, and
+Hermes Agent's HTTP boundaries are now one trace. This is the slice that
+supersedes Slice 4's "no OpenTelemetry here" statements; where those two
+sections disagree, Slice 5 below is current. Slices 1-4's dispatch,
+registry, HTTP status codes, response bodies, `AgentRequest` /
+`AgentResponse` handling, and correlation logging are all unchanged. See
+"Trace Context Propagation (Slice 5)" below.
+
+None of these five slices implement request classification, automatic
 agent selection, Slack Gateway integration, or any of the other
 Milestone 7 tasks — see "Deliberately not implemented yet" below and
 `docs/roadmap.md` Milestone 7 for what comes next.
@@ -583,10 +594,11 @@ no shared local package today (confirmed: no app or package in this repo
 declares a dependency on a sibling app/package, only on `packages/`
 libraries), and creating one for roughly 20 lines of extraction logic
 would be a new cross-service architectural dependency this slice does not
-introduce. `HermesAgent` also does not inject OpenTelemetry trace context
-into its outgoing request the way `HermesClient` does — the Orchestrator
-has no tracing instrumentation of its own yet at all (tracked under
-Milestone 9), so there is no active local span to inject from.
+introduce. As of Slice 5, `HermesAgent` *does* inject OpenTelemetry trace
+context into its outgoing request, the same way `HermesClient` already
+did — see "Trace Context Propagation (Slice 5)" below. (Before Slice 5 it
+did not, because the Orchestrator had no tracing instrumentation of its
+own to inject from.)
 
 ## Dispatch Correlation Logging (Slice 4)
 
@@ -640,27 +652,18 @@ Protocol, and `HermesAgent` itself are all unchanged by this slice.
 
 **Why this is not OpenTelemetry / trace propagation.** `AgentRequest.trace_id`
 is logged exactly as received — as an opaque, caller-supplied string (or
-`None`) — the same way `docs/agent-contracts/domain-model.md`'s open
-design question 1 already describes it: "whether `trace_id` is only a
-logical correlation identifier, or is expected to correspond to the
-active OpenTelemetry trace ID" is still unresolved, and this slice does
-not resolve it. No `opentelemetry` package is imported anywhere in
-`services/orchestrator` (`test_dependency_boundary.py`'s "exactly one
-dependency" assertion is unchanged by this slice — plain stdlib `logging`
-needs no new dependency). In particular, this slice does **not** make
-`HermesAgent`'s outgoing call to Hermes Agent carry a W3C `traceparent`
-the way `apps/slack-gateway`'s `HermesClient` already does for its own
-direct Hermes call — matching an incoming `traceparent` into a real,
-active local span requires the Orchestrator to have its own OpenTelemetry
-instrumentation first, which it still does not (tracked under Milestone
-9, as "Trace propagation" already was in "Deliberately not implemented
-yet" before this slice, and still is). Wiring the Slack Gateway to call
-the Orchestrator instead of Hermes Agent directly is a separate, larger,
-not-yet-safe decision for exactly this reason: doing so today, before
-Milestone 9's Orchestrator tracing exists, would silently drop the
-already-verified Milestone 5 distributed trace
-(`concierge.request` → `hermes.request` → `/v1/responses`), since
-`HermesAgent` has no span to inject a `traceparent` from.
+`None`). Correlation logging and W3C Trace Context remain two different
+mechanisms, and Slice 5 did not merge them: see "`AgentRequest.trace_id`
+is not W3C Trace Context" under Slice 5 below.
+
+> **Superseded in part by Slice 5.** When this section was written, no
+> `opentelemetry` package was imported anywhere in
+> `services/orchestrator`, `HermesAgent`'s outgoing call carried no
+> `traceparent`, and wiring the Slack Gateway to the Orchestrator would
+> therefore have silently dropped the already-verified Milestone 5
+> distributed trace (`concierge.request` → `hermes.request` →
+> `/v1/responses`). Slice 5 is what removed that specific blocker. The
+> statements above about *`trace_id` itself* still hold unchanged.
 
 **What is logged, and what is deliberately never logged.** The new
 *structured correlation log calls* this slice adds — the three described
@@ -738,7 +741,307 @@ below are otherwise unchanged by this slice. Additions:
   Gateway integration remains unimplemented). `docs/roadmap.md`'s
   "Preserve trace and conversation identifiers" checkbox is therefore left
   unchecked by this slice, rather than claimed complete. Found by this
-  repo's Independent AI Review on this slice's own PR.
+  repo's Independent AI Review on this slice's own PR. (Slice 5 addresses
+  neither of those two gaps: it propagates *W3C trace context*, which is
+  carried in HTTP headers and is not `AgentRequest.trace_id`, and it adds
+  no caller. That checkbox stays unchecked.)
+
+## Trace Context Propagation (Slice 5)
+
+Before this slice the Orchestrator was a break in the distributed trace.
+`apps/slack-gateway` starts a trace and injects `traceparent` into its
+own direct Hermes call, and Hermes Agent's auto-instrumentation extracts
+it (`docs/observability/hermes-trace-context.md`) — but a request routed
+through the Orchestrator lost that context at the HTTP boundary and
+Hermes started an unrelated root trace. That made "route the Slack
+Gateway through the Orchestrator" a change that would have *regressed*
+the already-verified Milestone 5 trace. This slice removes that
+blocker; it does not itself connect the Slack Gateway.
+
+### What the trace looks like now
+
+```text
+concierge.request                  (Slack Gateway, or any caller)
+  |
+  +-- POST /dispatch               (Orchestrator, SERVER span,
+        |                           parent extracted from traceparent)
+        |
+        +-- hermes.request         (Orchestrator, CLIENT span,
+              |                     injects traceparent)
+              |
+              +-- /v1/responses    (Hermes Agent, SERVER span,
+                                    extracted from traceparent)
+```
+
+Two spans, and nothing else. `GET /health` is deliberately untraced: it
+is a container liveness probe running every 10 seconds with no caller
+context to continue and nothing to observe, so tracing it would only add
+volume.
+
+### Where each piece lives
+
+- `telemetry.py` (new) — `configure_tracing()`, the two span context
+  managers, `trace_context_headers()`, and the bounded `error.type`
+  vocabulary. This is the only module that imports OpenTelemetry
+  directly for span creation.
+- `http_server.py` — `do_POST` wraps the existing, unchanged
+  `_handle_dispatch()` in the SERVER span and records the status that
+  was actually sent.
+- `hermes_agent.py` — `handle()` wraps the existing, unchanged call in
+  the CLIENT span; `_call_hermes()` merges the injected headers into the
+  request it already built.
+- `__main__.py` — installs the tracer provider before serving and shuts
+  it down (flushing batched spans) after the server stops.
+
+`orchestrator.py`, `registry.py`, and `agent.py` — the routing core —
+import no OpenTelemetry at all, and `Orchestrator.dispatch()` still does
+exactly the three things described under "`Orchestrator.dispatch`" above.
+Telemetry belongs to the transport boundaries that own an HTTP request,
+not to the domain logic. `test_dependency_boundary.py` enforces that
+split directly.
+
+### No custom header parsing
+
+`traceparent` and `tracestate` are never parsed by this repository.
+`opentelemetry.propagate.extract()` and `inject()` hand the carrier to
+the configured propagator, and its `TraceContextTextMapPropagator`
+decides everything: which versions are acceptable, what counts as
+well-formed, and what a malformed value means. Concretely, that means a
+missing, empty, or malformed `traceparent` — or the reserved `ff`
+version, or an all-zero trace or span id — simply yields no parent and
+the request becomes a new root trace, while an *unknown but well-formed
+future version* (`99-…`) is accepted, as W3C Trace Context requires.
+None of that is a decision made here, and none of it changes the HTTP
+response in any way. Both behaviors are asserted in
+`test_trace_propagation.py` so they are recorded as deliberate.
+
+The only header handling this repository does is representing the HTTP
+headers faithfully as a carrier — two things, neither of which
+interprets trace context:
+
+1. **Lowercasing header names.** HTTP header names are case-insensitive
+   and the propagator's `dict` lookup is not, so a caller sending
+   `Traceparent` would otherwise silently start a new trace.
+2. **Combining repeated header fields** into one comma-separated value,
+   in wire order. W3C Trace Context allows `tracestate` to be split
+   across several header fields and requires a receiver to treat them as
+   the combined list. Materializing the carrier as a plain
+   `{k: v for k, v in ...}` keeps only the last such field and silently
+   drops the rest — the trace still joins, because that rides on
+   `traceparent`, so nothing looks broken while vendor state from every
+   earlier field disappears. Raised by this repo's Independent AI Review
+   on this slice's own PR, and confirmed directly before fixing: two
+   `tracestate: vendora=valuea` / `tracestate: vendorb=valueb` fields
+   reached the propagator as `vendorb=valueb` alone.
+
+Combining reads from `items()` rather than `get_all()` so the same code
+serves both `http.server`'s `HTTPMessage` and an ordinary `Mapping`, and
+it is well-defined for both: `email.message.Message.items()` — which
+`HTTPMessage` inherits — returns every field in parse order, duplicates
+included, while a plain `dict` cannot hold duplicates at all. The
+guarantee itself is held by a real HTTP regression test that sends two
+`tracestate` fields and follows them through the SERVER span and CLIENT
+span to the header Hermes actually receives, not by that reasoning.
+
+One consequence worth stating: two `traceparent` fields now combine into
+a value the propagator rejects, so such a request starts a fresh root
+trace instead of silently inheriting whichever field happened to arrive
+last. That is the safer of the two outcomes — an intermediary appending a
+second `traceparent` cannot quietly redirect the trace — and it is
+asserted rather than left as an unexamined side effect.
+
+**Baggage.** The default propagator is `tracecontext,baggage`, so
+`extract()` does parse a caller's `baggage` header. It does not reach
+Hermes: `start_as_current_span(context=...)` uses the passed context only
+to resolve the parent span and then attaches the new span onto the
+*ambient* context, so the extracted context's baggage is not what
+`inject()` later reads. `test_caller_supplied_baggage_does_not_reach_hermes_or_span_data`
+pins that, because the alternative would mean forwarding arbitrary
+caller-supplied key/values to an internal service from an endpoint with
+no authentication. Treat that test as a regression tripwire rather than a
+security control — a deployment that needs the guarantee should set the
+standard `OTEL_PROPAGATORS=tracecontext`.
+
+### `AgentRequest.trace_id` is not W3C Trace Context
+
+These are two different things and this slice keeps them separate:
+
+| | `AgentRequest.trace_id` | W3C Trace Context |
+|---|---|---|
+| Where it travels | a field inside the JSON body | the `traceparent` / `tracestate` HTTP headers |
+| Format | any non-empty string; no format enforced (`docs/agent-contracts/domain-model.md`) | the W3C format, validated by OpenTelemetry's propagator |
+| Who reads it | Slice 4's correlation log lines | OpenTelemetry, to parent a span |
+| Set by this repo | nobody yet — no caller populates it | the Slack Gateway today; any instrumented caller |
+
+The Orchestrator therefore **never** reconstructs an OpenTelemetry parent
+context from `AgentRequest.trace_id`, and never overwrites the incoming
+HTTP trace context with it. It also never writes `trace_id` back into the
+request. A caller may send a JSON `trace_id` that has nothing to do with
+its HTTP `traceparent` — propagation follows the HTTP context, and the
+`AgentRequest` reaches the Agent byte-for-byte as it arrived
+(`test_json_trace_id_neither_overrides_nor_is_altered_by_http_context`,
+`test_agent_receives_the_request_unmodified_when_tracing_is_active`).
+
+Doing the opposite — treating the JSON field as the propagation
+mechanism — would mean inventing a parent span id the caller never sent
+and trusting a format the schema explicitly does not enforce. That is
+also why `docs/agent-contracts/domain-model.md`'s open question 1 stays
+open as a *schema* question: this slice decides only what the
+Orchestrator does, which is to leave the field alone.
+
+### Trace context is not authentication
+
+A `traceparent` header is caller-supplied, unauthenticated, and trivially
+forgeable — as is `AgentRequest.permissions`. Nothing in this slice
+treats either as evidence of anything. `POST /dispatch` has no
+authentication or authorization (see "Authorization boundary" above,
+unchanged), and joining a caller's trace grants no capability: the only
+effect is which trace the resulting spans are filed under.
+
+### What goes on a span, and what never does
+
+| Span | Attributes |
+|---|---|
+| `POST /dispatch` (SERVER) | `concierge.operation`, `http.method`, `http.route`, `http.status_code`, and `error.type` on 5xx |
+| `hermes.request` (CLIENT) | `concierge.downstream.service`, `concierge.operation`, `http.status_code` on an HTTP failure, and `error.type` on any failure |
+
+That is the complete list, asserted as a closed set by
+`test_span_attribute_keys_are_limited_to_the_expected_set`. It follows
+the same discipline `docs/observability/collector-redaction.md`
+established: no instruction text, no Hermes response text, no
+`Authorization` value or API key, no raw exception message or traceback,
+and no per-user, per-task, or per-conversation identifier.
+
+`error.type` is a closed vocabulary of four values
+(`telemetry.ERROR_TYPES`): `dispatch.server_error`,
+`hermes.http_status_error`, `hermes.connection_error`, and
+`hermes.invalid_response`. `telemetry._mark_error` raises on anything
+else, so an exception's class name or message cannot become an
+`error.type` by accident, and
+`test_every_recorded_error_type_comes_from_the_declared_vocabulary`
+asserts the emitted set stays within it.
+
+**`agent_name` is deliberately not a span attribute**, even though
+"which Agent was selected" is a Milestone 9 goal. It is a free string
+supplied by an unauthenticated caller: unbounded in cardinality, and not
+guaranteed to be free of content the caller should not have put there. It
+stays in Slice 4's correlation *logs*, which never leave the container.
+Attaching it safely needs the registered-agent set to be the source of
+the value rather than the request — a small design decision, deferred
+rather than made silently here.
+
+**Exceptions are never recorded by the SDK.** Both spans are created with
+`record_exception=False` and `set_status_on_exception=False`, matching
+`apps/slack-gateway` and `mcp/google-calendar`. Without that, an
+exception propagating through a span would be attached as an `exception`
+event carrying `exception.message` and `exception.stacktrace` — text this
+service does not control. Failures are recorded as a status plus one
+`error.type` instead. The CLIENT span is where this is load-bearing
+(`hermes_agent.handle()` really does let its `RuntimeError` escape the
+context manager); on the SERVER span it is defense-in-depth, since
+`_handle_dispatch` catches every exception itself.
+
+There is no auto-instrumentation in this service — no
+`opentelemetry-instrument`, no `sitecustomize` hook, no instrumented
+HTTP library. Every span here is created by the code above, which is
+what makes the closed attribute set above assertable at all.
+
+### Injection never overwrites an existing header
+
+`trace_context_headers()` injects into a *fresh* dict, which
+`_call_hermes` then merges into the headers it already built. The
+direction is deliberate: the propagator can add `traceparent` /
+`tracestate` but can never replace `Authorization` or `Content-Type`
+(`test_outgoing_request_keeps_its_authorization_and_content_type`).
+
+### Failure and disabled-telemetry behavior
+
+Telemetry is never allowed to change what a caller sees:
+
+- **No Collector reachable.** Spans leave through a
+  `BatchSpanProcessor` on a background thread, so an absent or failing
+  Collector cannot delay or fail a dispatch. `docker-compose.yml`
+  deliberately gives `orchestrator` no `depends_on: otel-collector` for
+  this reason, and CI's runtime smoke test starts the container with no
+  Collector reachable at its configured endpoint — which makes that
+  smoke test a live check of this property.
+- **Telemetry disabled.** With `OTEL_SDK_DISABLED=true`, or with no
+  provider installed at all, the OpenTelemetry API hands out
+  non-recording spans; every call site here tolerates that, and no
+  `traceparent` is sent rather than a fabricated one
+  (`test_hermes_call_without_a_tracer_provider_sends_no_traceparent`).
+- **Broken telemetry configuration.** `__main__` catches an exception
+  from `configure_tracing()`, logs it, and serves untraced rather than
+  refusing to start. An Orchestrator that cannot export telemetry must
+  still dispatch.
+
+### Context is never leaked between requests
+
+Both spans are entered with `start_as_current_span` as a context manager,
+so the span ends and detaches on the success path and on an exception
+alike. This matters concretely because `ThreadingHTTPServer` reuses one
+handler instance and one thread for several keep-alive requests on a
+connection: a span left attached would be silently inherited as the
+parent of the *next* caller's request.
+`test_a_traced_request_does_not_leak_context_into_an_untraced_one` and
+`test_context_does_not_survive_an_agent_exception` assert exactly that,
+including that no span is left unended after a failure.
+
+### Configuration
+
+`configure_tracing()` mirrors `apps/slack-gateway/src/slack_gateway/
+telemetry.py` and `mcp/google-calendar/src/google_calendar_mcp/
+telemetry.py`: a `Resource` of `service.name=orchestrator` /
+`service.namespace=local-agent-concierge`, an OTLP/gRPC exporter
+configured entirely through the standard `OTEL_EXPORTER_OTLP_ENDPOINT`
+environment variable, and a `BatchSpanProcessor`. `docker-compose.yml`
+sets that endpoint to `http://otel-collector:4317`, the same value the
+other two services use. Nothing here talks to Phoenix or MLflow: the
+Collector owns backend fan-out.
+
+Two deliberate differences from those two services:
+
+- `OTEL_SDK_DISABLED=true` is honored, giving a real "telemetry off"
+  mode that CI and tests can exercise.
+- `configure_tracing()` returns the provider, and `__main__` shuts it
+  down after the HTTP server stops, flushing spans still queued in the
+  batch processor. The Orchestrator already had a graceful SIGTERM/SIGINT
+  shutdown path (Slice 2) to hang this on; the other two services do not.
+
+### Dependencies
+
+This slice makes `services/orchestrator` depend on
+`opentelemetry-api`, `opentelemetry-sdk`, and
+`opentelemetry-exporter-otlp-proto-grpc`, pinned to the same
+`>=1.44.0,<2.0` range `apps/slack-gateway` and `mcp/google-calendar`
+already use — all three services export to the same Collector, and
+OpenTelemetry's packages are only guaranteed to work together within a
+release train.
+
+`test_dependency_boundary.py` previously asserted "exactly one runtime
+dependency, standard library only everywhere". Keeping that assertion
+would have pinned a fact that is no longer true rather than protected
+anything, so it was replaced with the invariant that still matters: the
+routing core imports no third-party code at all, the transport modules
+may additionally import `opentelemetry` and nothing else, and the
+OpenTelemetry pins must match the sibling services'. Neither the
+Dockerfile nor `.github/workflows/orchestrator.yml` needed changes — both
+install from `pyproject.toml`.
+
+### What this slice does not do
+
+- It does not connect the Slack Gateway to the Orchestrator. That is
+  still a separate change; this one removes the trace-regression reason
+  it was unsafe, not the rest of the work.
+- It does not close Hermes Agent's known outbound-MCP propagation gap
+  (`docs/observability/hermes-trace-context.md`, "Known gap"). A trace
+  reaching Hermes still stops at Hermes' own MCP boundary, for reasons
+  upstream of this repository.
+- It adds no spans for anything other than the two HTTP boundaries — no
+  agent-selection, model-call, memory, or approval spans, which are the
+  rest of Milestone 9.
+- It does not resolve `AgentRequest.trace_id`'s schema question, enforce
+  permissions, or add authentication.
 
 ## Deliberately not implemented yet
 
@@ -756,8 +1059,10 @@ Out of scope for Slice 2, per its stated boundaries and
 - Approval workflow.
 - Multi-agent delegation.
 - Result aggregation.
-- Trace propagation — including into or out of `HermesAgent`'s outgoing
-  call to Hermes Agent (see "HermesAgent (Slice 3)" above).
+- ~~Trace propagation~~ — implemented for both HTTP boundaries by Slice
+  5 (see "Trace Context Propagation (Slice 5)" above). Still absent:
+  spans for anything other than those two boundaries (agent selection,
+  model calls, memory, approvals), which is the rest of Milestone 9.
 - Production Agent registration/discovery — as of Slice 3, both
   `EchoAgent` ("Synthetic Agent" above) and `HermesAgent` ("HermesAgent
   (Slice 3)" above) are hardcoded in `__main__.build_orchestrator()`;
@@ -778,8 +1083,11 @@ This slice resolves none of the open questions already logged in
 
 - Whether `AgentRequest.trace_id` is only a logical correlation
   identifier, or is expected to correspond to the active OpenTelemetry
-  trace ID (trace propagation, per the list above, is not implemented in
-  this slice).
+  trace ID. Slice 5 answers this for the *Orchestrator's behavior* — it
+  leaves the field entirely alone and propagates W3C Trace Context in
+  HTTP headers instead — but not for the *schema*: what a caller is
+  supposed to put in `trace_id`, if anything, is still undecided. See
+  "`AgentRequest.trace_id` is not W3C Trace Context" above.
 - Where an `AgentRequest.permissions` entry such as `calendar.read` is
   actually enforced — this slice does not enforce permissions anywhere;
   `dispatch` passes `request` through to `Agent.handle()` unexamined.
@@ -853,14 +1161,70 @@ This slice resolves none of the open questions already logged in
   distinctive `HermesAgent` `api_key` (via the same
   real-`HermesAgent`-at-an-unreachable-port idiom as the test above) never
   appearing anywhere in the captured log output.
-- `test_dependency_boundary.py` — `pyproject.toml` declares exactly the
-  one `local-agent-concierge-agent-contracts` dependency, and (as of
-  Slice 3) `agent.py` / `registry.py` / `orchestrator.py` / `http_server.py`
-  / `dev_agents.py` / `hermes_agent.py` / `__main__.py` all import only
-  from the standard library, `agent_contracts`, or `orchestrator`'s own
-  modules — confirming `HermesAgent`'s use of `urllib` did not introduce a
-  new declared dependency. Unchanged by Slice 4: `logging`/`caplog` are
-  standard library / pytest built-ins, not a new declared dependency.
+- `test_trace_propagation.py` (Slice 5) — 40 tests driving the real
+  `OrchestratorHTTPServer` over real HTTP, with a real stub Hermes server
+  receiving the Orchestrator's real outgoing request, so what is asserted
+  is the actual `traceparent` bytes on the wire alongside the spans an
+  in-memory exporter recorded. Covers: a valid incoming `traceparent`
+  becoming the SERVER span's parent; header-name case-insensitivity;
+  absent / empty / malformed / `ff`-version / all-zero-id `traceparent`
+  values all falling back to a root trace with the dispatch response
+  unchanged; an unknown-but-well-formed future version still being joined
+  (the propagator's job, not this repo's); `GET /health` producing no
+  span; SERVER span, CLIENT span, and the header Hermes actually received
+  all sharing one trace with the right parent chain; `Authorization` and
+  `Content-Type` surviving injection; no `traceparent` sent when nothing
+  is recording; a JSON `trace_id` that differs from the HTTP context
+  changing neither propagation nor the `AgentRequest` the Agent receives;
+  context isolation across two requests, across a traced-then-untraced
+  pair, and after an Agent exception (including that no span is left
+  unended and no context stays attached); `http.status_code` recorded for
+  200/404/500 with 4xx deliberately not marked as a server-span error;
+  Hermes non-2xx, connection failure, and unusable-body cases keeping
+  their existing error responses while recording a bounded `error.type`;
+  the emitted `error.type` set staying inside `telemetry.ERROR_TYPES`;
+  the span attribute keys staying inside a closed allowlist; and
+  redaction — distinctive sentinels for the instruction, conversation id,
+  user id, task id, Hermes response text and API key never appearing in
+  any span's attributes, events, status description, or resource, and no
+  `exception` event on the CLIENT span an exception actually propagates
+  through.
+
+  Also pinned: repeated `tracestate` header fields surviving in order all
+  the way to the header Hermes receives (and the ordinary single-field
+  case alongside it, so the split case is not the only thing keeping
+  `tracestate` propagation alive); repeated `traceparent` fields starting
+  a fresh root trace rather than resolving to either of them; a caller's
+  `baggage` header reaching neither Hermes nor span data; and a set of
+  hostile `traceparent` / `tracestate` values (malformed tracestate, a
+  4 KB value, whitespace padding, baggage with no traceparent) never
+  failing a dispatch.
+
+  The two repeated-field tests use `http.client` directly rather than
+  `urllib`, because a `dict` of headers cannot express the same field
+  name twice — the very thing under test.
+
+  Four of these were confirmed load-bearing by mutation during
+  implementation rather than assumed: removing the `extract()` call,
+  removing header lowercasing, injecting nothing, and flipping the CLIENT
+  span to `record_exception=True` each fail exactly the test that claims
+  to cover them. The fourth mutation is why the exception-redaction check
+  is asserted on the CLIENT span: the same mutation on the SERVER span
+  changes nothing observable, because `_handle_dispatch` catches every
+  exception itself, so a SERVER-span-only assertion would have passed
+  vacuously.
+- `test_dependency_boundary.py` (rewritten in Slice 5) — `pyproject.toml`
+  declaring exactly the expected four dependencies; the three
+  OpenTelemetry pins matching `apps/slack-gateway`'s and
+  `mcp/google-calendar`'s; the routing core (`agent.py`, `registry.py`,
+  `orchestrator.py`, `dev_agents.py`) importing no third-party code at
+  all, OpenTelemetry included; and the transport modules
+  (`http_server.py`, `hermes_agent.py`, `telemetry.py`, `__main__.py`)
+  importing only `agent_contracts`, `orchestrator`'s own modules, or
+  `opentelemetry`. This replaces Slice 3's "exactly one dependency,
+  standard library only" assertions, which Slice 5 made false — see
+  "Dependencies" under Slice 5 above for why the replacement is the
+  invariant worth keeping.
 - `stub_agents.py` — not a test module itself; the `RecordingAgent` /
   `ExplodingAgent` stub Agents shared by `test_orchestrator.py` and (as of
   Slice 2) `test_http_server.py`. Both exist only under `tests/` — not to

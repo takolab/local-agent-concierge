@@ -6,15 +6,18 @@ Implements orchestrator.agent.Agent by calling Hermes Agent's existing
 registered Agent, alongside the synthetic orchestrator.dev_agents.EchoAgent
 ("dev-echo"); registering it does not remove or change EchoAgent.
 
-Uses only the standard library (urllib), matching http_server.py's own
-"why the standard library instead of a framework" rationale -- this keeps
-services/orchestrator at zero non-agent_contracts runtime dependencies.
+Uses the standard library (urllib) for the HTTP call itself, matching
+http_server.py's own "why the standard library instead of a framework"
+rationale -- the only third-party code involved is OpenTelemetry, for
+tracing.
 
-No OpenTelemetry / trace-context propagation is implemented here: the
-Orchestrator has no tracing instrumentation of its own yet (tracked under
-Milestone 9), so this adapter makes plain HTTP calls with no `traceparent`
-injection. See docs/orchestrator/domain-model.md for the full design notes
-and what this deliberately does not do yet.
+Every call is wrapped in a CLIENT span whose trace context is injected
+into the outgoing request's headers, so this hop joins the same
+distributed trace as the incoming `POST /dispatch` request that caused it
+(see orchestrator.telemetry). `AgentRequest.trace_id` is *not* involved:
+it is forwarded nowhere and read nowhere here, exactly as before. See
+docs/orchestrator/domain-model.md for the full design notes and what this
+deliberately does not do yet.
 """
 
 from __future__ import annotations
@@ -26,6 +29,8 @@ from typing import Any
 
 from agent_contracts.agent_request import AgentRequest
 from agent_contracts.agent_response import AgentResponse
+
+from orchestrator import telemetry
 
 HERMES_AGENT_NAME = "hermes"
 
@@ -79,10 +84,24 @@ class HermesAgent:
         exception propagate uncaught -- the HTTP layer's existing generic
         500 handling (http_server.py) already covers it without needing a
         new AgentResponse status value.
+
+        Every one of those failures is also marked on the CLIENT span,
+        with a fixed `error.type` value and never the exception itself;
+        the exception raised to the caller is unchanged in type and
+        message.
         """
-        response_data = self._call_hermes(request)
-        summary = _extract_output_text(response_data)
-        return AgentResponse(status="completed", summary=summary)
+        with telemetry.trace_hermes_request():
+            response_data = self._call_hermes(request)
+
+            try:
+                summary = _extract_output_text(response_data)
+            except RuntimeError:
+                telemetry.mark_current_span_error(
+                    error_type=telemetry.ERROR_TYPE_HERMES_INVALID_RESPONSE,
+                )
+                raise
+
+            return AgentResponse(status="completed", summary=summary)
 
     def _call_hermes(self, request: AgentRequest) -> dict[str, Any]:
         body = json.dumps(
@@ -94,14 +113,21 @@ class HermesAgent:
             }
         ).encode("utf-8")
 
+        headers = {
+            "Authorization": f"Bearer {self._api_key}",
+            "Content-Type": "application/json",
+        }
+        # Injected into its own dict and merged in this direction on
+        # purpose: whatever the configured propagator writes can add
+        # `traceparent`/`tracestate` but can never replace `Authorization`
+        # or `Content-Type` above.
+        headers.update(telemetry.trace_context_headers())
+
         http_request = urllib.request.Request(
             f"{self._base_url}/v1/responses",
             data=body,
             method="POST",
-            headers={
-                "Authorization": f"Bearer {self._api_key}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
         )
 
         try:
@@ -110,10 +136,17 @@ class HermesAgent:
             ) as response:
                 response_body = response.read()
         except urllib.error.HTTPError as error:
+            telemetry.mark_current_span_error(
+                error_type=telemetry.ERROR_TYPE_HERMES_HTTP_STATUS,
+                http_status_code=error.code,
+            )
             raise RuntimeError(
                 f"Hermes API returned HTTP {error.code}"
             ) from error
         except urllib.error.URLError as error:
+            telemetry.mark_current_span_error(
+                error_type=telemetry.ERROR_TYPE_HERMES_CONNECTION,
+            )
             raise RuntimeError("Failed to connect to Hermes API") from error
 
         try:
@@ -124,11 +157,17 @@ class HermesAgent:
             # JSONDecodeError -- both mean "not a usable Hermes response"
             # from this adapter's point of view. Mirrors http_server.py's
             # own handling of the same underlying quirk.
+            telemetry.mark_current_span_error(
+                error_type=telemetry.ERROR_TYPE_HERMES_INVALID_RESPONSE,
+            )
             raise RuntimeError(
                 "Hermes API response was not valid JSON"
             ) from error
 
         if not isinstance(payload, dict):
+            telemetry.mark_current_span_error(
+                error_type=telemetry.ERROR_TYPE_HERMES_INVALID_RESPONSE,
+            )
             raise RuntimeError("Hermes API response was not a JSON object")
 
         return payload
