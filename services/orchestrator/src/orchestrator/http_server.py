@@ -15,10 +15,19 @@ This is a thin transport adapter only:
     HTTP request -> AgentRequest deserialization -> Orchestrator.dispatch()
     -> AgentResponse serialization -> HTTP response
 
+`POST /dispatch` is additionally wrapped in an OpenTelemetry SERVER span
+whose parent is taken from the incoming request's W3C trace context
+headers (`orchestrator.telemetry`). That is purely observational: it
+neither reads nor changes the `AgentRequest`, and it does not affect any
+status code or response body. `GET /health` is deliberately left
+untraced -- it is a liveness probe running every few seconds, with no
+caller trace context to continue and nothing to observe.
+
 No new domain schema is introduced, and no authentication or authorization
-is implemented here. See docs/orchestrator/domain-model.md for the full
-runtime HTTP boundary documentation, including what this deliberately
-does not do yet.
+is implemented here. A `traceparent` header is not, and must never be
+treated as, evidence that a caller is authenticated. See
+docs/orchestrator/domain-model.md for the full runtime HTTP boundary
+documentation, including what this deliberately does not do yet.
 """
 
 from __future__ import annotations
@@ -32,6 +41,7 @@ from typing import Any
 from agent_contracts.agent_request import agent_request_from_dict
 from agent_contracts.agent_response import agent_response_to_dict
 
+from orchestrator import telemetry
 from orchestrator.orchestrator import Orchestrator
 from orchestrator.registry import UnknownAgentError
 
@@ -64,6 +74,12 @@ class OrchestratorHTTPServer(ThreadingHTTPServer):
 class OrchestratorRequestHandler(BaseHTTPRequestHandler):
     server: OrchestratorHTTPServer
 
+    # The status `_send_json` last responded with, so the SERVER span can
+    # record the status actually sent rather than re-deriving it. Reset
+    # per request in `do_POST` (a keep-alive connection reuses one handler
+    # instance for several requests).
+    _response_status: int | None = None
+
     def do_GET(self) -> None:
         try:
             if self.path == "/health":
@@ -75,12 +91,23 @@ class OrchestratorRequestHandler(BaseHTTPRequestHandler):
             self._handle_unexpected_error()
 
     def do_POST(self) -> None:
+        self._response_status = None
         try:
             if self.path != "/dispatch":
                 self._send_error(HTTPStatus.NOT_FOUND, "not_found", "Unknown path.")
                 return
 
-            self._handle_dispatch()
+            with telemetry.trace_dispatch_request(headers=self.headers) as span:
+                try:
+                    self._handle_dispatch()
+                except Exception:
+                    # Handled here, inside the span, rather than by
+                    # do_POST's outer `except` below, so the span records
+                    # the 500 that is actually sent. The response itself
+                    # is byte-for-byte the one that outer handler sends.
+                    self._handle_unexpected_error()
+                finally:
+                    telemetry.record_dispatch_status(span, self._response_status)
         except Exception:
             self._handle_unexpected_error()
 
@@ -229,6 +256,7 @@ class OrchestratorRequestHandler(BaseHTTPRequestHandler):
             )
 
     def _send_json(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
+        self._response_status = int(status)
         body = json.dumps(payload).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")

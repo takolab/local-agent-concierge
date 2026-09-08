@@ -6,6 +6,12 @@ orchestrator.hermes_agent), constructs an Orchestrator around it, and
 serves the HTTP runtime boundary defined in orchestrator.http_server until
 terminated.
 
+Also installs the OpenTelemetry tracing configuration
+(orchestrator.telemetry) before serving, and shuts it down -- flushing
+any spans still batched -- on graceful termination. Tracing setup is
+deliberately allowed to fail without stopping the service: an
+Orchestrator that cannot export telemetry must still dispatch.
+
 This does not implement production Agent registration/discovery (both
 Agents are still hardcoded here), request classification, or any
 connection to the Slack Gateway -- see docs/orchestrator/domain-model.md
@@ -25,6 +31,7 @@ from orchestrator.hermes_agent import HERMES_AGENT_NAME, HermesAgent
 from orchestrator.http_server import DEFAULT_HOST, DEFAULT_PORT, create_server
 from orchestrator.orchestrator import Orchestrator
 from orchestrator.registry import AgentRegistry
+from orchestrator.telemetry import configure_tracing
 
 logger = logging.getLogger("orchestrator")
 
@@ -55,6 +62,19 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
+    try:
+        tracer_provider = configure_tracing()
+    except Exception:
+        # Telemetry is never allowed to prevent the Orchestrator from
+        # serving. An unreachable Collector already cannot get this far
+        # (BatchSpanProcessor exports on a background thread), so what is
+        # being tolerated here is a bad *configuration* -- e.g. an
+        # unparseable OTEL_EXPORTER_OTLP_ENDPOINT. Logged loudly, then the
+        # service runs untraced: the OpenTelemetry API hands out
+        # non-recording spans when no provider was installed.
+        logger.exception("Tracing setup failed; continuing without tracing")
+        tracer_provider = None
+
     server = create_server(build_orchestrator(), DEFAULT_HOST, DEFAULT_PORT)
 
     logger.info(
@@ -84,6 +104,12 @@ def main() -> None:
     server.shutdown()
     server.server_close()
     serve_thread.join(timeout=5)
+
+    if tracer_provider is not None:
+        # Flushes whatever BatchSpanProcessor has queued. Called after the
+        # server has stopped, so no in-flight request can still be adding
+        # spans to a provider that is being torn down.
+        tracer_provider.shutdown()
 
     logger.info("Orchestrator HTTP runtime stopped")
 

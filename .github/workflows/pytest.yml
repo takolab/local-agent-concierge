@@ -85,6 +85,51 @@ jobs:
           print("OK: /dispatch response matches the expected AgentResponse")
           PYEOF
 
+      - name: Runtime smoke test - POST /dispatch with a traceparent header
+        # The Orchestrator container is deliberately started without the
+        # otel-collector service, so its configured OTEL endpoint is
+        # unreachable here. That is the point of this step: a request that
+        # produces spans nothing can export must still return exactly the
+        # same response as one that produces none. The span values
+        # themselves are asserted by
+        # services/orchestrator/tests/test_trace_propagation.py, which does
+        # not need a Collector either.
+        run: |
+          status=$(curl -s -o /tmp/orchestrator_dispatch_traced.json \
+            -w "%{http_code}" -X POST http://127.0.0.1:8700/dispatch \
+            -H "Content-Type: application/json" \
+            -H "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" \
+            -d '{"agent_name": "dev-echo", "request": {"task_id": "ci-smoke-3", "user_id": "ci", "conversation_id": "ci-smoke", "instruction": "ci-ping", "memory_scopes": [], "permissions": [], "trace_id": "ci-json-trace-id"}}')
+          echo "POST /dispatch (traceparent) -> HTTP $status"
+          cat /tmp/orchestrator_dispatch_traced.json
+          test "$status" = "200"
+          python3 <<'PYEOF'
+          import json
+
+          with open("/tmp/orchestrator_dispatch_traced.json") as f:
+              data = json.load(f)
+
+          expected = {
+              "status": "completed",
+              "summary": "echo: ci-ping",
+              "proposed_actions": [],
+              "memory_candidates": [],
+          }
+          assert data == expected, f"unexpected AgentResponse body: {data!r}"
+          print("OK: a traced /dispatch returns the identical AgentResponse")
+          PYEOF
+
+      - name: Runtime smoke test - POST /dispatch with a malformed traceparent
+        run: |
+          status=$(curl -s -o /tmp/orchestrator_dispatch_bad_trace.json \
+            -w "%{http_code}" -X POST http://127.0.0.1:8700/dispatch \
+            -H "Content-Type: application/json" \
+            -H "traceparent: this-is-not-a-traceparent" \
+            -d '{"agent_name": "dev-echo", "request": {"task_id": "ci-smoke-4", "user_id": "ci", "conversation_id": "ci-smoke", "instruction": "ci-ping", "memory_scopes": [], "permissions": [], "trace_id": null}}')
+          echo "POST /dispatch (malformed traceparent) -> HTTP $status"
+          cat /tmp/orchestrator_dispatch_bad_trace.json
+          test "$status" = "200"
+
       - name: Runtime smoke test - POST /dispatch unknown agent
         run: |
           status=$(curl -s -o /tmp/orchestrator_dispatch_unknown.json \
