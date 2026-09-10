@@ -149,7 +149,7 @@ def build_span_tree(spans: Iterable[Span]) -> list[TreeRow]:
     present in this set (a span from another trace, or one that never
     reached Phoenix) terminates the walk, so its child renders at the
     depth it can be proven to have rather than being dropped. A cyclic
-    cyclic parent-link loop -- which no correct exporter produces, but
+    parent-link loop -- which no correct exporter produces, but
     which must not hang an evidence tool -- is bounded by the number of
     spans. (This walk is about resolving one span's depth; it is unrelated
     to `EXPECTED_RELATIONSHIPS`, which is the shape the trace is checked

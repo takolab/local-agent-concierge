@@ -1,10 +1,11 @@
 """Tests for the live-validation evidence helper.
 
 These cover the helper's pure logic only -- span-tree building,
-expected-chain checking, needle parsing and scanning -- against fixtures.
-They perform no network access, no Docker access, and no Slack access, and
-they deliberately do **not** stand in for live evidence: a passing run here
-says the tool reports correctly, never that the live path works.
+expected-relationship checking, needle parsing and scanning -- against
+fixtures. They perform no network access, no Docker access, and no Slack
+access, and they deliberately do **not** stand in for live evidence: a
+passing run here says the tool reports correctly, never that the live path
+works.
 
 Only clearly-synthetic placeholder values are used -- never a real secret,
 token, or identifier.
