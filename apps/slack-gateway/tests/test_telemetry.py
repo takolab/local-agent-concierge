@@ -1,78 +1,42 @@
-from collections.abc import Sequence
-
 import pytest
-from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
-from opentelemetry.sdk.trace.export import (
-    SimpleSpanProcessor,
-    SpanExporter,
-    SpanExportResult,
-)
+from opentelemetry.sdk.trace import ReadableSpan
 from slack_sdk.errors import SlackApiError
 from opentelemetry.trace import SpanKind, StatusCode
 
 from slack_gateway import telemetry
 
-
-class RecordingSpanExporter(SpanExporter):
-    def __init__(self) -> None:
-        self.spans: list[ReadableSpan] = []
-
-    def export(
-        self,
-        spans: Sequence[ReadableSpan],
-    ) -> SpanExportResult:
-        self.spans.extend(spans)
-        return SpanExportResult.SUCCESS
-
-    def shutdown(self) -> None:
-        pass
+# `exported_spans` comes from tests/conftest.py -- shared with
+# test_slack_message_routing.py, which asserts against the same spans as
+# they are produced by the real message-handling path.
 
 
-@pytest.fixture
-def exported_spans(
-    monkeypatch: pytest.MonkeyPatch,
-) -> list[ReadableSpan]:
-    exporter = RecordingSpanExporter()
-
-    tracer_provider = TracerProvider()
-    tracer_provider.add_span_processor(
-        SimpleSpanProcessor(exporter)
-    )
-
-    tracer = tracer_provider.get_tracer(
-        "slack_gateway.test"
-    )
-
-    monkeypatch.setattr(
-        telemetry.trace,
-        "get_tracer",
-        lambda _: tracer,
-    )
-
-    return exporter.spans
-
-
-def test_hermes_request_success_has_no_error(
+def test_orchestrator_request_success_has_no_error(
     exported_spans: list[ReadableSpan],
 ) -> None:
-    with telemetry.trace_hermes_request():
+    with telemetry.trace_orchestrator_request():
         pass
 
     span = exported_spans[-1]
 
-    assert span.name == "hermes.request"
+    assert span.name == "orchestrator.dispatch"
+    assert span.kind == SpanKind.CLIENT
+    assert (
+        span.attributes["concierge.downstream.service"]
+        == "orchestrator"
+    )
+    assert span.attributes["concierge.operation"] == "dispatch"
     assert span.status.status_code == StatusCode.UNSET
     assert "error.type" not in span.attributes
     assert len(span.events) == 0
 
 
-def test_hermes_request_error_is_sanitized(
+def test_orchestrator_request_error_is_sanitized(
     exported_spans: list[ReadableSpan],
 ) -> None:
     raw_error = "synthetic sensitive failure detail"
 
     with pytest.raises(RuntimeError):
-        with telemetry.trace_hermes_request():
+        with telemetry.trace_orchestrator_request():
             raise RuntimeError(raw_error)
 
     span = exported_spans[-1]
@@ -82,7 +46,7 @@ def test_hermes_request_error_is_sanitized(
 
     assert (
         span.attributes["error.type"]
-        == "hermes.request_error"
+        == "orchestrator.request_error"
     )
 
     assert len(span.events) == 0
@@ -114,7 +78,7 @@ def test_request_child_spans_share_trace(
     with telemetry.trace_slack_request(
         threaded=False,
     ):
-        with telemetry.trace_hermes_request():
+        with telemetry.trace_orchestrator_request():
             pass
 
         with telemetry.trace_slack_response():
@@ -126,11 +90,11 @@ def test_request_child_spans_share_trace(
     }
 
     request_span = spans_by_name["concierge.request"]
-    hermes_span = spans_by_name["hermes.request"]
+    dispatch_span = spans_by_name["orchestrator.dispatch"]
     slack_span = spans_by_name["slack.response"]
 
     assert (
-        hermes_span.context.trace_id
+        dispatch_span.context.trace_id
         == request_span.context.trace_id
     )
     assert (
@@ -138,11 +102,11 @@ def test_request_child_spans_share_trace(
         == request_span.context.trace_id
     )
 
-    assert hermes_span.parent is not None
+    assert dispatch_span.parent is not None
     assert slack_span.parent is not None
 
     assert (
-        hermes_span.parent.span_id
+        dispatch_span.parent.span_id
         == request_span.context.span_id
     )
     assert (
@@ -150,7 +114,7 @@ def test_request_child_spans_share_trace(
         == request_span.context.span_id
     )
 
-    assert hermes_span.kind == SpanKind.CLIENT
+    assert dispatch_span.kind == SpanKind.CLIENT
     assert slack_span.kind == SpanKind.CLIENT
 
 def test_slack_response_error_is_sanitized(

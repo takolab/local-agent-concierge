@@ -2,6 +2,8 @@
 
 This document explains how to create and configure a Slack application, run the Slack Gateway through Docker Compose, and verify the end-to-end communication path from Slack to Hermes Agent and Ollama.
 
+The Slack Gateway dispatches through the Orchestrator rather than calling Hermes Agent directly. The routing change itself — the request/response contract, trace behavior, failure mapping, and what has and has not been verified — is documented in [Slack Gateway → Orchestrator dispatch](../slack-gateway/orchestrator-dispatch.md). This document covers the Slack application setup and the operational procedures around it.
+
 ## Overview
 
 The Slack Gateway provides the conversational entry point for Local Agent Concierge.
@@ -14,6 +16,10 @@ Slack direct message
     | Socket Mode
     v
 Slack Gateway container
+    |
+    | POST /dispatch        (agent_name: "hermes")
+    v
+Orchestrator container
     |
     | POST /v1/responses
     v
@@ -35,12 +41,14 @@ The Slack Gateway is intentionally limited to Slack-specific responsibilities:
 * Maintain the Slack Socket Mode connection.
 * Receive direct-message events.
 * Validate and normalize Slack event data.
-* Associate messages with Slack threads and Hermes conversations.
-* Forward user text to the Hermes API.
+* Associate messages with Slack threads and agent conversations.
+* Normalize the message into an `AgentRequest` and dispatch it to the Orchestrator.
 * Display a temporary processing status.
 * Return generated responses to Slack.
-* Display a user-friendly error when Hermes is unavailable.
+* Display a user-friendly error when the request cannot be completed.
 * Prevent duplicate processing of the same Slack event.
+
+The Gateway does not choose which Agent handles a request beyond naming the one Agent that exists today (`"hermes"`), and it holds no Hermes credential — the Orchestrator owns that hop.
 
 The Slack Gateway does not contain agent reasoning, model logic, or business-specific tool behavior.
 
@@ -72,12 +80,13 @@ The following items must already work:
 * `gemma4:12b` installed in Ollama
 * Hermes Agent connected to Ollama
 * Hermes API server enabled
+* The Orchestrator container running (the Slack Gateway dispatches through it)
 * A local `.env` file excluded from Git
 
 Verify the existing services:
 
 ```bash
-docker compose up -d ollama hermes-agent
+docker compose up -d ollama hermes-agent orchestrator
 docker compose ps
 ```
 
@@ -86,6 +95,7 @@ Expected services:
 ```text
 ollama          running and healthy
 hermes-agent    running
+orchestrator    running and healthy
 ```
 
 ## Create a Slack Application
@@ -305,11 +315,7 @@ The current Slack Gateway requires two Slack credentials:
 | `SLACK_BOT_TOKEN`    | Bot User OAuth Token | `xoxb-` |
 | `SLACK_APP_TOKEN`    | App-Level Token      | `xapp-` |
 
-It also requires the shared Hermes API key:
-
-```text
-HERMES_API_SERVER_KEY
-```
+The Slack Gateway itself no longer requires the Hermes API key: it calls the Orchestrator, and the Orchestrator holds the Hermes credential. `HERMES_API_SERVER_KEY` is still required in `.env`, because the `hermes-agent` and `orchestrator` services both read it.
 
 The public `.env.example` contains empty placeholders:
 
@@ -352,10 +358,10 @@ The Hermes API key must be identical for both:
 
 ```text
 Hermes API server
-Slack Gateway client
+Orchestrator client
 ```
 
-Docker Compose passes the same local value to both containers.
+Docker Compose passes the same local value to both containers. It is no longer passed to the Slack Gateway.
 
 ## Protect Credentials
 
@@ -393,19 +399,21 @@ The effective service configuration is:
 ```yaml
 slack-gateway:
   build:
-    context: ./apps/slack-gateway
+    context: .
+    dockerfile: apps/slack-gateway/Dockerfile
+    target: runtime
 
   restart: unless-stopped
 
   depends_on:
-    hermes-agent:
-      condition: service_started
+    orchestrator:
+      condition: service_healthy
 
   environment:
     SLACK_BOT_TOKEN: "${SLACK_BOT_TOKEN:?SLACK_BOT_TOKEN must be set in .env}"
     SLACK_APP_TOKEN: "${SLACK_APP_TOKEN:?SLACK_APP_TOKEN must be set in .env}"
-    HERMES_API_BASE_URL: "http://hermes-agent:8642"
-    HERMES_API_SERVER_KEY: "${HERMES_API_SERVER_KEY:?HERMES_API_SERVER_KEY must be set in .env}"
+    ORCHESTRATOR_BASE_URL: "http://orchestrator:8700"
+    OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
 
   networks:
     - concierge-network
@@ -413,18 +421,18 @@ slack-gateway:
 
 Important properties:
 
-* The Gateway image is built from `apps/slack-gateway`.
-* The Gateway starts after the Hermes container starts.
+* The Gateway image is built from the repository root, because it installs `packages/agent-contracts` before its own package.
+* The Gateway starts after the Orchestrator reports healthy.
 * Slack credentials are read from environment variables.
-* The Hermes API is accessed through the Compose service hostname.
-* The Slack Gateway and Hermes Agent share `concierge-network`.
+* No Hermes credential is passed to the Gateway.
+* The Orchestrator is accessed through the Compose service hostname.
+* The Slack Gateway and Orchestrator share `concierge-network`.
 * No Slack Gateway port is published to the host.
-* No Hermes API port is published to the host.
 
-The internal Hermes API URL is:
+The internal Orchestrator URL is:
 
 ```text
-http://hermes-agent:8642
+http://orchestrator:8700
 ```
 
 Inside the Slack Gateway container, do not use:
@@ -452,12 +460,33 @@ The resulting path is:
 ```text
 Slack Gateway
     |
+    | POST /dispatch      (no credential -- the endpoint has no authentication)
+    v
+http://orchestrator:8700/dispatch
+    |
     | Bearer HERMES_API_SERVER_KEY
     v
 http://hermes-agent:8642/v1/responses
 ```
 
-The request uses:
+The Slack Gateway sends the canonical Agent contract:
+
+```json
+{
+  "agent_name": "hermes",
+  "request": {
+    "task_id": "Slack event id",
+    "user_id": "Slack user id",
+    "conversation_id": "Slack conversation identifier",
+    "instruction": "User message",
+    "memory_scopes": [],
+    "permissions": [],
+    "trace_id": null
+  }
+}
+```
+
+The Orchestrator's Hermes adapter turns that into the Hermes request, unchanged from what the Gateway used to send directly:
 
 ```json
 {
@@ -467,6 +496,8 @@ The request uses:
   "store": true
 }
 ```
+
+See [Slack Gateway → Orchestrator dispatch](../slack-gateway/orchestrator-dispatch.md) for the full field mapping and failure semantics.
 
 ## Validate the Compose Configuration
 
@@ -482,11 +513,12 @@ List the configured services:
 docker compose config --services
 ```
 
-Expected services:
+Expected services (the Slack path needs `orchestrator` as well):
 
 ```text
 ollama
 hermes-agent
+orchestrator
 slack-gateway
 ```
 
@@ -524,6 +556,7 @@ Expected state:
 ```text
 ollama          running and healthy
 hermes-agent    running
+orchestrator    running and healthy
 slack-gateway   running
 ```
 
@@ -577,6 +610,9 @@ Slack direct message
     |
     v
 Temporary processing status
+    |
+    v
+Orchestrator dispatch
     |
     v
 Hermes Agent request
@@ -646,7 +682,7 @@ Updating the temporary message is intentionally avoided because Slack may displa
 
 ## User-Facing Error Handling
 
-When the Slack Gateway cannot complete a request through Hermes, it posts a generic user-facing error:
+When the Slack Gateway cannot complete a request — the Orchestrator being unreachable, the dispatch timing out, the Orchestrator returning an error status because Hermes itself failed, or an unusable response body — it posts a generic user-facing error:
 
 ```text
 ⚠️ I couldn't complete that request. Please try again.
@@ -656,7 +692,9 @@ Internal exception details are written to container logs rather than exposed to 
 
 This separation prevents implementation details, internal URLs, and provider errors from being shown unnecessarily in Slack.
 
-## Verify the Hermes-Unavailable Error
+## Verify the Downstream-Unavailable Error
+
+Two independent hops can now fail this way. Stopping Hermes Agent exercises the Orchestrator's own failure mapping (the Gateway sees `HTTP 500`); stopping the Orchestrator exercises the Gateway's connection failure. Both must produce the same Slack message.
 
 Stop the Hermes Agent container:
 
@@ -690,6 +728,19 @@ docker compose ps
 ```
 
 Send another direct message and confirm that normal responses resume.
+
+Repeat the check for the other hop:
+
+```bash
+docker compose stop orchestrator
+```
+
+The Slack message must be identical. The Gateway logs should show a connection failure to the Orchestrator rather than to Hermes. Then restart it:
+
+```bash
+docker compose start orchestrator
+docker compose ps
+```
 
 ## Duplicate Event Handling
 
@@ -727,7 +778,7 @@ The current Gateway ignores:
 
 Ignoring bot messages prevents the Gateway from processing its own responses and creating an infinite reply loop.
 
-Message edits and deletion events contain subtypes and are not forwarded to Hermes.
+Message edits and deletion events contain subtypes and are not dispatched.
 
 ## Restart the Complete Stack
 
@@ -839,7 +890,9 @@ Check:
 * The Messages tab is enabled.
 * The Slack Gateway has an active Socket Mode connection.
 
-### Hermes Connection Failure
+### Downstream Connection Failure
+
+The Gateway log line names which hop failed. `Failed to connect to the Orchestrator` and `Orchestrator request timed out` are the Gateway's own hop; `Orchestrator returned HTTP 500` means the Orchestrator was reached and the Hermes hop failed behind it — check the Orchestrator logs for the correlated dispatch line.
 
 Inspect container state:
 
@@ -847,31 +900,30 @@ Inspect container state:
 docker compose ps
 ```
 
-Inspect Hermes logs:
-
-```bash
-docker compose logs --tail=200 hermes-agent
-```
-
-Inspect Gateway logs:
+Inspect the logs of each hop:
 
 ```bash
 docker compose logs --tail=200 slack-gateway
+docker compose logs --tail=200 orchestrator
+docker compose logs --tail=200 hermes-agent
 ```
 
-Confirm the internal URL:
+Confirm the internal URLs:
 
 ```text
+http://orchestrator:8700
 http://hermes-agent:8642
 ```
 
-Confirm that the two services share:
+Confirm that all three services share:
 
 ```text
 concierge-network
 ```
 
 ### Hermes Authentication Failure
+
+This now surfaces in Slack as the same generic error, and in the Gateway log as `Orchestrator returned HTTP 500` — the credential itself is the Orchestrator's, not the Gateway's, so check the Orchestrator logs to confirm.
 
 Check that the same local value is used for:
 
@@ -883,7 +935,7 @@ The value is passed to:
 
 ```text
 Hermes API_SERVER_KEY
-Slack Gateway HERMES_API_SERVER_KEY
+Orchestrator HERMES_API_SERVER_KEY
 ```
 
 Recreate both services after changing it:
@@ -891,7 +943,7 @@ Recreate both services after changing it:
 ```bash
 docker compose up -d --force-recreate \
   hermes-agent \
-  slack-gateway
+  orchestrator
 ```
 
 ### Processing Status Remains Visible
@@ -919,6 +971,7 @@ Inspect live logs:
 ```bash
 docker compose logs -f \
   slack-gateway \
+  orchestrator \
   hermes-agent \
   ollama
 ```
@@ -963,7 +1016,7 @@ An observed response was:
 
 The HTTP status was `200`.
 
-Because the response is marked as completed, the Slack Gateway cannot reliably distinguish it from a legitimate assistant response without parsing human-readable error text.
+Because the response is marked as completed, neither the Orchestrator's Hermes adapter nor the Slack Gateway behind it can reliably distinguish it from a legitimate assistant response without parsing human-readable error text. Routing through the Orchestrator does not change this: the adapter maps a 2xx Hermes response with extractable output text to `AgentResponse(status="completed", ...)`, so the text still reaches Slack.
 
 This project intentionally does not use error-message string matching as a permanent workaround.
 

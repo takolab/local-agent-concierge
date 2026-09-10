@@ -604,9 +604,11 @@ The following decisions will be documented as the implementation progresses:
 - Framework for the Orchestrator's eventual service/transport layer.
   Python has been selected for `services/orchestrator`, which now runs as
   a containerized process with a minimal, provisional HTTP boundary
-  (`GET /health`, `POST /dispatch`, standard-library `http.server`, no
-  Hermes Agent or Slack Gateway connection yet) — see
-  `docs/orchestrator/domain-model.md`. This HTTP boundary is deliberately
+  (`GET /health`, `POST /dispatch`, standard-library `http.server`) — see
+  `docs/orchestrator/domain-model.md`. That boundary now carries real
+  traffic: the Slack Gateway dispatches through it, and the Orchestrator's
+  Hermes adapter calls Hermes Agent
+  (`docs/slack-gateway/orchestrator-dispatch.md`). This HTTP boundary is deliberately
   provisional, sized to verify the runtime boundary itself; whether it
   becomes the long-term Agent transport protocol (the separate open
   question below) is not yet decided.

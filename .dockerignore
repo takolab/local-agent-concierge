@@ -1,10 +1,11 @@
 # Root .dockerignore
 #
-# Only the `orchestrator` / `orchestrator-test` Compose services build from
-# the repository root (services/orchestrator/Dockerfile COPYs
-# packages/agent-contracts and services/orchestrator explicitly). Every
-# other service (hermes-agent, slack-gateway, google-calendar-mcp) builds
-# from its own subdirectory context and is unaffected by this file.
+# The `orchestrator` / `orchestrator-test` and `slack-gateway` /
+# `slack-gateway-test` Compose services build from the repository root
+# (each Dockerfile COPYs packages/agent-contracts plus its own service
+# directory explicitly). The remaining services (hermes-agent,
+# google-calendar-mcp) build from their own subdirectory context and are
+# unaffected by this file.
 #
 # Every pattern below uses a **/ prefix, except .git/ (inherently root-only
 # -- this repo has no submodules). Unlike .gitignore, a bare `name` or

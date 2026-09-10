@@ -56,15 +56,24 @@ def trace_slack_request(
         yield span
 
 @contextmanager
-def trace_hermes_request() -> Iterator[Span]:
+def trace_orchestrator_request() -> Iterator[Span]:
+    """The CLIENT span around the outgoing `POST /dispatch` call.
+
+    Replaces this module's previous `hermes.request` span: the Slack
+    Gateway's downstream service is now the Orchestrator, and it is the
+    Orchestrator that emits its own `hermes.request` CLIENT span for the
+    Hermes hop (`orchestrator.telemetry`). Naming this span after the
+    service actually called keeps those two hops distinguishable in one
+    trace instead of collapsing them under a shared name.
+    """
     tracer = trace.get_tracer("slack_gateway")
 
     with tracer.start_as_current_span(
-        "hermes.request",
+        "orchestrator.dispatch",
         kind=SpanKind.CLIENT,
         attributes={
-            "concierge.downstream.service": "hermes-agent",
-            "concierge.operation": "create_response",
+            "concierge.downstream.service": "orchestrator",
+            "concierge.operation": "dispatch",
         },
         record_exception=False,
         set_status_on_exception=False,
@@ -74,7 +83,7 @@ def trace_hermes_request() -> Iterator[Span]:
         except RuntimeError:
             mark_span_error(
                 span,
-                error_type="hermes.request_error",
+                error_type="orchestrator.request_error",
             )
             raise
 

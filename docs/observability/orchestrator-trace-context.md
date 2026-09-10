@@ -15,23 +15,29 @@ cross-service picture and the one distinction that is easy to get wrong.
 ```text
 concierge.request                  Slack Gateway (CONSUMER)
   |
-  +-- hermes.request               Slack Gateway (CLIENT)   [today's path]
+  +-- orchestrator.dispatch        Slack Gateway (CLIENT)
   |     |
-  |     +-- /v1/responses          Hermes Agent (SERVER)
+  |     +-- POST /dispatch         Orchestrator (SERVER)
+  |           |
+  |           +-- hermes.request   Orchestrator (CLIENT)
+  |                 |
+  |                 +-- /v1/responses    Hermes Agent (SERVER)
+  |                       |
+  |                       X  tools/call  Google Calendar MCP -- NEW trace
   |
-  +-- POST /dispatch               Orchestrator (SERVER)    [the new path]
-        |
-        +-- hermes.request         Orchestrator (CLIENT)
-              |
-              +-- /v1/responses    Hermes Agent (SERVER)
-                    |
-                    X  tools/call  Google Calendar MCP -- starts a NEW trace
+  +-- slack.response               Slack Gateway (CLIENT)
 ```
 
-Both paths are real. The Slack Gateway still calls Hermes Agent directly;
-nothing calls the Orchestrator yet. The Orchestrator path is what a
-caller gets today by sending `POST /dispatch` itself, and is what the
-Slack Gateway will get when it is rewired — a separate change.
+There is one path now. The Slack Gateway dispatches through the
+Orchestrator (`docs/slack-gateway/orchestrator-dispatch.md`); its previous
+direct `hermes.request` CLIENT span, and the `HermesClient` that produced
+it, were removed rather than kept as a second route. `hermes.request`
+still appears in the trace — emitted by the Orchestrator for the hop it
+now owns.
+
+This chain is established by automated tests on both sides. It has **not**
+been observed end to end on the live stack from a real Slack message; see
+"Still not verified" below.
 
 The `X` is the known upstream gap: Hermes Agent's outbound MCP calls do
 not carry trace context, so a Calendar tool call starts an unrelated
@@ -47,7 +53,7 @@ and unchanged by anything here — see "Known gap" in
 | Carried in | the JSON request body | the `traceparent` / `tracestate` HTTP headers |
 | Format | any non-empty string; none enforced | W3C format, validated by OpenTelemetry's propagator |
 | Purpose | logical correlation, for log lines | parenting spans across services |
-| Who sets it | nobody in this repository yet | the Slack Gateway; any instrumented caller |
+| Who sets it | nobody in this repository — the Slack Gateway deliberately leaves it `null` | the Slack Gateway; any instrumented caller |
 
 The Orchestrator keeps them separate: it never builds an OpenTelemetry
 parent context out of `AgentRequest.trace_id`, never lets that field
@@ -269,19 +275,25 @@ with the transition following.
 imply a missing root span; other causes are not ruled out, and this
 experiment says nothing about them.
 
-So treat this as the first thing to check, not as a diagnosis. If
-`IN_PROGRESS` persists once the Slack Gateway is the caller, verify
-whether the caller's own root span reached the Collector — a missing root
-is one known sufficient cause of this state, not its only possible
+So treat this as the first thing to check, not as a diagnosis. The Slack
+Gateway is now the caller and does emit a root `concierge.request` span,
+so this particular cause should no longer apply to a Slack-originated
+trace — but that has not been confirmed live. If `IN_PROGRESS` persists,
+verify whether the caller's own root span reached the Collector; a missing
+root is one known sufficient cause of this state, not its only possible
 one.
 
 ### Still not verified
 
-- **The Slack Gateway as the caller.** It still calls Hermes Agent
-  directly (`apps/slack-gateway/src/slack_gateway/hermes_client.py`), so
-  nothing links `concierge.request` to `POST /dispatch` yet. A Slack
-  message produces the Milestone 5 trace, not this one. That link is the
-  next slice's to prove.
+- **The Slack Gateway as the caller, on the live stack.** The link from
+  `concierge.request` through `orchestrator.dispatch` to `POST /dispatch`
+  is implemented and covered by automated tests on both sides
+  (`apps/slack-gateway/tests`, `services/orchestrator/tests`), but no real
+  Slack message has been sent through it and no resulting trace has been
+  observed in Phoenix or MLflow. Implemented and automatically verified is
+  not live operationally verified; this one is still the latter's to
+  prove, and should be recorded with the same provenance as the manual run
+  above.
 - **The error paths, on the live stack.** Hermes returning a non-success
   status, an unreachable Hermes, and an unusable response body are all
   covered by automated tests, including the `error.type` values recorded

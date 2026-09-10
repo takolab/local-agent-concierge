@@ -2,8 +2,16 @@
 
 This document records how Hermes Agent joins the distributed trace that the
 Slack Gateway starts, and the investigation that led to the approach. It is
-the follow-up to the Slack Gateway's outgoing `traceparent` injection
-(`apps/slack-gateway/src/slack_gateway/hermes_client.py`).
+the follow-up to the Slack Gateway's outgoing `traceparent` injection,
+which at the time lived in that service's own direct Hermes client
+(`apps/slack-gateway/src/slack_gateway/hermes_client.py`, since removed).
+
+Nothing about Hermes' side changed when the Slack Gateway was rewired to
+dispatch through the Orchestrator: the `traceparent` Hermes extracts is now
+injected by `services/orchestrator/src/orchestrator/hermes_agent.py`, one
+hop further up the same trace, using the same standard propagator. See
+`docs/slack-gateway/orchestrator-dispatch.md` and
+`docs/observability/orchestrator-trace-context.md`.
 
 ## Background
 
@@ -111,6 +119,8 @@ restart-with-prior-state path directly.
 
 ## Verified trace relationship
 
+As verified at the time, with the Slack Gateway calling Hermes directly:
+
 ```text
 concierge.request                (Slack Gateway)
   |
@@ -118,6 +128,10 @@ concierge.request                (Slack Gateway)
         |
         +-- /v1/responses         (Hermes Agent, SERVER span, extracted from traceparent)
 ```
+
+The injecting span is now the Orchestrator's `hermes.request`, one hop
+further down (`Slack Gateway → Orchestrator → Hermes Agent`). Hermes'
+extraction side — everything this document is about — is unchanged.
 
 The incoming trace ID is inherited exactly; the incoming parent span ID
 becomes the parent of Hermes' server span. Hermes never generates its own

@@ -2,7 +2,11 @@
 
 Implements orchestrator.agent.Agent by calling Hermes Agent's existing
 `/v1/responses` HTTP API -- the same API apps/slack-gateway's HermesClient
-(src/slack_gateway/hermes_client.py) already calls. This is the second
+(src/slack_gateway/hermes_client.py) used to call directly. That client
+has since been removed: the Slack Gateway now dispatches through this
+service instead, making this adapter the only caller of Hermes Agent and
+the only holder of its credential (see
+docs/slack-gateway/orchestrator-dispatch.md). This is the second
 registered Agent, alongside the synthetic orchestrator.dev_agents.EchoAgent
 ("dev-echo"); registering it does not remove or change EchoAgent.
 
@@ -174,9 +178,11 @@ class HermesAgent:
 
 
 def _extract_output_text(payload: dict[str, Any]) -> str:
-    """Extract Hermes' output text -- ported from HermesClient's own logic
-    (apps/slack-gateway/src/slack_gateway/hermes_client.py) since the two
-    services share no common package to import it from.
+    """Extract Hermes' output text -- ported from the extraction logic that
+    lived in apps/slack-gateway's HermesClient
+    (src/slack_gateway/hermes_client.py, since removed) because the two
+    services shared no common package to import it from. It is now the
+    only copy.
     """
     direct_output = payload.get("output_text")
 

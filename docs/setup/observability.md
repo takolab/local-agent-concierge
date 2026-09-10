@@ -39,13 +39,17 @@ The current observability infrastructure includes:
   depth behind application-side sanitization), see
   `docs/observability/collector-redaction.md`
 
-The Slack Gateway's outgoing request to Hermes Agent injects a W3C Trace
-Context `traceparent` header using the OpenTelemetry API's global propagator,
-so the request carries the `hermes.request` span's trace ID and span ID.
-Hermes Agent extracts this header (via OpenTelemetry auto-instrumentation
-layered on the unmodified official image, see
+Every outgoing request on the Slack path injects a W3C Trace Context
+`traceparent` header using the OpenTelemetry API's global propagator: the
+Slack Gateway's `orchestrator.dispatch` span into its `POST /dispatch`
+request, and the Orchestrator's `hermes.request` span into its Hermes Agent
+request (`docs/slack-gateway/orchestrator-dispatch.md`,
+`docs/observability/orchestrator-trace-context.md`). Hermes Agent extracts
+that header (via OpenTelemetry auto-instrumentation layered on the
+unmodified official image, see
 `docs/observability/hermes-trace-context.md`) and creates a matching
-`SERVER` span, so the trace continues past that HTTP boundary.
+`SERVER` span, so the trace continues past every one of those HTTP
+boundaries.
 
 The Google Calendar MCP service exports its own OpenTelemetry traces to the
 Collector (`service.name = google-calendar-mcp`), using the `mcp` SDK's
