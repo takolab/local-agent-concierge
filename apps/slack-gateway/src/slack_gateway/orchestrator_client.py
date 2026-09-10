@@ -2,10 +2,17 @@
 
 This is the Slack Gateway's only outbound path to an Agent. It replaces
 the direct Hermes Agent client this package used to hold: the Gateway now
-hands a normalized `AgentRequest` to the Orchestrator, and the
-Orchestrator decides which Agent runs it.
+hands a normalized `AgentRequest` to the Orchestrator, which dispatches it
+through its registered Agent boundary.
 
     Slack Gateway -> POST /dispatch -> Orchestrator -> Hermes Agent
+
+**The Gateway still selects the Agent.** It passes the fixed
+`agent_name` `"hermes"` (see `HERMES_AGENT_NAME` below); the Orchestrator
+owns dispatch through the registered Agent boundary, but performs no
+request classification and no Agent selection. What moved to the
+Orchestrator is the dispatch, not the choice -- Milestone 7's "Move
+agent-selection responsibility out of the Slack Gateway" is still open.
 
 No new schema is introduced here. The request body is exactly the shape
 `services/orchestrator/src/orchestrator/http_server.py` already accepts --
@@ -59,10 +66,19 @@ from opentelemetry.propagate import inject
 # this client surfaces as a dispatch failure.
 HERMES_AGENT_NAME = "hermes"
 
-# Slightly longer than the Orchestrator's own 300s timeout on its Hermes
-# call (`DEFAULT_TIMEOUT_SECONDS` in orchestrator/hermes_agent.py), so a
-# slow model run ends as the Orchestrator's own deliberate failure
-# response rather than as a client-side timeout here that races it.
+# Set above the Orchestrator's own 300s timeout on its Hermes call
+# (`DEFAULT_TIMEOUT_SECONDS` in orchestrator/hermes_agent.py) so that, in
+# the ordinary case, the Gateway is still waiting when the Orchestrator
+# gives up and answers with its own deliberate failure response.
+#
+# That is best-effort ordering, NOT a guarantee, and must not be relied on
+# as one. httpx's single timeout value configures connect/read/write/pool
+# *inactivity* timeouts, not a total end-to-end request deadline -- and the
+# Orchestrator's own timeout is likewise socket-level, not a deadline. So
+# `330 > 300` does not establish that the Orchestrator always finishes
+# first. See `dispatch`'s note on what a timeout does and does not tell the
+# caller, and docs/slack-gateway/orchestrator-dispatch.md ("A failed
+# dispatch does not mean the work stopped").
 DEFAULT_TIMEOUT_SECONDS = 330.0
 
 
@@ -104,6 +120,22 @@ class OrchestratorClient:
         Gateway's message handler already caught around its previous
         outbound call, so the user-facing Slack behavior on failure is
         unchanged by the rewiring.
+
+        **A raised `RuntimeError` reports this client's outcome, not the
+        downstream one.** It does not establish that the Orchestrator
+        stopped, that the Agent stopped, or that no work was performed.
+        The timeout case is the clearest: the request may have been
+        delivered and still be running. `httpx.RequestError` covers
+        errors raised after the request was written, too, so only an
+        explicit error *status* from the Orchestrator is evidence about
+        what happened on the other side.
+
+        This is safe today because the only registered Agent on this path
+        generates text and performs no consequential side effect. It stops
+        being safe the moment an Agent can act on the world -- at which
+        point this boundary needs an explicit execution-deadline or
+        idempotency contract, which this slice deliberately does not
+        design. See docs/slack-gateway/orchestrator-dispatch.md.
         """
         trace_headers: dict[str, str] = {}
         inject(trace_headers)

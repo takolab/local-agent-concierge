@@ -245,6 +245,11 @@ def handle_slack_message(
             processing_message_ts,
         )
 
+        # The Agent is selected here, by this service, as a fixed name.
+        # The Orchestrator dispatches through its registered Agent
+        # boundary but performs no classification or selection, so this
+        # constant -- not the Orchestrator -- is what decides which Agent
+        # runs a Slack request today.
         try:
             with trace_orchestrator_request():
                 agent_response = orchestrator_client.dispatch(

@@ -298,9 +298,17 @@ def test_dispatch_maps_connection_failure_to_runtime_error() -> None:
 
 
 def test_dispatch_maps_timeout_to_a_distinct_runtime_error() -> None:
-    """A timeout is a materially different state from an unreachable
-    Orchestrator, so it gets its own bounded message rather than being
-    collapsed into the connection-failure one."""
+    """A timeout keeps its own bounded message rather than being collapsed
+    into the connection-failure one.
+
+    The two are materially different: a timeout leaves the downstream
+    completion state *unknown* -- the request may have been delivered and
+    may still be running -- while only an explicit error status from the
+    Orchestrator is evidence about what happened on the other side. The
+    client's timeout is a per-operation inactivity timeout, not an
+    end-to-end deadline, so nothing here may assume the Orchestrator
+    always answers first. See
+    docs/slack-gateway/orchestrator-dispatch.md."""
     client = _client_raising(
         httpx.ReadTimeout("synthetic timeout detail")
     )

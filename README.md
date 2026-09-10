@@ -115,7 +115,7 @@ Ollama
 Slack response
 ```
 
-Google Calendar read access is now implemented through a dedicated MCP service. The Slack Gateway now dispatches through the Orchestrator container (`Slack Gateway → POST /dispatch → Orchestrator → Hermes Agent`); the Orchestrator still routes to one explicitly named Agent, so automatic multi-agent routing and shared memory remain later milestones.
+Google Calendar read access is now implemented through a dedicated MCP service. The Slack Gateway now dispatches through the Orchestrator container (`Slack Gateway → POST /dispatch → Orchestrator → Hermes Agent`); the Gateway still names the target Agent itself, so automatic agent selection, multi-agent routing and shared memory remain later milestones.
 
 ## Security
 

@@ -806,6 +806,17 @@ Recorded as **partial**, not complete, because:
   Phoenix or MLflow.** That live validation is a separate gate — see
   Milestone 9 below.
 
+**Prerequisite this creates for Milestone 6.** Neither side of the new
+boundary has an execution deadline: both timeouts are socket-level
+inactivity timeouts, so a Slack Gateway timeout leaves the downstream
+completion state *unknown* rather than proving the work stopped. That is
+acceptable while the only reachable Agent generates text, but a Gateway
+timeout followed by a user retry becomes an ambiguous or duplicated
+outcome as soon as an Agent can act on the world. An explicit
+execution-deadline or idempotency contract at the Orchestrator boundary is
+therefore a prerequisite for "Add human approval for sensitive actions"
+and for any write-capable Agent — it is recorded here, not designed.
+
 See `docs/slack-gateway/orchestrator-dispatch.md`.
 
 ## Milestone 8: Containerized Shared Memory

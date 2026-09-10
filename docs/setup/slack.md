@@ -48,7 +48,7 @@ The Slack Gateway is intentionally limited to Slack-specific responsibilities:
 * Display a user-friendly error when the request cannot be completed.
 * Prevent duplicate processing of the same Slack event.
 
-The Gateway does not choose which Agent handles a request beyond naming the one Agent that exists today (`"hermes"`), and it holds no Hermes credential — the Orchestrator owns that hop.
+The Gateway currently selects the fixed `"hermes"` agent and sends it as the `agent_name`; the Orchestrator owns dispatch through its registered Agent boundary, but does not yet classify requests or select Agents. The Gateway holds no Hermes credential — the Orchestrator owns that hop.
 
 The Slack Gateway does not contain agent reasoning, model logic, or business-specific tool behavior.
 

@@ -1,8 +1,12 @@
 # Slack Gateway → Orchestrator Dispatch
 
 The Slack Gateway no longer calls Hermes Agent. It dispatches through the
-Orchestrator's existing `POST /dispatch` boundary, and the Orchestrator
-decides which Agent runs the request.
+Orchestrator's existing `POST /dispatch` boundary, which runs the request
+through the Orchestrator's registered Agent boundary.
+
+**The Gateway still selects the Agent.** It sends the fixed `agent_name`
+`"hermes"`. The Orchestrator owns dispatch; it does not yet classify
+requests or select Agents. What moved is the dispatch, not the choice.
 
 ```text
 Before                          After
@@ -171,11 +175,45 @@ carries the underlying exception, the response body, or the instruction
 text.
 
 Timeout is deliberately its own case rather than part of the
-connection-failure one: they are materially different states, and the
-client's own timeout (330s) is set slightly longer than the Orchestrator's
-timeout on its Hermes call (300s) so a slow model run ends as the
-Orchestrator's deliberate failure response rather than as a client-side
-timeout racing it.
+connection-failure one: they are materially different states, and only one
+of them says anything about what the Orchestrator did.
+
+### A failed dispatch does not mean the work stopped
+
+The client timeout (330s) is set above the Orchestrator's own timeout on
+its Hermes call (300s) so that, in the ordinary case, the Gateway is still
+waiting when the Orchestrator gives up and answers. **That is best-effort
+ordering, not a guarantee, and nothing should be built on it as one.**
+
+`httpx.Client(timeout=...)`'s single value configures connect / read /
+write / pool *inactivity* timeouts — not a total end-to-end request
+deadline — and the Orchestrator's own `urllib` timeout is socket-level in
+the same way. Neither side has an execution deadline, so `330 > 300` does
+not establish that the Orchestrator always finishes first.
+
+What that means for the table above:
+
+| Outcome | What it tells the caller |
+|---|---|
+| An error *status* from the Orchestrator (`4xx`/`5xx`) | The Orchestrator was reached and reported this deliberately. Evidence about the downstream state. |
+| `Orchestrator request timed out` | **Unknown completion state.** The request may have been delivered and may still be running. |
+| `Failed to connect to the Orchestrator` | Usually never delivered — but `httpx.RequestError` also covers errors raised after the request was written, so this is not proof of non-delivery either. |
+| Unusable response body | The Orchestrator answered; the dispatch itself completed. |
+
+This is acceptable **only** because of what is on the other side today:
+the single registered Agent on this path generates text and performs no
+consequential side effect, so a Gateway-side timeout can at worst waste a
+model run. The user-facing error invites a retry, which today can only
+produce another text response.
+
+It stops being acceptable the moment an Agent can act on the world — a
+calendar write, an email, a purchase. At that point a Gateway timeout
+followed by a user retry becomes an ambiguous or duplicated outcome, and
+this boundary needs an explicit execution-deadline or idempotency contract
+before that Agent exists. Designing one would mean changing the
+Orchestrator's API, which is out of scope for this slice; it is recorded
+here and in "What this does not do" as a prerequisite rather than
+resolved.
 
 ## Credentials
 
@@ -292,3 +330,8 @@ repository SHA and image digests.
   `AgentRequest` / `AgentResponse`, the Orchestrator, or Hermes Agent.
 - **No retry, fallback, or circuit breaking.** One request, one
   Orchestrator, one failure message.
+- **No execution-deadline or idempotency contract.** A failed dispatch
+  reports this client's outcome, not the downstream one — see "A failed
+  dispatch does not mean the work stopped" above. This must be resolved
+  before any Agent reachable through this path can perform a consequential
+  side effect.
