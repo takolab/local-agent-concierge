@@ -388,43 +388,87 @@ def command_trace(args: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
+class Unresolved(NamedTuple):
+    name: str
+    reason: str
+
+
 def resolve_env_needles(
     names: Iterable[str],
     environ: dict[str, str],
     env_file_text: str | None = None,
-) -> tuple[dict[str, str], list[str]]:
-    """Resolve `--env NAME` values, returning (resolved, unresolved names).
+    service_values: dict[str, str] | None = None,
+) -> tuple[dict[str, str], list[Unresolved]]:
+    """Resolve `--env NAME` values, returning (resolved, unresolved).
 
-    Looks in the process environment first, then in an optional env-file's
-    `NAME=value` lines. Unresolved names are *returned*, not skipped: the
-    caller must fail on them. An explicitly requested sentinel that was
-    never checked is an incomplete check, and reporting it as a clean run
-    would be a false PASS -- see `command_scan`.
+    Resolution order, most authoritative first:
+
+    1. `service_values` -- read out of a **running container's** own
+       environment, i.e. the value Docker Compose actually injected. This
+       is ground truth and needs no dotenv interpretation at all.
+    2. the process environment.
+    3. an env-file, parsed by `parse_env_file` -- which refuses any value
+       whose Compose semantics this tool cannot reproduce.
+
+    Unresolved names are *returned* with a reason, never skipped. The
+    caller must fail on them: a sentinel that was not checked cannot
+    support "every sensitive sentinel reports absent", and reporting it as
+    a clean run would be a false PASS. See `command_scan`.
     """
-    file_values = parse_env_file(env_file_text) if env_file_text else {}
+    file_values, rejected = (
+        parse_env_file(env_file_text) if env_file_text else ({}, {})
+    )
+    service_values = service_values or {}
 
     resolved: dict[str, str] = {}
-    unresolved: list[str] = []
+    unresolved: list[Unresolved] = []
 
     for name in names:
-        value = environ.get(name) or file_values.get(name)
+        value = (
+            service_values.get(name) or environ.get(name) or file_values.get(name)
+        )
         if value:
             resolved[name] = value
+        elif name in rejected:
+            unresolved.append(Unresolved(name, rejected[name]))
         else:
-            unresolved.append(name)
+            unresolved.append(Unresolved(name, "not found"))
 
     return resolved, unresolved
 
 
-def parse_env_file(text: str) -> dict[str, str]:
-    """Read `NAME=value` lines from a dotenv-style file.
+# dotenv constructs whose Compose semantics this tool does not reproduce.
+# A value containing any of them is REJECTED rather than parsed, because
+# parsing it would scan a string that is not what the container received:
+# `KEY=${BASE}` reads back as the literal "${BASE}" here while Compose
+# injects the expansion, so a leak of the real value would scan as absent.
+#
+# Rejected, not "best effort": the failure mode of guessing is a clean
+# report on an unchecked credential, which is exactly what this tool exists
+# to prevent.
+_UNSUPPORTED_VALUE_MARKERS = (
+    ("$", "interpolation (${...} or $NAME) -- Compose expands this, this tool does not"),
+    ("\\", "backslash escape -- Compose's unescaping is not reproduced here"),
+    ("#", "possible inline comment -- Compose may strip it, this tool does not"),
+    ("`", "command substitution syntax"),
+)
 
-    Deliberately minimal -- no interpolation, no `export` prefixes, no
-    quote stripping beyond a single surrounding pair. Anything this cannot
-    parse surfaces as an unresolved name and therefore as a failure, rather
-    than as a silently skipped sentinel.
+
+def parse_env_file(text: str) -> tuple[dict[str, str], dict[str, str]]:
+    """Read `NAME=value` lines, returning (usable values, rejected reasons).
+
+    A value is usable only when this tool can prove it interprets the line
+    the same way Docker Compose does: a plain literal, optionally wrapped
+    in one matching pair of quotes, containing none of
+    `_UNSUPPORTED_VALUE_MARKERS`. Everything else is reported as rejected,
+    with a reason that never quotes the value.
+
+    An `export ` prefix is rejected for the same reason -- Compose accepts
+    it, so silently treating the name as "export FOO" would make a real
+    sentinel look absent.
     """
     values: dict[str, str] = {}
+    rejected: dict[str, str] = {}
 
     for raw in text.splitlines():
         line = raw.strip()
@@ -435,12 +479,66 @@ def parse_env_file(text: str) -> dict[str, str]:
         if not separator:
             continue
 
-        value = value.strip()
-        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-            value = value[1:-1]
+        name = name.strip()
 
-        if value:
-            values[name.strip()] = value
+        if name.startswith("export ") or " " in name:
+            rejected[name.removeprefix("export ").strip()] = (
+                "`export` prefix or whitespace in the name is not interpreted here"
+            )
+            continue
+
+        value = value.strip()
+
+        quoted = (
+            len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'"
+        )
+        inner = value[1:-1] if quoted else value
+
+        marker_reason = next(
+            (
+                reason
+                for marker, reason in _UNSUPPORTED_VALUE_MARKERS
+                if marker in inner
+            ),
+            None,
+        )
+
+        if marker_reason is not None:
+            rejected[name] = marker_reason
+            continue
+
+        if inner:
+            values[name] = inner
+
+    return values, rejected
+
+
+def service_environment(service: str) -> dict[str, str]:
+    """Read a running Compose service's actual environment.
+
+    This is the ground truth for "what did Docker Compose inject": the
+    container's own `Config.Env`, after all dotenv interpolation Compose
+    performed. Nothing is printed -- the values are returned for use as
+    scan needles only.
+
+    Returns an empty mapping when the service is not running, which
+    surfaces as an unresolved sentinel and therefore as a failed run.
+    """
+    container = _run(["docker", "compose", "ps", "-q", service])
+    if not container or container.startswith("<"):
+        return {}
+
+    listing = _run(
+        ["docker", "inspect", container, "--format", "{{range .Config.Env}}{{println .}}{{end}}"]
+    )
+    if listing.startswith("<"):
+        return {}
+
+    values: dict[str, str] = {}
+    for line in listing.splitlines():
+        name, separator, value = line.partition("=")
+        if separator and value:
+            values[name] = value
 
     return values
 
@@ -457,7 +555,10 @@ def command_scan(args: argparse.Namespace) -> int:
         env_file_text = Path(args.env_file).read_text()
 
     resolved, unresolved = resolve_env_needles(
-        args.env or [], dict(os.environ), env_file_text
+        args.env or [],
+        dict(os.environ),
+        env_file_text,
+        service_environment(args.env_from_service) if args.env_from_service else None,
     )
     needles.update(resolved)
 
@@ -467,17 +568,15 @@ def command_scan(args: argparse.Namespace) -> int:
         # the runbook's "every sensitive sentinel reports absent" criterion
         # no matter what the other needles report.
         print("INCOMPLETE -- these requested sentinels could not be resolved:")
-        for name in unresolved:
-            print(f"  {name}")
+        for entry in unresolved:
+            print(f"  {entry.name:<32} {entry.reason}")
         print()
         print(
-            "They are not in this process's environment"
-            + (" or in the given --env-file." if args.env_file else ".")
-        )
-        print(
-            "Docker Compose reads .env itself; a host-side python3 process "
-            "does not.\nPass --env-file .env (values are never printed), or "
-            "put the value in the\nneedles file. Nothing was checked."
+            "The authoritative source is the running container's own "
+            "environment, which is\nthe value Docker Compose actually "
+            "injected after any interpolation:\n\n"
+            "  --env-from-service orchestrator --env HERMES_API_SERVER_KEY\n\n"
+            "Values are never printed. Nothing was checked."
         )
         return 2
 
@@ -547,10 +646,19 @@ def main(argv: list[str] | None = None) -> int:
         ),
     )
     scan.add_argument(
+        "--env-from-service",
+        help=(
+            "read --env names from this running Compose service's own "
+            "environment -- the value Docker Compose actually injected. "
+            "The authoritative source; prefer it over --env-file."
+        ),
+    )
+    scan.add_argument(
         "--env-file",
         help=(
-            "dotenv-style file to resolve --env names from when they are "
-            "not in the environment (e.g. .env). Values are never printed."
+            "dotenv-style file to fall back to (e.g. .env). Values whose "
+            "Compose semantics this tool cannot reproduce -- interpolation, "
+            "escapes, inline comments -- are rejected, not guessed at."
         ),
     )
     scan.set_defaults(func=command_scan)

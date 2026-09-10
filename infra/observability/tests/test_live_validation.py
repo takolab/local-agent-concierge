@@ -320,6 +320,20 @@ def test_env_needle_falls_back_to_the_env_file():
     assert unresolved == []
 
 
+def test_service_environment_outranks_the_env_file():
+    """The running container's own environment is the value Compose
+    actually injected, so it wins over any local file's idea of it."""
+    resolved, unresolved = lv.resolve_env_needles(
+        ["SYNTHETIC_KEY"],
+        {"SYNTHETIC_KEY": "from-process"},
+        "SYNTHETIC_KEY=from-file\n",
+        {"SYNTHETIC_KEY": SYNTHETIC_SECRET},
+    )
+
+    assert resolved == {"SYNTHETIC_KEY": SYNTHETIC_SECRET}
+    assert unresolved == []
+
+
 def test_unresolvable_env_needle_is_reported_not_skipped():
     """Regression for a false PASS: an explicitly requested sentinel that
     could not be resolved must reach the caller as unresolved, so the run
@@ -330,7 +344,133 @@ def test_unresolvable_env_needle_is_reported_not_skipped():
     )
 
     assert resolved == {}
-    assert unresolved == ["SYNTHETIC_KEY"]
+    assert [entry.name for entry in unresolved] == ["SYNTHETIC_KEY"]
+    assert unresolved[0].reason == "not found"
+
+
+# --- dotenv semantics this tool refuses to guess at ---------------------
+
+
+def test_interpolated_env_file_value_is_rejected_not_parsed():
+    """Regression for an evidence-integrity hole: Compose expands
+    `KEY=${BASE}` to BASE's value, while a literal parse reads back
+    "${BASE}". Scanning that literal would report the *real* credential as
+    absent even when it leaked."""
+    text = f"BASE_SECRET={SYNTHETIC_SECRET}\nSYNTHETIC_KEY=${{BASE_SECRET}}\n"
+
+    values, rejected = lv.parse_env_file(text)
+
+    assert "SYNTHETIC_KEY" not in values
+    assert "interpolation" in rejected["SYNTHETIC_KEY"]
+
+    resolved, unresolved = lv.resolve_env_needles(["SYNTHETIC_KEY"], {}, text)
+
+    assert resolved == {}
+    assert [entry.name for entry in unresolved] == ["SYNTHETIC_KEY"]
+
+
+def test_interpolated_env_file_cannot_produce_a_clean_scan(
+    monkeypatch, tmp_path, capsys
+):
+    """End-to-end: the real injected value leaks into telemetry, the
+    env-file defines the sentinel by interpolation. The tool must not
+    report a clean run by scanning the literal `${BASE_SECRET}`."""
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        f"BASE_SECRET={SYNTHETIC_SECRET}\nSYNTHETIC_KEY=${{BASE_SECRET}}\n"
+    )
+
+    def _must_not_be_called(trace_id):  # pragma: no cover - asserted below
+        raise AssertionError("Phoenix must not be queried on an incomplete check")
+
+    monkeypatch.setattr(lv, "_fetch_trace_payload", _must_not_be_called)
+    monkeypatch.delenv("SYNTHETIC_KEY", raising=False)
+
+    exit_code = lv.main(
+        [
+            "scan",
+            "synthetic-trace-id",
+            "--env",
+            "SYNTHETIC_KEY",
+            "--env-file",
+            str(env_file),
+        ]
+    )
+
+    assert exit_code != 0
+
+    output = capsys.readouterr().out
+    assert "INCOMPLETE" in output
+    assert "interpolation" in output
+    assert SYNTHETIC_SECRET not in output
+
+
+@pytest.mark.parametrize(
+    ("line", "expected_reason_fragment"),
+    [
+        ("SYNTHETIC_KEY=$OTHER", "interpolation"),
+        ("SYNTHETIC_KEY=value # trailing", "inline comment"),
+        ("SYNTHETIC_KEY=a\\nb", "backslash"),
+        ("SYNTHETIC_KEY=`whoami`", "command substitution"),
+        ('SYNTHETIC_KEY="${OTHER}"', "interpolation"),
+        ("export SYNTHETIC_KEY=value", "export"),
+    ],
+    ids=[
+        "bare_interpolation",
+        "inline_comment",
+        "backslash_escape",
+        "command_substitution",
+        "quoted_interpolation",
+        "export_prefix",
+    ],
+)
+def test_unreproducible_dotenv_syntax_is_rejected(line, expected_reason_fragment):
+    """Each of these means Compose would inject something other than what a
+    literal parse reads back. Rejecting is fail-closed; guessing would
+    produce a clean report on an unchecked credential."""
+    values, rejected = lv.parse_env_file(line + "\n")
+
+    assert "SYNTHETIC_KEY" not in values
+    assert expected_reason_fragment in rejected["SYNTHETIC_KEY"]
+
+
+def test_rejection_reasons_never_quote_the_value():
+    values, rejected = lv.parse_env_file(
+        f"SYNTHETIC_KEY={SYNTHETIC_SECRET} # comment\n"
+    )
+
+    assert SYNTHETIC_SECRET not in str(rejected)
+    assert SYNTHETIC_SECRET not in str(values)
+
+
+def test_service_environment_reads_the_injected_values(monkeypatch):
+    """Ground truth: whatever the container's own Config.Env holds."""
+    monkeypatch.setattr(
+        lv,
+        "_run",
+        lambda command: (
+            "container-id"
+            if command[:3] == ["docker", "compose", "ps"]
+            else f"PATH=/usr/bin\nSYNTHETIC_KEY={SYNTHETIC_SECRET}\nEMPTY="
+        ),
+    )
+
+    values = lv.service_environment("orchestrator")
+
+    assert values["SYNTHETIC_KEY"] == SYNTHETIC_SECRET
+    assert "EMPTY" not in values
+
+
+@pytest.mark.parametrize(
+    "ps_output", ["", "<unavailable>"], ids=["not_running", "command_failed"]
+)
+def test_service_environment_fails_closed(monkeypatch, ps_output):
+    """A service that cannot be inspected yields no values, which surfaces
+    as an unresolved sentinel and therefore as a failed run -- never as a
+    silently skipped check."""
+    monkeypatch.setattr(lv, "_run", lambda command: ps_output)
+
+    assert lv.service_environment("orchestrator") == {}
 
 
 def test_scan_command_fails_when_a_requested_env_needle_is_missing(
@@ -417,11 +557,12 @@ def test_scan_command_fails_when_a_needle_leaks(monkeypatch, tmp_path, capsys):
 
 
 def test_env_file_parsing_ignores_comments_and_strips_one_quote_pair():
-    values = lv.parse_env_file(
+    values, rejected = lv.parse_env_file(
         '# comment\n\nA=1\nB="quoted"\nC=\nNO_SEPARATOR\n'
     )
 
     assert values == {"A": "1", "B": "quoted"}
+    assert rejected == {}
 
 
 # --- surface -----------------------------------------------------------

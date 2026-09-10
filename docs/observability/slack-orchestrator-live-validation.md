@@ -355,7 +355,8 @@ Check them:
 
 ```bash
 python3 infra/observability/live_validation.py scan <TRACE_ID> \
-  --needles-file <path> --env HERMES_API_SERVER_KEY --env-file .env
+  --needles-file <path> \
+  --env HERMES_API_SERVER_KEY --env-from-service orchestrator
 ```
 
 **The tool never prints a value** — only `absent` / `LEAKED` per label — so
@@ -363,15 +364,31 @@ a real credential and real Slack identifiers can be checked without being
 echoed into a terminal, a CI log, or a pasted evidence record. Keep the
 needles file outside the repository.
 
-`--env-file .env` is required for the credential here, and is the supported
-way to supply it: **Docker Compose reads `.env` itself, but a host-side
-`python3` process does not**, so `--env HERMES_API_SERVER_KEY` alone finds
-nothing on most machines. A requested sentinel that cannot be resolved is
-a hard failure (`INCOMPLETE`, exit `2`, Phoenix not even queried) rather
-than a warning — an unchecked sentinel must never be able to look like a
-clean run. The alternative is to put the value in the needles file
-instead; do not `export` it into your shell, where it reaches shell
-history and every child process.
+`--env-from-service orchestrator` is how the credential is supplied, and
+it matters *which* source is used. **Docker Compose reads `.env` itself,
+but a host-side `python3` process does not**, so `--env
+HERMES_API_SERVER_KEY` alone finds nothing on most machines.
+
+`--env-from-service` reads the value out of the **running container's own
+environment** — what Compose actually injected, after any interpolation it
+performed. That is the ground truth for "the credential this stack is
+using", and it needs no dotenv interpretation at all. The Orchestrator is
+the right service to read it from: since #43 it is the only one holding
+the Hermes credential.
+
+A `--env-file` fallback exists, but it is deliberately **fail-closed**: any
+value whose Compose semantics this tool cannot reproduce — `${...}`
+interpolation, `$NAME`, backslash escapes, inline comments, an `export`
+prefix — is *rejected*, not parsed. Parsing `KEY=${BASE}` literally would
+scan the string `"${BASE}"` while the container holds the expansion, so a
+leak of the real credential would report `absent`. A tool that can pass
+while checking the wrong value is worse than one that refuses.
+
+Either way, a requested sentinel that cannot be resolved is a hard failure
+(`INCOMPLETE`, exit `2`, Phoenix not even queried) — an unchecked sentinel
+must never be able to look like a clean run. Do not `export` the value into
+your shell as a workaround; that puts it in shell history and every child
+process.
 
 Cover at least: the Slack event id (`task_id`), user id, channel id,
 workspace id, the `conversation_id` string, the message timestamp, the
@@ -593,7 +610,9 @@ Observed spans:          6, all sharing that one trace ID:
                                  hermes.request     12.92s
                                    /v1/responses    12.90s
                              slack.response          0.49s
-Expected parent-child relationships:      PASS — all four links correct
+Expected parent-child relationships:      PASS — all five expected
+                                          relationships correct, including
+                                          concierge.request → slack.response
 Gateway → Orchestrator confirmed:         YES — `orchestrator.dispatch`
                                           exists (0 occurrences before this
                                           run) and `POST /dispatch` is its
