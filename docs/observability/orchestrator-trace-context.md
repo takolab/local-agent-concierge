@@ -131,6 +131,31 @@ Run on 2026-09-10 against the real stack — the actual `orchestrator`,
 requests with `agent_name: "hermes"`, differing only in whether they
 carried an incoming `traceparent`.
 
+#### Exact state this evidence came from
+
+"The real stack" is not self-identifying: `orchestrator` and
+`hermes-agent` are built from the worktree, and `otel-collector` and
+`ollama` track floating `:latest` tags. So the run is pinned to this:
+
+```text
+repository   4f79828  (master, clean worktree)
+orchestrator     image sha256:f021e28af4b6c2eda0ab29113c152336a81fa1cdfdb03151ff350fbdc397a739
+hermes-agent     image sha256:470aa3b68074d9d752ff2d9d83f0110161e62cb60d62d09eb74347fd01b449ac
+otel-collector   otel/opentelemetry-collector-contrib@sha256:1f2c54a30e713fac6b3ae77a1ec84010c2007e29ced8ec666214fc2f6739c1cc
+ollama           ollama/ollama@sha256:4dea9fb511947e24a84237bb636b0203abcb2ff0d3fbc7b4ff865deb91362131
+```
+
+The `orchestrator` image was built from `214ea00`, whose tree is
+byte-identical to `4f79828` (`git diff 214ea00 4f79828` is empty), so the
+image and the recorded repository SHA describe the same code. Every
+container above reported `RestartCount=0` and a start time before the
+run, so these are the processes that actually served it — not a later
+replacement.
+
+Without this block the section would record *when* something was
+verified but not *what*: a future reader could not reconstruct which code
+and which images produced the evidence below.
+
 **With an incoming `traceparent`.** Sent
 `00-7075ec6bb22fa7f31f5840bceaa7850f-40d6e99612795bc1-01`; HTTP 200 in
 9.4s with the model's real answer. Phoenix's span API
@@ -171,10 +196,32 @@ No span carried `redaction.masked.count`, only `redaction.ignored.count`
 — nothing was flagged sensitive by the Collector because nothing
 sensitive was sent.
 
-**Redaction, checked with sentinels.** The instruction text, the model's
-response text, `user_id`, `conversation_id`, and any `Bearer` /
-`Authorization` string were each searched for across both Phoenix's
-stored spans and the Collector's debug output: **zero occurrences**.
+**Redaction, checked with sentinels.** Each of these exact strings was
+searched for across both Phoenix's stored spans for the two trace ids and
+the Collector's full debug output — **zero occurrences** for every one:
+
+```text
+task_id           e2e-verify-1, e2e-verify-2
+user_id           e2e-user, e2e-user2
+conversation_id   e2e-verify, e2e-verify-2
+JSON trace_id     json-side-correlation-id
+instruction text  "Reply with exactly", and the per-request sentinel
+model response    the same per-request sentinel, echoed back
+credential        Bearer
+```
+
+Separately, all 6 spans across the two traces were walked attribute by
+attribute — keys *and* values — against `auth`, `bearer`, `token`,
+`secret`, `key`, and the sentinel strings. Nothing matched.
+
+One honest caveat, because a naive grep suggests otherwise: the string
+`authorization` does occur twice in the Collector's log, but on neither
+of these traces. Both hits are synthetic probe spans emitted by
+`infra/observability/tests/test_redaction.py`
+(`operation.name: synthetic-operation`), and in both the value is already
+masked to `****` by the Collector's redaction processor. No span produced
+by the Orchestrator or Hermes Agent carries an `authorization` key at
+all.
 
 The request also carried a deliberately mismatched JSON
 `"trace_id": "json-side-correlation-id"`. It appears nowhere in the
@@ -187,20 +234,38 @@ Incidentally, `/v1/responses` carries
 Orchestrator rather than the Slack Gateway (which uses `httpx`) — useful
 when telling the two paths apart in a backend.
 
-### MLflow shows `IN_PROGRESS` for a synthetic parent — expected
+### MLflow shows `IN_PROGRESS` until the root span arrives
 
 The first request's trace sat at `state: IN_PROGRESS` in MLflow while the
-second showed `state: OK`. This is not a defect and not something to fix:
-the first request's `traceparent` named a parent span that does not
-exist, because the "caller" was a hand-written header rather than a real
-instrumented service, so MLflow waits for a root span that will never
-arrive. The second request sent no `traceparent`, making the
-Orchestrator's own SERVER span the root, and MLflow settled immediately.
+second showed `state: OK`. That pairing is only *consistent with* a
+missing root span being the cause, so it was isolated directly rather
+than inferred, on a third trace
+(`353caf00ceb3c9bec7a953f6ae645385`):
 
-Confirmed by running exactly that second request rather than assuming.
-Worth knowing before wiring the Slack Gateway: with a real caller the
-root span does exist, so this should not appear — if it does, the caller's
-own span is not reaching the Collector, which is a different problem.
+1. `POST /dispatch` was sent with
+   `traceparent: 00-353caf…-0330406cb8ca6bed-01`, naming a parent span
+   that had never been exported. Phoenix showed the expected three spans,
+   with `POST /dispatch`'s parent id matching nothing in the trace.
+   MLflow: **`IN_PROGRESS`**.
+2. Nothing else was changed. A single span was then exported to the same
+   Collector with that exact trace id and span id — `353caf…` /
+   `0330406cb8ca6bed` — and no parent of its own: precisely the root that
+   had been missing. (Reproducible with a `TracerProvider` given an
+   `IdGenerator` that returns those two fixed ids, run from inside the
+   `orchestrator` container so it reaches the Collector on the compose
+   network.)
+3. Phoenix then showed four spans with `POST /dispatch` re-parented onto
+   it, and the same MLflow trace moved to **`OK`**.
+
+The arrival of the missing root is therefore the cause, not merely a
+correlate: it was the only variable changed, on an already-`IN_PROGRESS`
+trace, and the transition followed.
+
+This matters before wiring the Slack Gateway. There, the caller's own
+root span is real and exported, so `IN_PROGRESS` should not persist — and
+if it does, this experiment is what licenses reading it as "the caller's
+span is not reaching the Collector" rather than as a benign artifact of
+how the trace was constructed.
 
 ### Still not verified
 

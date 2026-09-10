@@ -1035,10 +1035,12 @@ no Hermes Agent, no Ollama and no Collector. It was additionally
 confirmed against the real stack after this slice merged: a real
 `POST /dispatch` to `agent_name: "hermes"` produced the full
 `POST /dispatch` -> `hermes.request` -> `/v1/responses` chain as one
-trace in both Phoenix and MLflow, with no instruction text, response
-text, identifier or credential reaching either backend. The evidence,
-and the list of what is still unverified (the Slack Gateway as caller,
-and the error paths), is in
+trace in both Phoenix and MLflow, with no instruction text, model
+response text, `task_id`, `user_id`, `conversation_id`, JSON `trace_id`
+or bearer credential reaching either backend. The evidence — pinned to
+the repository SHA and image digests it came from — and the list of what
+is still unverified (the Slack Gateway as caller, and the error paths),
+is in
 `docs/observability/orchestrator-trace-context.md`, "End-to-end
 verification (manual)".
 

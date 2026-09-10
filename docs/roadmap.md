@@ -880,8 +880,10 @@ only the two HTTP boundaries:
   real `POST /dispatch` to `agent_name: "hermes"` produced one joined
   trace in both Phoenix and MLflow —
   `POST /dispatch` -> `hermes.request` -> Hermes Agent's `/v1/responses`
-  — with parent/child ids matching and no instruction text, response
-  text, identifier or credential reaching either backend. See
+  — with parent/child ids matching, and with no instruction text, model
+  response text, `task_id`, `user_id`, `conversation_id`, JSON `trace_id`
+  or bearer credential reaching either backend. The run is pinned to the
+  repository SHA and the four image digests that produced it. See
   `docs/observability/orchestrator-trace-context.md`, "End-to-end
   verification (manual)".
 * Still unverified: the **Slack Gateway as the caller**. It calls Hermes
