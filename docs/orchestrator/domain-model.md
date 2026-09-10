@@ -54,9 +54,24 @@ registry, HTTP status codes, response bodies, `AgentRequest` /
 `AgentResponse` handling, and correlation logging are all unchanged. See
 "Trace Context Propagation (Slice 5)" below.
 
-None of these five slices implement request classification, automatic
-agent selection, Slack Gateway integration, or any of the other
-Milestone 7 tasks — see "Deliberately not implemented yet" below and
+**Slice 6** is the first change *outside* this service: the Slack Gateway
+now dispatches through `POST /dispatch` instead of calling Hermes Agent
+directly. Nothing in `services/orchestrator` changed for it — the Gateway
+was written to the boundary Slices 2-5 already established — so this
+document's own subject matter is unchanged; what changed is that the
+Orchestrator finally has a real caller. Two consequences are worth
+recording here: the historical references below to
+`apps/slack-gateway/src/slack_gateway/hermes_client.py` describe a file
+Slice 6 **deleted** (its `HermesClient` was the Gateway's direct Hermes
+path, and keeping it would have left two dispatch authorities over one
+path), and `HermesAgent` is now the only holder of the Hermes credential
+in the running stack. The Gateway side is documented in
+`docs/slack-gateway/orchestrator-dispatch.md`.
+
+None of these six slices implement request classification or automatic
+agent selection — the Slack Gateway names `"hermes"` explicitly, so
+Milestone 7's "Move agent-selection responsibility out of the Slack
+Gateway" remains open. See "Deliberately not implemented yet" below and
 `docs/roadmap.md` Milestone 7 for what comes next.
 
 ## Where this lives, and why
@@ -461,8 +476,12 @@ development.
   provisional, not a stable or versioned contract.
 - No authentication or authorization on the HTTP endpoint.
 - `AgentRequest.permissions` is not enforced anywhere in this path.
-- No connection to the Slack Gateway (as of Slice 3, `HermesAgent` does
-  connect to Hermes Agent — see "HermesAgent (Slice 3)" below).
+- ~~No connection to the Slack Gateway~~ — as of Slice 6 the Slack
+  Gateway is a real caller of `POST /dispatch` (see
+  `docs/slack-gateway/orchestrator-dispatch.md`); as of Slice 3,
+  `HermesAgent` connects to Hermes Agent (see "HermesAgent (Slice 3)"
+  below). What is still absent is any *selection* logic: the Gateway
+  supplies `agent_name` explicitly, exactly like any other caller.
 - As of Slice 3, two Agents are registered — `dev-echo` (synthetic) and
   `hermes` (real) — both still hardcoded in `__main__.build_orchestrator()`;
   there is no production Agent registration mechanism (config file,
@@ -471,12 +490,14 @@ development.
   is still supplied explicitly by the caller, exactly as in Slice 1.
 - No trace context propagation into or out of the HTTP layer, including
   `HermesAgent`'s outgoing call to Hermes Agent.
-- `orchestrator`'s Docker Compose service is still not depended on by any
-  other service, and (at the Compose-topology level) does not `depends_on`
-  any other service either — but as of Slice 3 it does call another
-  service (Hermes Agent) at the application level, lazily, inside
-  `HermesAgent.handle()`. See "HermesAgent (Slice 3)" for why this is not
-  expressed as a Compose `depends_on`.
+- `orchestrator`'s Docker Compose service still does not `depends_on` any
+  other service (it calls Hermes Agent lazily, at the application level,
+  inside `HermesAgent.handle()` — see "HermesAgent (Slice 3)" for why that
+  is not expressed as a Compose `depends_on`). As of Slice 6 it *is*
+  depended on: `slack-gateway` now declares
+  `depends_on: orchestrator (condition: service_healthy)`, which is
+  affordable precisely because this service pulls nothing else in behind
+  it.
 
 ## HermesAgent (Slice 3)
 
@@ -1048,7 +1069,10 @@ verification (manual)".
 
 - It does not connect the Slack Gateway to the Orchestrator. That is
   still a separate change; this one removes the trace-regression reason
-  it was unsafe, not the rest of the work.
+  it was unsafe, not the rest of the work. *(Done in Slice 6 — see
+  `docs/slack-gateway/orchestrator-dispatch.md`. The Gateway's caller-side
+  trace context uses this same propagator-based mechanism, and its live
+  end-to-end verification is still outstanding.)*
 - It does not close Hermes Agent's known outbound-MCP propagation gap
   (`docs/observability/hermes-trace-context.md`, "Known gap"). A trace
   reaching Hermes still stops at Hermes' own MCP boundary, for reasons
@@ -1066,8 +1090,11 @@ Out of scope for Slice 2, per its stated boundaries and
 
 - MCP, or any transport beyond the minimal, provisional HTTP boundary
   described in "Runtime HTTP Boundary" above.
-- Transport authentication or authorization.
-- Slack Gateway integration.
+- Transport authentication or authorization — still absent, and now
+  reached by a real caller: as of Slice 6 the Slack Gateway calls
+  `POST /dispatch` with no credential, because the endpoint has none.
+- ~~Slack Gateway integration~~ — done in Slice 6, without changing
+  anything in this service.
 - Request classification.
 - Automatic agent selection.
 - Permission enforcement.

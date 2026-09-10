@@ -82,11 +82,16 @@ Domain models:
 * [Approvals](docs/approval/domain-model.md)
 * [Orchestrator](docs/orchestrator/domain-model.md)
 
+Runtime routing:
+
+* [Slack Gateway → Orchestrator dispatch](docs/slack-gateway/orchestrator-dispatch.md)
+
 Observability notes:
 
 * [Collector redaction](docs/observability/collector-redaction.md)
 * [Google Calendar MCP telemetry](docs/observability/google-calendar-mcp-telemetry.md)
 * [Hermes trace context](docs/observability/hermes-trace-context.md)
+* [Orchestrator trace context](docs/observability/orchestrator-trace-context.md)
 
 Development workflow:
 
@@ -110,7 +115,7 @@ Ollama
 Slack response
 ```
 
-Google Calendar read access is now implemented through a dedicated MCP service. Shared memory and multi-agent routing will be added in later milestones.
+Google Calendar read access is now implemented through a dedicated MCP service. The Slack Gateway now dispatches through the Orchestrator container (`Slack Gateway → POST /dispatch → Orchestrator → Hermes Agent`); the Gateway still names the target Agent itself, so automatic agent selection, multi-agent routing and shared memory remain later milestones.
 
 ## Security
 
@@ -146,6 +151,7 @@ local-agent-concierge/
 │   ├── delegated-development/
 │   ├── observability/
 │   ├── orchestrator/
+│   ├── slack-gateway/
 │   └── setup/
 ├── apps/
 │   ├── hermes-agent/

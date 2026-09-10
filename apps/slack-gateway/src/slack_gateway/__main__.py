@@ -18,8 +18,8 @@ def main() -> None:
 
     logger.info(
         "Starting Slack Gateway "
-        "(Hermes API: %s)",
-        settings.hermes_api_base_url,
+        "(Orchestrator: %s)",
+        settings.orchestrator_base_url,
     )
 
     run_socket_mode(settings)

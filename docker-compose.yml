@@ -74,21 +74,30 @@ services:
       - concierge-network
 
   slack-gateway:
+    # Repository-root build context, like `orchestrator` below: this image
+    # installs packages/agent-contracts before its own package. See
+    # apps/slack-gateway/Dockerfile.
     build:
-      context: ./apps/slack-gateway
+      context: .
+      dockerfile: apps/slack-gateway/Dockerfile
       target: runtime
 
     restart: unless-stopped
 
+    # The Orchestrator, not hermes-agent, is what this service now calls:
+    # it dispatches through `POST /dispatch`, and the Orchestrator owns the
+    # Hermes hop (including the Hermes credential). `service_healthy` is
+    # affordable here because `orchestrator` itself depends_on nothing --
+    # waiting for it does not pull the GPU-backed model stack into
+    # `docker compose up slack-gateway`.
     depends_on:
-      hermes-agent:
-        condition: service_started
+      orchestrator:
+        condition: service_healthy
 
     environment:
       SLACK_BOT_TOKEN: "${SLACK_BOT_TOKEN:?SLACK_BOT_TOKEN must be set in .env}"
       SLACK_APP_TOKEN: "${SLACK_APP_TOKEN:?SLACK_APP_TOKEN must be set in .env}"
-      HERMES_API_BASE_URL: "http://hermes-agent:8642"
-      HERMES_API_SERVER_KEY: "${HERMES_API_SERVER_KEY:?HERMES_API_SERVER_KEY must be set in .env}"
+      ORCHESTRATOR_BASE_URL: "http://orchestrator:8700"
       OTEL_EXPORTER_OTLP_ENDPOINT: "http://otel-collector:4317"
 
     networks:
@@ -99,7 +108,8 @@ services:
       - test
 
     build:
-      context: ./apps/slack-gateway
+      context: .
+      dockerfile: apps/slack-gateway/Dockerfile
       target: test
 
   google-calendar-mcp:

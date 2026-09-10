@@ -104,8 +104,9 @@ error.type = "tool_error"
 
 and no other attribute, event, or status description — matching the
 sanitized, low-cardinality classification style already used by
-`error.type = "hermes.request_error"` / `"slack.response_error"` in the
-Slack Gateway.
+`error.type = "orchestrator.request_error"` / `"slack.response_error"` in
+the Slack Gateway (`"hermes.request_error"` at the time of writing; the
+Gateway's downstream service is now the Orchestrator).
 
 ### Google Calendar API child span
 
@@ -241,7 +242,9 @@ Calendar MCP is confirmed working** — Hermes Agent's MCP client does send a
 However, this same verification also showed that chain does **not** extend
 back to the Slack-originated trace. The same request produced a *separate*
 Slack Gateway trace (`concierge.request` → `hermes.request` →
-`/v1/responses` on Hermes Agent → `slack.response`) with its own, different
+`/v1/responses` on Hermes Agent → `slack.response`, the shape at the time
+of that verification; the Gateway now reaches Hermes through the
+Orchestrator) with its own, different
 trace ID — Hermes Agent's `/v1/responses` `SERVER` span (which does inherit
 the Slack Gateway's trace, per `docs/observability/hermes-trace-context.md`)
 and its outgoing `MCP send tools/call ...` `CLIENT` span are both rooted

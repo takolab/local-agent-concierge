@@ -420,6 +420,18 @@ Phoenix          MLflow
 The Slack Gateway now exports backend-neutral OpenTelemetry traces to the
 shared OpenTelemetry Collector.
 
+> **Superseded shape (this section is kept as the Milestone 5 record).**
+> Everything below was verified live against the Slack Gateway's *direct*
+> Hermes Agent path. That path no longer exists: the Gateway now dispatches
+> through the Orchestrator, so its own outgoing CLIENT span is
+> `orchestrator.dispatch`, and `hermes.request` is emitted one hop further
+> down by the Orchestrator. The propagation *mechanism* described here —
+> `opentelemetry.propagate.inject` into the outgoing request, existing
+> headers preserved — is unchanged and still current. See Milestone 7's
+> "Slack Gateway → Orchestrator dispatch (partial)" below and
+> `docs/slack-gateway/orchestrator-dispatch.md`; the new shape has **not**
+> been verified live.
+
 The verified trace structure is:
 
 ```text
@@ -711,7 +723,7 @@ The Orchestrator will allow new agents and frameworks to be added without coupli
 * [ ] Create the `services/orchestrator` application
 * [x] Add a Dockerfile for the Orchestrator
 * [x] Add the Orchestrator service to `docker-compose.yml`
-* [ ] Move agent-selection responsibility out of the Slack Gateway
+* [ ] Move agent-selection responsibility out of the Slack Gateway — *partial: dispatch moved, selection did not; see below*
 * [ ] Implement agent registration
 * [ ] Implement request classification
 * [ ] Implement agent selection
@@ -720,7 +732,7 @@ The Orchestrator will allow new agents and frameworks to be added without coupli
 * [ ] Support task delegation
 * [ ] Support multiple-agent workflows
 * [ ] Combine results from multiple agents
-* [ ] Preserve trace and conversation identifiers
+* [ ] Preserve trace and conversation identifiers — *partial: Slack Gateway → Orchestrator; see below*
 * [ ] Add routing tests
 * [ ] Document the Agent contract
 
@@ -760,6 +772,71 @@ This milestone is complete when:
 3. The user does not need to select an agent manually.
 4. A custom Agent can be added without changing the Slack integration.
 5. Hermes Agent is treated as one Agent implementation rather than the entire system.
+
+### Slack Gateway → Orchestrator dispatch (partial)
+
+Criterion 1 is met as of the Slack Gateway dispatch rewiring: the Slack
+Gateway builds a canonical `AgentRequest` and sends it to the
+Orchestrator's existing `POST /dispatch`, which forwards it to Hermes
+Agent. The Gateway no longer calls Hermes Agent, no longer holds a Hermes
+credential, and has no fallback direct path.
+
+```text
+Slack Gateway -> POST /dispatch -> Orchestrator -> Hermes Agent
+```
+
+Recorded as **partial**, not complete, because:
+
+* Criterion 2 and 3 are not met. The Gateway still names one Agent
+  explicitly (`"hermes"`); the Orchestrator has no request classification
+  or automatic selection, so the *choice* of Agent has not moved out of
+  the Gateway — only the dispatch has. "Move agent-selection
+  responsibility out of the Slack Gateway" therefore stays unchecked.
+* Criterion 4 is not met: adding an Agent still means changing which name
+  the Slack Gateway sends.
+* "Preserve trace and conversation identifiers" is partial. The Slack
+  conversation identity crosses the new boundary unchanged (as
+  `AgentRequest.conversation_id`, byte-for-byte the string Hermes
+  previously received), and W3C Trace Context is propagated across it.
+  `AgentRequest.trace_id` is still deliberately left unset — it is an
+  application-level correlation field, not the propagation mechanism.
+* Verified by automated tests only (82 in `apps/slack-gateway/tests`, run
+  in CI against the service's own container). **No real Slack message has
+  been sent through this path, and no resulting trace has been observed in
+  Phoenix or MLflow.** That live validation is a separate gate — see
+  Milestone 9 below.
+
+**Prerequisite this creates for Milestone 6.** Neither side of the new
+boundary has an execution deadline: both timeouts are socket-level
+inactivity timeouts, so a Slack Gateway timeout leaves the downstream
+completion state *unknown* rather than proving the work stopped.
+
+The Agent reachable through this path is already tool-capable — Milestone
+2 above verified a real Terminal Tool file-writing side effect, and a real
+Slack message has been observed driving live Google Calendar MCP
+`tools/call` requests — so this is not a future-only concern. The Gateway
+therefore separates a definite failure from an unknown outcome and, in the
+ambiguous case, tells the user the result is unknown instead of inviting
+an immediate retry that could duplicate a side effect.
+
+That is honest reporting, not a solution. Two things at the Orchestrator
+boundary remain prerequisites for "Add human approval for sensitive
+actions" and for any Agent performing consequential writes — recorded
+here, not designed:
+
+* **An execution-deadline or idempotency contract.** Neither side has a
+  deadline, and nothing makes a retry safe.
+* **Failure provenance.** `POST /dispatch` answers `500 internal_error`
+  both when the Agent was never successfully called and when it raised
+  *after* running — `HermesAgent.handle()` extracts output text only once
+  the Hermes call has returned, so an extraction failure means Hermes
+  completed a run, tool calls included. Because the two bodies are
+  identical, the Gateway must treat every `500` as an unknown outcome,
+  which is false-cautious when Hermes was merely down. An Orchestrator
+  that reported "agent not started" separately from "agent outcome
+  unknown" would remove that imprecision.
+
+See `docs/slack-gateway/orchestrator-dispatch.md`.
 
 ## Milestone 8: Containerized Shared Memory
 
@@ -850,7 +927,7 @@ The backend strategy for this milestone should follow the results of the Phoenix
 * [ ] Add spans for approval waits
 * [ ] Add spans for external API requests
 * [ ] Record latency and error information
-* [ ] Propagate trace identifiers between containers — *partial: Slack Gateway → Hermes Agent, and caller → Orchestrator → Hermes Agent; see below*
+* [ ] Propagate trace identifiers between containers — *partial: Slack Gateway → Orchestrator → Hermes Agent; see below*
 * [ ] Enforce telemetry redaction rules
 * [ ] Decide whether to retain both Phoenix and MLflow or standardize on one backend
 * [ ] Document the tracing model
@@ -869,10 +946,12 @@ only the two HTTP boundaries:
 
 * No spans for agent selection, model calls, memory retrieval, approval
   waits, or tool calls — the rest of this milestone's task list.
-* Nothing calls the Orchestrator yet, so no *Slack* request flows through
-  it. The Slack Gateway still calls Hermes Agent directly. Milestone 7's
-  "Preserve trace and conversation identifiers" therefore stays unchecked
-  as well: `AgentRequest.trace_id` is still populated by no caller, and is
+* The Slack Gateway is now the caller (see Milestone 7 above), so a Slack
+  request does flow through the Orchestrator:
+  `concierge.request` -> `orchestrator.dispatch` -> `POST /dispatch` ->
+  `hermes.request` -> Hermes Agent's `/v1/responses`. Milestone 7's
+  "Preserve trace and conversation identifiers" stays partial rather than
+  checked: `AgentRequest.trace_id` is still populated by no caller, and is
   deliberately not the propagation mechanism (see
   `docs/observability/orchestrator-trace-context.md`).
 * Verified by automated tests in CI, including against the real
@@ -886,11 +965,15 @@ only the two HTTP boundaries:
   repository SHA and the four image digests that produced it. See
   `docs/observability/orchestrator-trace-context.md`, "End-to-end
   verification (manual)".
-* Still unverified: the **Slack Gateway as the caller**. It calls Hermes
-  Agent directly, so `concierge.request` -> `POST /dispatch` is not yet
-  linked — that is the next slice. The error paths (Hermes non-success,
-  unreachable Hermes) are covered by tests but have not been observed
-  live.
+* Still unverified **live**: the Slack Gateway as the caller. The
+  `concierge.request` -> `POST /dispatch` link is implemented and covered
+  by automated tests (`apps/slack-gateway/tests`), but no real Slack
+  message has been sent through it and no resulting trace has been
+  observed in Phoenix or MLflow. That is the next operational-validation
+  gate, to be recorded the same way the 2026-09-10 run above was. The
+  error paths (Hermes non-success, unreachable Hermes, unreachable
+  Orchestrator) are covered by tests but have not been observed live
+  either.
 * Hermes Agent's known outbound-MCP propagation gap is unchanged and
   still upstream-tracked.
 
