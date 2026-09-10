@@ -123,9 +123,168 @@ header returning the identical response, with no Collector reachable at
 the configured endpoint — a live check that telemetry export failure does
 not change dispatch behavior.
 
-**Not verified end-to-end against the live stack.** No run of a real
-Slack Gateway → Orchestrator → Hermes Agent request has been observed in
-Phoenix or MLflow, because nothing calls the Orchestrator yet. The
-Orchestrator's half of the chain is verified by the tests above; the
-joined trace across all three services is not, and should be confirmed
-when the Slack Gateway is rewired.
+### End-to-end verification (manual)
+
+Run on 2026-09-10 against the real stack — the actual `orchestrator`,
+`hermes-agent` and `ollama` containers, exporting through the real
+`otel-collector` to Phoenix and MLflow. No stubs. Two `POST /dispatch`
+requests with `agent_name: "hermes"`, differing only in whether they
+carried an incoming `traceparent`.
+
+#### Exact state this evidence came from
+
+"The real stack" is not self-identifying: `orchestrator` and
+`hermes-agent` are built from the worktree, and `otel-collector` and
+`ollama` track floating `:latest` tags. So the run is pinned to this:
+
+```text
+repository   4f79828  (master, clean worktree)
+orchestrator     image sha256:f021e28af4b6c2eda0ab29113c152336a81fa1cdfdb03151ff350fbdc397a739
+hermes-agent     image sha256:470aa3b68074d9d752ff2d9d83f0110161e62cb60d62d09eb74347fd01b449ac
+otel-collector   otel/opentelemetry-collector-contrib@sha256:1f2c54a30e713fac6b3ae77a1ec84010c2007e29ced8ec666214fc2f6739c1cc
+ollama           ollama/ollama@sha256:4dea9fb511947e24a84237bb636b0203abcb2ff0d3fbc7b4ff865deb91362131
+```
+
+The `orchestrator` image was built from `214ea00`, whose tree is
+byte-identical to `4f79828` (`git diff 214ea00 4f79828` is empty), so the
+image and the recorded repository SHA describe the same code. Every
+container above reported `RestartCount=0` and a start time before the
+run, so these are the processes that actually served it — not a later
+replacement.
+
+Without this block the section would record *when* something was
+verified but not *what*: a future reader could not reconstruct which code
+and which images produced the evidence below.
+
+**With an incoming `traceparent`.** Sent
+`00-7075ec6bb22fa7f31f5840bceaa7850f-40d6e99612795bc1-01`; HTTP 200 in
+9.4s with the model's real answer. Phoenix's span API
+(`GET /v1/projects/{project}/spans?trace_id=...`) returned three spans on
+that one trace, whose `span_id`/`parent_id` values chain exactly:
+
+```text
+40d6e99612795bc1                             <- the traceparent that was sent
+  └─ a6019548472c8eaf   POST /dispatch       orchestrator   SERVER
+       └─ 99f4b9329c8063be   hermes.request  orchestrator   CLIENT
+            └─ 31e467eae5fc6fb2   /v1/responses   hermes-agent   SERVER
+```
+
+The last link is the one that could not be proven before: every earlier
+check of `hermes.request` → Hermes' own SERVER span used a stub Hermes
+server, not the real, auto-instrumented one.
+
+**Without a `traceparent`.** `POST /dispatch` became a true root span and
+the same three-span tree formed beneath it.
+
+**Attributes actually stored in Phoenix.** The two Orchestrator spans
+carried exactly the closed sets documented above, and nothing else:
+
+```text
+POST /dispatch   concierge.operation, http.method, http.route,
+                 http.status_code
+hermes.request   concierge.downstream.service, concierge.operation
+```
+
+(`hermes.request` shows no `http.status_code` because that is only set on
+a failure, and this call succeeded.) Hermes Agent's own `/v1/responses`
+span — produced by its auto-instrumentation, not by this repository —
+carried standard HTTP semantic-convention fields only: scheme, host,
+method, route, target, url, status code, flavor, server name, port and
+user agent. No request or response body, and no `Authorization`.
+
+No span carried `redaction.masked.count`, only `redaction.ignored.count`
+— nothing was flagged sensitive by the Collector because nothing
+sensitive was sent.
+
+**Redaction, checked with sentinels.** Each of these exact strings was
+searched for across both Phoenix's stored spans for the two trace ids and
+the Collector's full debug output — **zero occurrences** for every one:
+
+```text
+task_id           e2e-verify-1, e2e-verify-2
+user_id           e2e-user, e2e-user2
+conversation_id   e2e-verify, e2e-verify-2
+JSON trace_id     json-side-correlation-id
+instruction text  "Reply with exactly", and the per-request sentinel
+model response    the same per-request sentinel, echoed back
+credential        Bearer
+```
+
+Separately, all 6 spans across the two traces were walked attribute by
+attribute — keys *and* values — against `auth`, `bearer`, `token`,
+`secret`, `key`, and the sentinel strings. Nothing matched.
+
+One honest caveat, because a naive grep suggests otherwise: the string
+`authorization` does occur twice in the Collector's log, but on neither
+of these traces. Both hits are synthetic probe spans emitted by
+`infra/observability/tests/test_redaction.py`
+(`operation.name: synthetic-operation`), and in both the value is already
+masked to `****` by the Collector's redaction processor. No span produced
+by the Orchestrator or Hermes Agent carries an `authorization` key at
+all.
+
+The request also carried a deliberately mismatched JSON
+`"trace_id": "json-side-correlation-id"`. It appears nowhere in the
+telemetry, and propagation followed the HTTP `traceparent` — confirming
+on the live stack what "`AgentRequest.trace_id` is not W3C Trace Context"
+above asserts.
+
+Incidentally, `/v1/responses` carries
+`http.user_agent: Python-urllib/3.12`, which identifies the caller as the
+Orchestrator rather than the Slack Gateway (which uses `httpx`) — useful
+when telling the two paths apart in a backend.
+
+### A missing root span holds a trace `IN_PROGRESS` in MLflow
+
+The first request's trace sat at `state: IN_PROGRESS` in MLflow while the
+second showed `state: OK`. That pairing is only *consistent with* a
+missing root span being the cause, so it was isolated directly rather
+than inferred, on a third trace
+(`353caf00ceb3c9bec7a953f6ae645385`):
+
+1. `POST /dispatch` was sent with
+   `traceparent: 00-353caf…-0330406cb8ca6bed-01`, naming a parent span
+   that had never been exported. Phoenix showed the expected three spans,
+   with `POST /dispatch`'s parent id matching nothing in the trace.
+   MLflow: **`IN_PROGRESS`**.
+2. Nothing else was changed. A single span was then exported to the same
+   Collector with that exact trace id and span id — `353caf…` /
+   `0330406cb8ca6bed` — and no parent of its own: precisely the root that
+   had been missing. (Reproducible with a `TracerProvider` given an
+   `IdGenerator` that returns those two fixed ids, run from inside the
+   `orchestrator` container so it reaches the Collector on the compose
+   network.)
+3. Phoenix then showed four spans, with the newly arrived root resolving
+   the previously missing parent of `POST /dispatch`, and the same MLflow
+   trace moved to **`OK`**. Nothing about the child span changed: its
+   `parent_span_id` was `0330406cb8ca6bed` all along, and the backend
+   simply had nothing to resolve it against until step 2.
+
+**What this establishes.** A missing root span is *sufficient* to hold a
+trace `IN_PROGRESS`, and the arrival of exactly that root is sufficient
+to release it — one variable, changed on an already-`IN_PROGRESS` trace,
+with the transition following.
+
+**What it does not establish.** The converse. `IN_PROGRESS` does not
+imply a missing root span; other causes are not ruled out, and this
+experiment says nothing about them.
+
+So treat this as the first thing to check, not as a diagnosis. If
+`IN_PROGRESS` persists once the Slack Gateway is the caller, verify
+whether the caller's own root span reached the Collector — a missing root
+is one known sufficient cause of this state, not its only possible
+one.
+
+### Still not verified
+
+- **The Slack Gateway as the caller.** It still calls Hermes Agent
+  directly (`apps/slack-gateway/src/slack_gateway/hermes_client.py`), so
+  nothing links `concierge.request` to `POST /dispatch` yet. A Slack
+  message produces the Milestone 5 trace, not this one. That link is the
+  next slice's to prove.
+- **The error paths, on the live stack.** Hermes returning a non-success
+  status, an unreachable Hermes, and an unusable response body are all
+  covered by automated tests, including the `error.type` values recorded
+  — but none has been observed live.
+- **Hermes Agent's outbound MCP calls**, which remain an upstream gap
+  (see "The chain" above) and are unaffected by any of this.

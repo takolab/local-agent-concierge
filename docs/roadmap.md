@@ -876,8 +876,21 @@ only the two HTTP boundaries:
   deliberately not the propagation mechanism (see
   `docs/observability/orchestrator-trace-context.md`).
 * Verified by automated tests in CI, including against the real
-  container. **Not** verified end-to-end against the live stack in
-  Phoenix or MLflow — that needs a real caller first.
+  container, **and end-to-end against the live stack** on 2026-09-10: a
+  real `POST /dispatch` to `agent_name: "hermes"` produced one joined
+  trace in both Phoenix and MLflow —
+  `POST /dispatch` -> `hermes.request` -> Hermes Agent's `/v1/responses`
+  — with parent/child ids matching, and with no instruction text, model
+  response text, `task_id`, `user_id`, `conversation_id`, JSON `trace_id`
+  or bearer credential reaching either backend. The run is pinned to the
+  repository SHA and the four image digests that produced it. See
+  `docs/observability/orchestrator-trace-context.md`, "End-to-end
+  verification (manual)".
+* Still unverified: the **Slack Gateway as the caller**. It calls Hermes
+  Agent directly, so `concierge.request` -> `POST /dispatch` is not yet
+  linked — that is the next slice. The error paths (Hermes non-success,
+  unreachable Hermes) are covered by tests but have not been observed
+  live.
 * Hermes Agent's known outbound-MCP propagation gap is unchanged and
   still upstream-tracked.
 
