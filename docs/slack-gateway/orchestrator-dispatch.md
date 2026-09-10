@@ -290,7 +290,10 @@ Milestone 6).
 The Slack Gateway no longer holds a Hermes credential at all.
 `HERMES_API_BASE_URL` and `HERMES_API_SERVER_KEY` were removed from its
 configuration and from its Compose service; the Orchestrator, which owns
-the Hermes hop, is the only service that still has them. No
+the Hermes hop, is now the only **caller-side** holder. (`hermes-agent`
+still holds the same value as its own `API_SERVER_KEY` — the server side
+it validates incoming requests against — so this narrows who can *call*
+Hermes, not how many containers the value exists in.) No
 `Authorization` header is sent to `POST /dispatch` — that endpoint has no
 authentication (`docs/orchestrator/domain-model.md`, "Authorization
 boundary"), and forwarding a bearer credential to an endpoint that does
@@ -385,22 +388,23 @@ executes:
 `services/orchestrator` (94 passed, 1 skipped) was re-run unchanged, since
 this change is written against its existing boundary.
 
-**Not verified: the live stack.** No real Slack message has been sent
-through this path, and no trace from it has been observed in Phoenix or
-MLflow. Automated tests establish that the Gateway calls the Orchestrator
-correctly and that a valid trace context is active when it does; they do
-not establish that
+**Live: one successful run.** On 2026-09-10 a real Slack message was sent
+through this path at repository SHA `0bcceb95` and produced the joined
+trace `ff731430ed03161076ae1857d8dea219` — all six expected spans, correct
+parent/child links, present in MLflow with `state=OK`, with no Slack
+identifier, conversation id, message timestamp or bearer credential
+reaching either backend.
 
 ```text
 real Slack -> Slack Gateway -> Orchestrator -> Hermes Agent -> Ollama
            -> Collector -> Phoenix / MLflow
 ```
 
-works end to end. That is a separate, human-controlled operational
-validation gate, to be recorded the way
-`docs/observability/orchestrator-trace-context.md`'s "End-to-end
-verification (manual)" records the previous one — pinned to an exact
-repository SHA and image digests.
+That is **one run of the success path**, not a verified failure surface:
+the timeout, unknown-outcome and non-2xx paths above are covered by tests
+only and have never been observed live. The repeatable procedure, the
+evidence record, and what that run did and did not settle are in
+`docs/observability/slack-orchestrator-live-validation.md`.
 
 ## What this does not do
 

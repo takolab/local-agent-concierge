@@ -35,9 +35,12 @@ it, were removed rather than kept as a second route. `hermes.request`
 still appears in the trace — emitted by the Orchestrator for the hop it
 now owns.
 
-This chain is established by automated tests on both sides. It has **not**
-been observed end to end on the live stack from a real Slack message; see
-"Still not verified" below.
+This chain is established by automated tests on both sides, and was
+observed end to end on the live stack from a real Slack message on
+2026-09-10 — see
+`docs/observability/slack-orchestrator-live-validation.md` for that run's
+evidence and for the repeatable procedure. One run, success path only; see
+"Still not verified" below for what remains.
 
 The `X` is the known upstream gap: Hermes Agent's outbound MCP calls do
 not carry trace context, so a Calendar tool call starts an unrelated
@@ -275,25 +278,29 @@ with the transition following.
 imply a missing root span; other causes are not ruled out, and this
 experiment says nothing about them.
 
-So treat this as the first thing to check, not as a diagnosis. The Slack
-Gateway is now the caller and does emit a root `concierge.request` span,
-so this particular cause should no longer apply to a Slack-originated
-trace — but that has not been confirmed live. If `IN_PROGRESS` persists,
-verify whether the caller's own root span reached the Collector; a missing
-root is one known sufficient cause of this state, not its only possible
-one.
+So treat this as the first thing to check, not as a diagnosis. The
+2026-09-10 Slack-originated run did **not** reproduce `IN_PROGRESS`: with
+the Slack Gateway supplying a real root `concierge.request` span, MLflow
+recorded the trace as `state=OK`. That is one observation consistent with a
+missing root being the cause here, not a proof of it — a missing root
+remains one known sufficient cause of this state, not its only possible
+one. If `IN_PROGRESS` recurs, still check first whether the caller's own
+root span reached the Collector.
 
 ### Still not verified
 
-- **The Slack Gateway as the caller, on the live stack.** The link from
-  `concierge.request` through `orchestrator.dispatch` to `POST /dispatch`
-  is implemented and covered by automated tests on both sides
-  (`apps/slack-gateway/tests`, `services/orchestrator/tests`), but no real
-  Slack message has been sent through it and no resulting trace has been
-  observed in Phoenix or MLflow. Implemented and automatically verified is
-  not live operationally verified; this one is still the latter's to
-  prove, and should be recorded with the same provenance as the manual run
-  above.
+- ~~**The Slack Gateway as the caller, on the live stack.**~~ Verified on
+  2026-09-10: one real Slack message produced the joined trace
+  `ff731430ed03161076ae1857d8dea219`, present in MLflow with `state=OK`,
+  with no Slack identifier or credential reaching either backend. Recorded
+  with the same provenance discipline as the manual run above, in
+  `docs/observability/slack-orchestrator-live-validation.md`. **Still
+  unverified from that path:** every failure mode. A single successful run
+  says nothing about the timeout, unknown-outcome, or non-2xx paths.
+- **Span kind, through Phoenix's REST API.** `/v1/projects/{p}/spans`
+  reports `span_kind` as `UNKNOWN` for these spans, so the CONSUMER /
+  CLIENT / SERVER kinds above are what the code sets, not something that
+  API can confirm. Unexplained, and not investigated here.
 - **The error paths, on the live stack.** Hermes returning a non-success
   status, an unreachable Hermes, and an unusable response body are all
   covered by automated tests, including the `error.type` values recorded

@@ -4,8 +4,10 @@ Implements orchestrator.agent.Agent by calling Hermes Agent's existing
 `/v1/responses` HTTP API -- the same API apps/slack-gateway's HermesClient
 (src/slack_gateway/hermes_client.py) used to call directly. That client
 has since been removed: the Slack Gateway now dispatches through this
-service instead, making this adapter the only caller of Hermes Agent and
-the only holder of its credential (see
+service instead, making this adapter the only caller of Hermes Agent in
+the running stack, and the only caller-side holder of its bearer
+credential -- `hermes-agent` still holds the same value as the
+`API_SERVER_KEY` it validates against (see
 docs/slack-gateway/orchestrator-dispatch.md). This is the second
 registered Agent, alongside the synthetic orchestrator.dev_agents.EchoAgent
 ("dev-echo"); registering it does not remove or change EchoAgent.

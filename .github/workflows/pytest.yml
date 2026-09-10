@@ -174,5 +174,5 @@ jobs:
       - name: Install OpenTelemetry Collector redaction test dependencies
         run: pip install -r infra/observability/tests/requirements.txt
 
-      - name: Run OpenTelemetry Collector redaction tests
+      - name: Run OpenTelemetry Collector redaction and live-validation helper tests
         run: python -m pytest infra/observability/tests
