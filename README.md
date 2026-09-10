@@ -92,6 +92,7 @@ Observability notes:
 * [Google Calendar MCP telemetry](docs/observability/google-calendar-mcp-telemetry.md)
 * [Hermes trace context](docs/observability/hermes-trace-context.md)
 * [Orchestrator trace context](docs/observability/orchestrator-trace-context.md)
+* [Slack → Orchestrator live validation runbook](docs/observability/slack-orchestrator-live-validation.md)
 
 Development workflow:
 

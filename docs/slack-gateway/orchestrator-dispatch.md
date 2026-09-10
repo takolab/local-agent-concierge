@@ -385,22 +385,23 @@ executes:
 `services/orchestrator` (94 passed, 1 skipped) was re-run unchanged, since
 this change is written against its existing boundary.
 
-**Not verified: the live stack.** No real Slack message has been sent
-through this path, and no trace from it has been observed in Phoenix or
-MLflow. Automated tests establish that the Gateway calls the Orchestrator
-correctly and that a valid trace context is active when it does; they do
-not establish that
+**Live: one successful run.** On 2026-09-10 a real Slack message was sent
+through this path at repository SHA `0bcceb95` and produced the joined
+trace `ff731430ed03161076ae1857d8dea219` — all six expected spans, correct
+parent/child links, present in MLflow with `state=OK`, with no Slack
+identifier, conversation id, message timestamp or bearer credential
+reaching either backend.
 
 ```text
 real Slack -> Slack Gateway -> Orchestrator -> Hermes Agent -> Ollama
            -> Collector -> Phoenix / MLflow
 ```
 
-works end to end. That is a separate, human-controlled operational
-validation gate, to be recorded the way
-`docs/observability/orchestrator-trace-context.md`'s "End-to-end
-verification (manual)" records the previous one — pinned to an exact
-repository SHA and image digests.
+That is **one run of the success path**, not a verified failure surface:
+the timeout, unknown-outcome and non-2xx paths above are covered by tests
+only and have never been observed live. The repeatable procedure, the
+evidence record, and what that run did and did not settle are in
+`docs/observability/slack-orchestrator-live-validation.md`.
 
 ## What this does not do
 

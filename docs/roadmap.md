@@ -800,11 +800,15 @@ Recorded as **partial**, not complete, because:
   previously received), and W3C Trace Context is propagated across it.
   `AgentRequest.trace_id` is still deliberately left unset — it is an
   application-level correlation field, not the propagation mechanism.
-* Verified by automated tests only (82 in `apps/slack-gateway/tests`, run
-  in CI against the service's own container). **No real Slack message has
-  been sent through this path, and no resulting trace has been observed in
-  Phoenix or MLflow.** That live validation is a separate gate — see
-  Milestone 9 below.
+* Verified by automated tests (82 in `apps/slack-gateway/tests`, run in CI
+  against the service's own container) **and once on the live stack** on
+  2026-09-10: a real Slack message produced one joined trace
+  `concierge.request` → `orchestrator.dispatch` → `POST /dispatch` →
+  `hermes.request` → `/v1/responses` in Phoenix, present in MLflow with
+  `state=OK`, with no Slack identifier, conversation id, message timestamp
+  or bearer credential reaching either backend. Success path only, one run.
+  The procedure and the evidence record are in
+  `docs/observability/slack-orchestrator-live-validation.md`.
 
 **Prerequisite this creates for Milestone 6.** Neither side of the new
 boundary has an execution deadline: both timeouts are socket-level
@@ -965,15 +969,17 @@ only the two HTTP boundaries:
   repository SHA and the four image digests that produced it. See
   `docs/observability/orchestrator-trace-context.md`, "End-to-end
   verification (manual)".
-* Still unverified **live**: the Slack Gateway as the caller. The
-  `concierge.request` -> `POST /dispatch` link is implemented and covered
-  by automated tests (`apps/slack-gateway/tests`), but no real Slack
-  message has been sent through it and no resulting trace has been
-  observed in Phoenix or MLflow. That is the next operational-validation
-  gate, to be recorded the same way the 2026-09-10 run above was. The
-  error paths (Hermes non-success, unreachable Hermes, unreachable
-  Orchestrator) are covered by tests but have not been observed live
-  either.
+* The Slack Gateway as the caller is now **verified live** as well, on
+  2026-09-10: one real Slack message produced the joined
+  `concierge.request` → `orchestrator.dispatch` → `POST /dispatch` →
+  `hermes.request` → `/v1/responses` trace in Phoenix, present in MLflow
+  with `state=OK`. See
+  `docs/observability/slack-orchestrator-live-validation.md` for the
+  repeatable procedure and that run's evidence. **Success path only, one
+  run** — the error paths (Hermes non-success, unreachable Hermes,
+  unreachable Orchestrator, timeout) are covered by tests but have still
+  not been observed live, and span *kind* is not verifiable through
+  Phoenix's REST API.
 * Hermes Agent's known outbound-MCP propagation gap is unchanged and
   still upstream-tracked.
 
