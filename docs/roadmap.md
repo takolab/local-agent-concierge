@@ -806,7 +806,9 @@ Recorded as **partial**, not complete, because:
   `concierge.request` → `orchestrator.dispatch` → `POST /dispatch` →
   `hermes.request` → `/v1/responses` in Phoenix, present in MLflow with
   `state=OK`, with no Slack identifier, conversation id, message timestamp
-  or bearer credential reaching either backend. Success path only, one run.
+  or bearer credential reaching either backend. Repeated on 2026-09-10 at
+  21:05 following the runbook itself, with the credential read bound to the
+  Orchestrator container that handled the request. Success path only.
   The procedure and the evidence record are in
   `docs/observability/slack-orchestrator-live-validation.md`.
 

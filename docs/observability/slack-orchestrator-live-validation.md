@@ -123,8 +123,32 @@ docker compose ps
 | `hermes-agent` | running | the Agent |
 | `ollama` | running and healthy | Hermes' model backend |
 | `google-calendar-mcp` | running and healthy | `hermes-agent` depends on it to start |
-| `otel-collector` | running | telemetry; **not** required for dispatch |
+| `otel-collector` | running | telemetry; **not** required for dispatch — see below |
 | `phoenix`, `mlflow` | running and healthy | needed only to *read* the evidence |
+
+**Check `otel-collector` with `docker compose ps -a`, not `ps`.** It is the
+one service whose absence is invisible where it matters: dispatch keeps
+working, Slack keeps replying, and no trace is ever exported — which reads
+as "the rewiring is broken" rather than "the Collector is down".
+
+It has a known failure mode after a Docker Desktop / WSL engine restart.
+The single-file bind mount (`otel-collector.yaml` → `/etc/otelcol-contrib/config.yaml`)
+does not survive it, and `restart: unless-stopped` keeps retrying the stale
+mount path:
+
+```text
+Exited (127)
+  error mounting ".../docker-desktop-bind-mounts/..." to rootfs at
+  "/etc/otelcol-contrib/config.yaml": not a directory
+```
+
+Restarting does not fix it; the container must be **recreated** so the
+mount is re-resolved:
+
+```bash
+docker compose up -d --no-deps otel-collector
+curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:13133/   # expect 200
+```
 
 Then confirm the Gateway can actually reach the Orchestrator — this is the
 new hop, and the only precondition specific to it:
@@ -600,7 +624,16 @@ turn (§5). After the run, check what actually happened rather than assuming:
 curl -s "http://127.0.0.1:6006/v1/projects/local-agent-concierge-infra-smoke-test/spans?limit=50"
 
 # 2. Did anything change under Hermes' persistent state?
-find data/hermes -newermt '-10 minutes' -not -path '*/cache/*' | head -20
+#    The timestamp is computed explicitly rather than written as
+#    `-newermt '-10 minutes'`: GNU findutils accepts that relative form,
+#    but `bfs` -- which some systems install as `find` -- rejects it as an
+#    invalid timestamp, prints an error to stderr, and matches nothing.
+#    A side-effect check that reports "no changes" because it failed to
+#    run is the worst possible outcome for this step, so use the form that
+#    works on both.
+find data/hermes -type f \
+  -newermt "$(date -d '10 minutes ago' '+%Y-%m-%dT%H:%M:%S')" \
+  -not -path '*/cache/*' | sort
 
 # 3. Is the repository still clean?
 git status --porcelain
@@ -610,9 +643,30 @@ Expected for a text-only turn: no `tools/call …` span in the window other
 than the routine `MCP send ping` keepalive (Hermes pings the Calendar MCP
 every ~3 minutes, unrelated to any request), and no repository change.
 
-Hermes conversation state under `data/hermes` **is** expected to change —
-the Gateway sends `"store": true`, so the turn is persisted. That is normal
-operation, not an unexpected side effect.
+**Reading step 2's output.** A successful turn touches roughly a dozen
+files, and almost none of them are about your request:
+
+| Path | What it means |
+|---|---|
+| `response_store.db-wal`, `response_store.db-shm` | **The conversation store** — the Gateway sends `"store": true`, so the turn is persisted. Expected. |
+| `state.db-*`, `kanban.db-*`, `channel_directory.json` | Hermes' own state, written continuously |
+| `cron/ticker_*`, `state/gateway.heartbeat` | Background tickers and heartbeats, unrelated to any request |
+| `logs/agent.log`, `logs/errors.log` | Hermes' logs |
+| `models_dev_cache.*` | Model metadata cache refresh |
+
+What would *not* be expected: a new file outside these, anything under a
+project directory, or a change to this repository.
+
+**Clock offset.** The containers log in UTC; your host may not. Compare the
+gateway log's timestamps against container time, not host time:
+
+```bash
+date -u '+%Y-%m-%d %H:%M:%S UTC'                 # host, in UTC
+docker compose exec -T hermes-agent date -u      # container
+```
+
+An hour's offset between a log line and a file mtime is a timezone
+difference, not evidence of anything.
 
 Do not record "no side effects possible". The supportable statement is
 "no unexpected side effect observed, by the checks above".
@@ -623,7 +677,95 @@ Do not record "no side effects possible". The supportable statement is
 
 Each entry is **observed evidence** from one actual execution.
 
-### 2026-09-10 — first live run of the Slack → Orchestrator path
+### 2026-09-10 (21:05 UTC) — first run following this runbook
+
+The run the earlier entry's limitations called for: executed with the
+procedure above rather than ad hoc, so the container binding is pinned
+rather than inferred.
+
+```text
+Validation date:         2026-09-10 21:05:14 UTC (container clock)
+Operator:                repository owner, interactive session
+
+Repository SHA:          548fed6a32ccd9cad2261e9d921e2819799260c1
+                         (= merge commit of PR #44)
+Working tree:            clean
+Containers (container ID prefix, image ID, started):
+  slack-gateway:         dbab5033ac33  sha256:9c9be6031de05d6473d  20:50:41
+  orchestrator:          df6eb0bff364  sha256:f021e28af4b6c2eda0a  20:50:41
+  hermes-agent:          9d53cbf88567  sha256:470aa3b68074d9d752f  20:50:41
+  ollama:                7e7efecf4bef  sha256:dacbdaa86a43fb9ed58  20:50:41
+  otel-collector:        2f55fb34043e  sha256:e11c83206a71a0ac312  20:53:50
+Provenance consistent:   YES -- images unchanged from the 17:27 run; the
+                         containers restarted with the Docker engine at
+                         20:50, before the 21:05 request. otel-collector
+                         was recreated at 20:53 (see below).
+
+Preconditions:
+  all required services healthy:          YES (after recreating otel-collector)
+  gateway → orchestrator GET /health:     200
+  gateway env free of HERMES_API_*:       YES
+
+Test input:              one Slack direct message (operator-chosen wording)
+Slack reply observed:    YES -- 63-character reply, processing status deleted
+Gateway log:             POST http://orchestrator:8700/dispatch → 200 OK
+                         agent=hermes  status=completed  response_chars=63
+                         delivery=posted_and_processing_status_deleted
+
+Trace ID:                bb3d8ce5fcb43e4e8cb8ad895e077950
+Observed spans:          6, one trace id:
+                           concierge.request        (root)
+                             orchestrator.dispatch
+                               POST /dispatch
+                                 hermes.request
+                                   /v1/responses
+                             slack.response
+Expected relationships:  PASS -- all five, `trace` exit 0
+Gateway → Orchestrator:  YES
+Orchestrator → Hermes:   YES (`http.status_code = 200` on POST /dispatch)
+Present in MLflow:       tr-bb3d8ce5fcb43e4e8cb8ad895e077950
+                         service=slack-gateway  state=OK
+Sensitive sentinel check: PASS -- 7 labels, 0 leaked, `scan` exit 0,
+                         credential read bound to orchestrator df6eb0bff364
+Credential read bound to the request's container:  YES
+
+Unexpected side effects: NO -- no `tools/call` span for this request (only
+                         the routine MCP keepalive); the only persistent
+                         writes were the expected conversation store
+                         (`response_store.db-*`) plus Hermes' own
+                         background state, logs and heartbeats; repository
+                         clean.
+
+Overall result:          PASS
+```
+
+**What this run additionally established.** The helper's container-backed
+paths ran against a real Docker daemon for the first time — they had been
+exercised only against a stubbed `_run` when PR #44 was written, which that
+PR flagged as an open gap. All four failure paths were confirmed to fail
+closed with distinguishable reasons: a mismatched `--expect-container`
+(`"replaced between the request and this scan"`), a too-short prefix, a
+service without the variable, and a service that is not running. The
+2026-09-10 17:27 trace also survived the engine restart and still passes,
+so Phoenix's storage is durable across one.
+
+**Limitations of this run.**
+
+- The sentinel check again covered the seven identifier/credential labels
+  and **not** the Slack message text or the model's response text, which §8
+  asks for. Neither was captured. The next run can close this without
+  exposing either value: append two `label=value` lines to the needles file
+  and re-run `scan`, which reports only `absent` / `LEAKED`.
+- The message wording was operator-chosen rather than §5's fixed string.
+- Only the success path ran; the failure and unknown-outcome paths remain
+  test-covered only.
+- No Calendar tool was invoked, so Hermes' outbound-MCP propagation gap was
+  neither confirmed nor contradicted.
+- `otel-collector` had to be recreated first (§4). Had that gone unnoticed,
+  the request would have succeeded in Slack while producing no trace at
+  all.
+
+### 2026-09-10 (17:27 UTC) — first live run of the Slack → Orchestrator path
 
 ```text
 Validation date:         2026-09-10 17:27 (host local time)
