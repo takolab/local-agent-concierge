@@ -800,7 +800,7 @@ Recorded as **partial**, not complete, because:
   previously received), and W3C Trace Context is propagated across it.
   `AgentRequest.trace_id` is still deliberately left unset — it is an
   application-level correlation field, not the propagation mechanism.
-* Verified by automated tests only (75 in `apps/slack-gateway/tests`, run
+* Verified by automated tests only (82 in `apps/slack-gateway/tests`, run
   in CI against the service's own container). **No real Slack message has
   been sent through this path, and no resulting trace has been observed in
   Phoenix or MLflow.** That live validation is a separate gate — see
@@ -819,14 +819,22 @@ therefore separates a definite failure from an unknown outcome and, in the
 ambiguous case, tells the user the result is unknown instead of inviting
 an immediate retry that could duplicate a side effect.
 
-That is honest reporting, not a solution. An explicit execution-deadline
-or idempotency contract at the Orchestrator boundary remains a
-prerequisite for "Add human approval for sensitive actions" and for any
-Agent performing consequential writes — recorded here, not designed. One
-known hole is documented with it: the Orchestrator's generic
-`500 internal_error` does not distinguish "the Agent was never called"
-from "the Agent raised after doing work", so that case is still classified
-as a definite failure.
+That is honest reporting, not a solution. Two things at the Orchestrator
+boundary remain prerequisites for "Add human approval for sensitive
+actions" and for any Agent performing consequential writes — recorded
+here, not designed:
+
+* **An execution-deadline or idempotency contract.** Neither side has a
+  deadline, and nothing makes a retry safe.
+* **Failure provenance.** `POST /dispatch` answers `500 internal_error`
+  both when the Agent was never successfully called and when it raised
+  *after* running — `HermesAgent.handle()` extracts output text only once
+  the Hermes call has returned, so an extraction failure means Hermes
+  completed a run, tool calls included. Because the two bodies are
+  identical, the Gateway must treat every `500` as an unknown outcome,
+  which is false-cautious when Hermes was merely down. An Orchestrator
+  that reported "agent not started" separately from "agent outcome
+  unknown" would remove that imprecision.
 
 See `docs/slack-gateway/orchestrator-dispatch.md`.
 

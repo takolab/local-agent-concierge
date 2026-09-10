@@ -261,33 +261,81 @@ def test_dispatch_returns_the_agent_response() -> None:
     assert response.memory_candidates[0]["content"] == "synthetic memory"
 
 
-@pytest.mark.parametrize(
-    ("status_code", "body"),
-    [
-        (404, {"error": "unknown_agent", "detail": "synthetic detail"}),
-        (400, {"error": "invalid_request", "detail": "synthetic detail"}),
-        (500, {"error": "internal_error", "detail": "synthetic detail"}),
-    ],
-    ids=["unknown_agent", "invalid_request", "internal_error"],
-)
-def test_dispatch_maps_defined_error_statuses_to_runtime_error(
-    status_code: int,
-    body: dict[str, str],
-) -> None:
-    captured: dict[str, Any] = {}
-    client = _client_with_recorder(
-        captured,
-        response_factory=lambda: httpx.Response(status_code, json=body),
+def _error_status_client(status_code: int, error: str) -> OrchestratorClient:
+    return _client_with_recorder(
+        {},
+        response_factory=lambda: httpx.Response(
+            status_code,
+            json={"error": error, "detail": "synthetic detail"},
+        ),
     )
+
+
+@pytest.mark.parametrize(
+    ("status_code", "body_error"),
+    [
+        (404, "unknown_agent"),
+        (404, "not_found"),
+        (400, "invalid_request"),
+        (400, "invalid_json"),
+    ],
+    ids=["unknown_agent", "not_found", "invalid_request", "invalid_json"],
+)
+def test_pre_dispatch_statuses_are_definite_failures(
+    status_code: int,
+    body_error: str,
+) -> None:
+    """400 and 404 are produced before `Orchestrator.dispatch()` is
+    called, so no Agent ran and a retry is safe."""
+    client = _error_status_client(status_code, body_error)
 
     with pytest.raises(DispatchFailedError) as error:
         client.dispatch(HERMES_AGENT_NAME, _agent_request())
 
+    assert not isinstance(error.value, DispatchOutcomeUnknownError)
     assert str(error.value) == f"Orchestrator returned HTTP {status_code}"
 
     # The Orchestrator's own error body is deliberately not carried into
     # the message the Slack Gateway then logs.
     assert "synthetic detail" not in str(error.value)
+
+
+def test_internal_server_error_is_an_unknown_outcome() -> None:
+    """`500 internal_error` does not prove that nothing ran.
+
+    The Orchestrator returns that same generic body when its Hermes
+    adapter never reached Hermes *and* when the Agent raised after
+    running -- `HermesAgent.handle()` extracts the output text only once
+    the Hermes call has returned, so an extraction failure means Hermes
+    completed a run, tool calls included. The bodies are identical, so
+    this boundary errs toward "unknown".
+    """
+    client = _error_status_client(500, "internal_error")
+
+    with pytest.raises(DispatchOutcomeUnknownError) as error:
+        client.dispatch(HERMES_AGENT_NAME, _agent_request())
+
+    assert not isinstance(error.value, DispatchFailedError)
+    assert str(error.value) == "Orchestrator returned HTTP 500"
+    assert "synthetic detail" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "status_code",
+    [401, 403, 429, 502, 503],
+    ids=lambda code: str(code),
+)
+def test_unexpected_statuses_are_an_unknown_outcome(
+    status_code: int,
+) -> None:
+    """Only the two statuses the Orchestrator provably emits before
+    dispatching are definite failures. Anything else -- an intermediary's
+    5xx, a status this contract does not define -- falls on the cautious
+    side rather than being assumed safe to retry."""
+    client = _error_status_client(status_code, "synthetic")
+
+    with pytest.raises(DispatchOutcomeUnknownError):
+        client.dispatch(HERMES_AGENT_NAME, _agent_request())
 
 
 def test_dispatch_maps_connection_failure_to_runtime_error() -> None:

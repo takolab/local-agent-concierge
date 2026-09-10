@@ -161,9 +161,10 @@ the user is told.
 | Condition | Orchestrator's answer | Exception | Message |
 |---|---|---|---|
 | Orchestrator unreachable (`ConnectError`, `ConnectTimeout`, `PoolTimeout`, `ProxyError`, `UnsupportedProtocol`, `LocalProtocolError`) | — (no response) | `DispatchFailedError`: `Failed to connect to the Orchestrator` | `ERROR_MESSAGE` |
-| Unknown `agent_name` | `404 unknown_agent` | `DispatchFailedError`: `Orchestrator returned HTTP 404` | `ERROR_MESSAGE` |
-| Malformed request body | `400 invalid_request` | `DispatchFailedError`: `Orchestrator returned HTTP 400` | `ERROR_MESSAGE` |
-| Agent raised (Hermes unreachable, non-2xx, unusable body) | `500 internal_error` | `DispatchFailedError`: `Orchestrator returned HTTP 500` | `ERROR_MESSAGE` |
+| Unknown `agent_name`, or an unknown path | `404 unknown_agent` / `not_found` | `DispatchFailedError`: `Orchestrator returned HTTP 404` | `ERROR_MESSAGE` |
+| Malformed request body | `400 invalid_request` / `invalid_json` | `DispatchFailedError`: `Orchestrator returned HTTP 400` | `ERROR_MESSAGE` |
+| Agent raised (Hermes unreachable, non-2xx, unusable body) | `500 internal_error` | `DispatchOutcomeUnknownError`: `Orchestrator returned HTTP 500` | `UNKNOWN_OUTCOME_MESSAGE` |
+| Any other status (an intermediary's `502`, an undefined `4xx`, …) | — | `DispatchOutcomeUnknownError`: `Orchestrator returned HTTP <code>` | `UNKNOWN_OUTCOME_MESSAGE` |
 | Read/write timeout | — (no response) | `DispatchOutcomeUnknownError`: `Orchestrator request timed out` | `UNKNOWN_OUTCOME_MESSAGE` |
 | Transport error after the request was written (`ReadError`, `WriteError`, `CloseError`, `RemoteProtocolError`, …) | — (no response) | `DispatchOutcomeUnknownError`: `Lost contact with the Orchestrator` | `UNKNOWN_OUTCOME_MESSAGE` |
 | `2xx` body is not JSON | `200` | `DispatchOutcomeUnknownError`: `Orchestrator response was not valid JSON` | `UNKNOWN_OUTCOME_MESSAGE` |
@@ -202,18 +203,25 @@ status cleanup, the log lines, the span handling — is unchanged.
 
 ### Classification is fail-safe
 
-Only two things are treated as definite failures: an explicit error
-*status* from the Orchestrator, and the httpx errors that provably occur
-before any byte of the request is delivered (`_NOT_DELIVERED_ERRORS` in
-`orchestrator_client.py`). Everything else — including a `RuntimeError`
-from code this module did not classify — is reported as an unknown
-outcome.
+Only two things are treated as definite failures, both allowlists in
+`orchestrator_client.py`:
+
+- `_NOT_DELIVERED_ERRORS` — the httpx errors that provably occur before
+  any byte of the request is delivered.
+- `_AGENT_NOT_STARTED_STATUSES` — `400` and `404`, the only statuses the
+  Orchestrator emits strictly *before* `Orchestrator.dispatch()` runs
+  (body parsing, `AgentRequest` validation, registry lookup, unknown
+  path). No Agent has been called when either is returned.
+
+Everything else — `500`, any other status, and a `RuntimeError` from code
+this module did not classify — is reported as an unknown outcome.
 
 That direction is deliberate: showing "the result is unknown" when nothing
 actually ran costs the user an unnecessary check, while showing "please
 try again" after a tool ran can duplicate a real side effect. The
-allowlist shape also means a future httpx release adding a new error class
-cannot silently make an ambiguous outcome look safe.
+allowlist shape also means a future httpx release adding an error class,
+or an intermediary returning a status this contract never defined, cannot
+silently make an ambiguous outcome look safe.
 
 The two exception types are **siblings**, not parent and child, so an
 `except DispatchFailedError` cannot silently swallow the unknown case.
@@ -233,20 +241,39 @@ not establish that the Orchestrator always finishes first. That is
 precisely why the unknown-outcome path above has to exist rather than
 being argued away.
 
-### Known residual gap: `500 internal_error`
+### Why `500 internal_error` is an unknown outcome
 
-The Orchestrator answers `500` both when its Hermes adapter never reached
-Hermes and when Hermes returned a non-2xx or an unusable body *after*
-possibly running tools. The body is the same generic `internal_error` in
-both cases, so the Gateway cannot tell them apart and classifies `500` as
-a definite failure — meaning a `500` that followed real tool execution is
-currently shown with the retry message.
+`500` is the Orchestrator's single generic answer for two very different
+things:
 
-This is a real, known hole, left as-is on purpose: closing it means the
-Orchestrator distinguishing "the Agent was never successfully called" from
-"the Agent raised after starting", which is API-surface design and out of
-scope for this slice. It is recorded here and in "What this does not do"
-rather than papered over.
+```text
+HermesAgent.handle()
+  ├─ _call_hermes() raises          -> Hermes never ran      -> 500
+  └─ _call_hermes() returns, then
+     _extract_output_text() raises  -> Hermes RAN, tools too -> 500
+```
+
+The second path is not hypothetical: `HermesAgent.handle()` extracts the
+output text only after the Hermes call has returned, so an extraction
+failure means Hermes completed a full run — tool calls included — and only
+the text could not be read out. `http_server.py` maps any Agent exception
+to the same `{"error": "internal_error"}` body, so the Gateway has nothing
+to tell them apart with.
+
+A `500` therefore does not prove that nothing happened, and classifying it
+as a definite failure would contradict the fail-safe rule above. It is an
+unknown outcome.
+
+**The cost of this is accepted, not hidden.** When Hermes is simply down —
+the most common failure in practice — nothing ran, and the user is still
+told to check before retrying. That is false-caution, which is the
+direction this boundary errs in on purpose.
+
+The precise fix belongs on the other side: the Orchestrator returning
+failure *provenance* — "agent not started" versus "agent outcome unknown"
+— instead of one generic `500`. That is an API-surface change, out of
+scope for this slice, and recorded in `docs/roadmap.md` alongside the
+deadline/idempotency prerequisite.
 
 ### The larger contract this defers
 
@@ -309,12 +336,12 @@ their values changed.
 
 ## Verification
 
-**Automated only.** 75 tests in `apps/slack-gateway/tests`, run in the
+**Automated only.** 82 tests in `apps/slack-gateway/tests`, run in the
 service's own container (`docker compose --profile test run --rm
 slack-gateway-test`), which is what `.github/workflows/pytest.yml`
 executes:
 
-- `test_orchestrator_client.py` (36) — the request goes to `POST
+- `test_orchestrator_client.py` (43) — the request goes to `POST
   /dispatch` and not to `/v1/responses`; the body is exactly
   `{"agent_name", "request"}` with the 7 canonical `AgentRequest` fields,
   and round-trips back through `agent_request_from_dict` to the identical
@@ -329,7 +356,10 @@ executes:
   `DispatchOutcomeUnknownError`; the two types are siblings, so neither
   can be swallowed by a handler written for the other; and
   `dispatch_error_type` classifies anything unrecognized — including a
-  bare `RuntimeError` — as an unknown outcome.
+  bare `RuntimeError` — as an unknown outcome. On the status side, `400`
+  and `404` (each with both of the Orchestrator's documented error bodies)
+  are definite failures, while `500` and five unexpected statuses
+  (`401`, `403`, `429`, `502`, `503`) are unknown outcomes.
 - `test_slack_message_routing.py` (24) — a Slack message reaches the
   Orchestrator under `agent_name: "hermes"`; the `AgentRequest` carries
   the mapping in the table above (including `trace_id is None` and empty
@@ -388,7 +418,8 @@ repository SHA and image digests.
   *reports* an ambiguous outcome honestly, but nothing makes a retry safe
   — see "Failure semantics" above. This must be resolved before an Agent
   performing consequential writes is reachable through this path.
-- **`500 internal_error` is still classified as a definite failure**, even
-  though it can follow real tool execution — see "Known residual gap"
-  above. Closing it requires the Orchestrator to distinguish those two
-  states.
+- **No failure provenance from the Orchestrator.** `500` covers both "the
+  Agent was never called" and "the Agent ran, then failed", so the Gateway
+  must treat every `500` as an unknown outcome — false-cautious when
+  Hermes was merely down. Making this precise means the Orchestrator
+  reporting which of the two happened.

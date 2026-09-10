@@ -684,19 +684,21 @@ Updating the temporary message is intentionally avoided because Slack may displa
 
 When the Slack Gateway cannot complete a request it posts one of two generic user-facing messages, chosen by whether the request could have run.
 
-**The dispatch definitely did not run** — the Orchestrator was unreachable, or it answered with an error status (`404` unknown agent, `400` malformed request, `500` because Hermes itself failed):
+**The dispatch definitely did not run** — the Orchestrator was unreachable, or it answered `400` (malformed request) or `404` (unknown agent). Those two statuses are produced before any Agent is called:
 
 ```text
 ⚠️ I couldn't complete that request. Please try again.
 ```
 
-**The outcome is unknown** — the dispatch timed out reading or writing, contact was lost after the request had been written, or the Orchestrator answered but the body could not be read as an `AgentResponse`:
+**The outcome is unknown** — the dispatch timed out reading or writing, contact was lost after the request had been written, the Orchestrator answered `500 internal_error` or any other unexpected status, or it answered `200` with a body that could not be read as an `AgentResponse`:
 
 ```text
 ⚠️ I lost contact while the request was being processed. The result is unknown, so please check before retrying.
 ```
 
-The second message exists because the Agent behind this path is tool-capable: Hermes Agent runs its configured toolsets and MCP servers, so a request whose outcome is unknown may already have performed a real side effect. Telling the user to "try again" in that state could duplicate it. See [Slack Gateway → Orchestrator dispatch](../slack-gateway/orchestrator-dispatch.md) for the full classification, including the known `500 internal_error` gap.
+The second message exists because the Agent behind this path is tool-capable: Hermes Agent runs its configured toolsets and MCP servers, so a request whose outcome is unknown may already have performed a real side effect. Telling the user to "try again" in that state could duplicate it.
+
+`500` belongs in the second group because the Orchestrator returns that same generic body whether its Hermes adapter never reached Hermes *or* the Agent failed after running — Hermes Agent's output-text extraction happens only once the Hermes call has returned, so a failure there means Hermes completed a run with its tool calls. When Hermes is simply down this is more cautious than necessary, which is the intended direction. See [Slack Gateway → Orchestrator dispatch](../slack-gateway/orchestrator-dispatch.md) for the full classification.
 
 Internal exception details are written to container logs rather than exposed to the Slack user. The Gateway log line for a failed dispatch carries `outcome=orchestrator.request_error` or `outcome=orchestrator.outcome_unknown`, which is the same classification the Slack message reflects.
 
@@ -704,9 +706,14 @@ This separation prevents implementation details, internal URLs, and provider err
 
 ## Verify the Downstream-Unavailable Error
 
-Two independent hops can now fail this way. Stopping Hermes Agent exercises the Orchestrator's own failure mapping (the Gateway sees `HTTP 500`); stopping the Orchestrator exercises the Gateway's connection failure. Both are *definite failures* — the request provably did not run — so both must produce the same `Please try again` message.
+Two independent hops can fail this way, and they produce **different** Slack messages. That difference is the behavior to verify, not an inconsistency:
 
-The unknown-outcome message is not reachable by stopping a container: it needs contact to be lost after the request was written, which these procedures do not reproduce. It is covered by automated tests instead.
+| Stopped service | What the Gateway sees | Slack message | Log `outcome=` |
+| --- | --- | --- | --- |
+| `hermes-agent` | `HTTP 500` from the Orchestrator | `The result is unknown` | `orchestrator.outcome_unknown` |
+| `orchestrator` | connection refused | `Please try again` | `orchestrator.request_error` |
+
+Stopping Hermes gives the cautious message even though nothing ran, because the Orchestrator's `500` cannot distinguish that from "the Agent ran, then failed". Stopping the Orchestrator is unambiguous: the request never left the Gateway.
 
 Stop the Hermes Agent container:
 
@@ -719,7 +726,7 @@ Send a new direct message to the Slack application.
 Expected final Slack message:
 
 ```text
-⚠️ I couldn't complete that request. Please try again.
+⚠️ I lost contact while the request was being processed. The result is unknown, so please check before retrying.
 ```
 
 The temporary processing message should be removed.
@@ -730,7 +737,11 @@ Inspect the Gateway logs:
 docker compose logs --tail=150 slack-gateway
 ```
 
-The logs should contain the internal connection failure.
+The logs should contain `Orchestrator returned HTTP 500` and `outcome=orchestrator.outcome_unknown`. The Orchestrator's own logs carry the correlated dispatch failure:
+
+```bash
+docker compose logs --tail=150 orchestrator
+```
 
 Restart Hermes:
 
@@ -747,12 +758,20 @@ Repeat the check for the other hop:
 docker compose stop orchestrator
 ```
 
-The Slack message must be identical. The Gateway logs should show a connection failure to the Orchestrator rather than to Hermes. Then restart it:
+This time the Slack message is the retry one:
+
+```text
+⚠️ I couldn't complete that request. Please try again.
+```
+
+The Gateway logs should show `Failed to connect to the Orchestrator` and `outcome=orchestrator.request_error`. Then restart it:
 
 ```bash
 docker compose start orchestrator
 docker compose ps
 ```
+
+The remaining unknown-outcome causes — a read/write timeout, or contact lost after the request was written — are not reachable by stopping a container, and are covered by automated tests instead.
 
 ## Duplicate Event Handling
 
@@ -904,7 +923,7 @@ Check:
 
 ### Downstream Connection Failure
 
-The Gateway log line names which hop failed. `Failed to connect to the Orchestrator` and `Orchestrator request timed out` are the Gateway's own hop; `Orchestrator returned HTTP 500` means the Orchestrator was reached and the Hermes hop failed behind it — check the Orchestrator logs for the correlated dispatch line.
+The Gateway log line names which hop failed and how it was classified (`outcome=`). `Failed to connect to the Orchestrator` and `Orchestrator request timed out` are the Gateway's own hop; `Orchestrator returned HTTP 500` means the Orchestrator was reached and the Hermes hop failed behind it — check the Orchestrator logs for the correlated dispatch line.
 
 Inspect container state:
 
@@ -935,7 +954,7 @@ concierge-network
 
 ### Hermes Authentication Failure
 
-This now surfaces in Slack as the same generic error, and in the Gateway log as `Orchestrator returned HTTP 500` — the credential itself is the Orchestrator's, not the Gateway's, so check the Orchestrator logs to confirm.
+This now surfaces in Slack as the unknown-outcome message, and in the Gateway log as `Orchestrator returned HTTP 500` with `outcome=orchestrator.outcome_unknown` — the credential itself is the Orchestrator's, not the Gateway's, so check the Orchestrator logs to confirm. (A rejected credential means Hermes never ran, but the Orchestrator's generic `500` cannot say so; see User-Facing Error Handling above.)
 
 Check that the same local value is used for:
 

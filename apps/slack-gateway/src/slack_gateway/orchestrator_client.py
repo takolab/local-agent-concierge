@@ -59,14 +59,17 @@ were a subclass of the failed case, an `except DispatchFailedError` would
 silently swallow it, which is exactly the confusion the split exists to
 prevent.
 
-Classification is fail-safe. Only the httpx errors that provably precede
-delivery (`_NOT_DELIVERED_ERRORS` below) and an explicit HTTP error status
-are treated as definite failures; everything else -- including anything
-unclassified -- is reported as an unknown outcome, because presenting an
-ambiguous outcome as a safe retry is the more dangerous mistake. The Agent
-reachable through this path today is tool-capable (Hermes Agent's
-`/v1/responses` runs its configured toolsets and MCP servers), so a retry
-after an ambiguous outcome can duplicate a real side effect.
+Classification is fail-safe. Only two things are treated as definite
+failures: the httpx errors that provably precede delivery
+(`_NOT_DELIVERED_ERRORS` below) and the HTTP statuses the Orchestrator
+only returns *before* an Agent is called (`_AGENT_NOT_STARTED_STATUSES`).
+Everything else -- including `500 internal_error`, an unexpected status,
+and anything unclassified -- is reported as an unknown outcome, because
+presenting an ambiguous outcome as a safe retry is the more dangerous
+mistake. The Agent reachable through this path today is tool-capable
+(Hermes Agent's `/v1/responses` runs its configured toolsets and MCP
+servers), so a retry after an ambiguous outcome can duplicate a real side
+effect.
 
 ## Credentials
 
@@ -161,6 +164,28 @@ _NOT_DELIVERED_ERRORS = (
     httpx.LocalProtocolError,
 )
 
+# HTTP statuses that prove no Agent was reached. Both are produced by the
+# Orchestrator strictly before `Orchestrator.dispatch()` is called:
+#
+# - 400 `invalid_json` / `invalid_request` -- the body failed parsing or
+#   `AgentRequest` validation.
+# - 404 `unknown_agent` (the registry raised before the Agent was called)
+#   or `not_found` (the path was never `/dispatch` at all).
+#
+# `500 internal_error` is deliberately absent. The Orchestrator returns
+# that same generic body both when its Hermes adapter never reached Hermes
+# and when the Agent raised *after* running -- `HermesAgent.handle()` calls
+# `_extract_output_text()` only once the Hermes call has returned, so an
+# extraction failure means Hermes completed a run, tool calls included.
+# A `500` therefore does not prove that nothing happened, and this slice
+# cannot tell the two apart: the response body is identical. Everything
+# outside this set is an unknown outcome, which is false-cautious when
+# Hermes was simply down, and that is the direction this boundary errs in
+# on purpose. Distinguishing "agent not started" from "agent outcome
+# unknown" needs failure provenance the Orchestrator's API does not carry
+# yet -- see docs/slack-gateway/orchestrator-dispatch.md.
+_AGENT_NOT_STARTED_STATUSES = frozenset({400, 404})
+
 # The complete `error.type` vocabulary the Slack Gateway records for a
 # dispatch failure. `ERROR_TYPE_DISPATCH_FAILED` keeps its original value
 # so existing telemetry for the definite-failure case is unchanged.
@@ -218,9 +243,9 @@ class OrchestratorClient:
 
         `DispatchFailedError` (nothing ran):
 
-        - the Orchestrator answered with an error status, including
-          `404 unknown_agent`, `400 invalid_request` and
-          `500 internal_error`;
+        - the Orchestrator answered `400 invalid_request` /
+          `invalid_json`, or `404 unknown_agent` / `not_found` -- both are
+          produced before any Agent is called;
         - the request provably never left this process
           (`_NOT_DELIVERED_ERRORS`).
 
@@ -230,6 +255,10 @@ class OrchestratorClient:
           delivered and may still be executing;
         - any other transport error, which can fire after the request was
           written;
+        - the Orchestrator answered `500 internal_error`, or any status
+          outside `_AGENT_NOT_STARTED_STATUSES` -- a `500` covers both
+          "the adapter never reached Hermes" and "the Agent raised after
+          running", with an identical body;
         - the Orchestrator answered `2xx` with a body that is not a valid
           `AgentResponse` -- here the Agent demonstrably *did* run and
           only its result was lost.
@@ -239,11 +268,8 @@ class OrchestratorClient:
         the type only lets the caller say the right thing to the user.
 
         **A raised error reports this client's outcome, not the downstream
-        one.** Only an explicit error status from the Orchestrator is
-        evidence about what happened on the other side -- and even a
-        `500` does not distinguish "the Agent was never successfully
-        called" from "the Agent raised after doing work", because the
-        Orchestrator returns one generic body for both. See
+        one.** Only the two pre-dispatch statuses above are evidence that
+        nothing ran; everything else errs toward "unknown". See
         docs/slack-gateway/orchestrator-dispatch.md.
         """
         trace_headers: dict[str, str] = {}
@@ -260,10 +286,13 @@ class OrchestratorClient:
             )
             response.raise_for_status()
         except httpx.HTTPStatusError as error:
-            raise DispatchFailedError(
-                "Orchestrator returned "
-                f"HTTP {error.response.status_code}"
-            ) from error
+            status_code = error.response.status_code
+            message = f"Orchestrator returned HTTP {status_code}"
+
+            if status_code in _AGENT_NOT_STARTED_STATUSES:
+                raise DispatchFailedError(message) from error
+
+            raise DispatchOutcomeUnknownError(message) from error
         except _NOT_DELIVERED_ERRORS as error:
             # Checked before the TimeoutException clause below, because
             # ConnectTimeout and PoolTimeout are themselves timeouts --
