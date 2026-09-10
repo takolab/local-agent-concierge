@@ -5,8 +5,9 @@ This collects and formats evidence a Human inspects. It is deliberately
 incapable of driving the validation:
 
 - It sends no Slack message, dispatches no `AgentRequest`, and calls no
-  Agent. The only HTTP it performs is `GET` against Phoenix's read API and
-  a liveness endpoint.
+  Agent. The only HTTP it performs is `GET` against Phoenix's read API.
+  (The runbook's Orchestrator `/health` liveness check is a separate
+  Human-run command, deliberately not part of this tool's surface.)
 - It starts, stops, restarts and recreates nothing. `docker inspect` and
   `docker compose ps` are the only container commands used.
 - It never prints a sentinel value. `scan` reports `absent` / `LEAKED`
@@ -362,7 +363,10 @@ def command_provenance(_: argparse.Namespace) -> int:
         started = _run(
             ["docker", "inspect", container, "--format", "{{.State.StartedAt}}"]
         )
-        print(f"  {service:<16} image={image[:26]}  started={started[:19]}")
+        print(
+            f"  {service:<16} container={container[:MIN_CONTAINER_PREFIX]}  "
+            f"image={image[:26]}  started={started[:19]}"
+        )
 
     print()
     print(
@@ -370,7 +374,11 @@ def command_provenance(_: argparse.Namespace) -> int:
         "built images\n      (slack-gateway, orchestrator) have no digest "
         "and no mechanical link to a\n      source commit -- the repository "
         "SHA above plus a clean tree is what ties\n      them to source. See "
-        "the runbook's 'Exact Runtime Provenance' section."
+        "the runbook's 'Exact Runtime Provenance' section.\n\n"
+        "      Record the orchestrator `container` value: pass it to "
+        "`scan --expect-container`\n      so the credential is read from "
+        "the instance that handled the request, not\n      from whatever "
+        "is running when the scan happens."
     )
     return 0
 
@@ -428,6 +436,7 @@ def resolve_env_needles(
     env_file_text: str | None = None,
     service_values: dict[str, str] | None = None,
     service_name: str | None = None,
+    service_problem: str | None = None,
 ) -> tuple[dict[str, str], list[Unresolved]]:
     """Resolve `--env NAME` values, returning (resolved, unresolved).
 
@@ -467,9 +476,12 @@ def resolve_env_needles(
                 unresolved.append(
                     Unresolved(
                         name,
-                        f"not present in the running {service_name!r} "
-                        "container's environment (no fallback is used when "
-                        "--env-from-service is given)",
+                        service_problem
+                        or (
+                            f"not present in the running {service_name!r} "
+                            "container's environment (no fallback is used "
+                            "when --env-from-service is given)"
+                        ),
                     )
                 )
             continue
@@ -561,7 +573,23 @@ def parse_env_file(text: str) -> tuple[dict[str, str], dict[str, str]]:
     return values, rejected
 
 
-def service_environment(service: str) -> dict[str, str]:
+class ServiceLookup(NamedTuple):
+    values: dict[str, str]
+    container_id: str | None
+    problem: str | None
+
+
+# Shortest `--expect-container` prefix accepted. Twelve hex characters is
+# what `docker ps` shows and is unambiguous in practice; anything shorter
+# could match a container other than the recorded one, which is the
+# opposite of what binding is for.
+MIN_CONTAINER_PREFIX = 12
+
+
+def service_environment(
+    service: str,
+    expected_container: str | None = None,
+) -> ServiceLookup:
     """Read a running Compose service's actual environment.
 
     This is the ground truth for "what did Docker Compose inject": the
@@ -569,18 +597,50 @@ def service_environment(service: str) -> dict[str, str]:
     performed. Nothing is printed -- the values are returned for use as
     scan needles only.
 
-    Returns an empty mapping when the service is not running, which
-    surfaces as an unresolved sentinel and therefore as a failed run.
+    `expected_container` binds the read to a specific container id, and
+    exists because "authoritative" and "the same instance" are different
+    properties. The runbook records provenance *before* the Slack request
+    and scans *after* it, so a service recreated in between resolves to a
+    new container holding a new credential: scanning that one finds it
+    absent and reports clean while the credential the request actually
+    used is the one that leaked. A mismatch is a problem, never a silent
+    substitution.
+
+    Every failure path returns a `problem` rather than empty values, so
+    the caller can say which one occurred instead of reporting a generic
+    "not found".
     """
     container = _run(["docker", "compose", "ps", "-q", service])
     if not container or container.startswith("<"):
-        return {}
+        return ServiceLookup({}, None, f"the {service!r} service is not running")
+
+    if expected_container is not None:
+        if len(expected_container) < MIN_CONTAINER_PREFIX:
+            return ServiceLookup(
+                {},
+                container,
+                f"--expect-container needs at least {MIN_CONTAINER_PREFIX} "
+                "characters to identify a container unambiguously",
+            )
+
+        if not container.startswith(expected_container):
+            return ServiceLookup(
+                {},
+                container,
+                f"the running {service!r} container is "
+                f"{container[:MIN_CONTAINER_PREFIX]}, not the recorded "
+                f"{expected_container[:MIN_CONTAINER_PREFIX]} -- it was "
+                "replaced between the request and this scan, so its "
+                "environment is not the one that handled the request",
+            )
 
     listing = _run(
         ["docker", "inspect", container, "--format", "{{range .Config.Env}}{{println .}}{{end}}"]
     )
     if listing.startswith("<"):
-        return {}
+        return ServiceLookup(
+            {}, container, f"the {service!r} container could not be inspected"
+        )
 
     values: dict[str, str] = {}
     for line in listing.splitlines():
@@ -588,7 +648,7 @@ def service_environment(service: str) -> dict[str, str]:
         if separator and value:
             values[name] = value
 
-    return values
+    return ServiceLookup(values, container, None)
 
 
 def command_scan(args: argparse.Namespace) -> int:
@@ -613,12 +673,19 @@ def command_scan(args: argparse.Namespace) -> int:
     if args.env_file:
         env_file_text = Path(args.env_file).read_text()
 
+    lookup = (
+        service_environment(args.env_from_service, args.expect_container)
+        if args.env_from_service
+        else None
+    )
+
     resolved, unresolved = resolve_env_needles(
         args.env or [],
         dict(os.environ),
         env_file_text,
-        service_environment(args.env_from_service) if args.env_from_service else None,
+        lookup.values if lookup else None,
         args.env_from_service,
+        lookup.problem if lookup else None,
     )
     needles.update(resolved)
 
@@ -714,6 +781,15 @@ def main(argv: list[str] | None = None) -> int:
             "Exclusive: when given, no other source is consulted for those "
             "names, so an unreadable container fails the run instead of "
             "silently degrading to a stale value."
+        ),
+    )
+    scan.add_argument(
+        "--expect-container",
+        help=(
+            "container id recorded in the pre-run provenance. The scan "
+            "fails unless --env-from-service still resolves to it, so a "
+            "service recreated between the request and this scan cannot "
+            "be read as if it were the instance that handled the request."
         ),
     )
     scan.add_argument(

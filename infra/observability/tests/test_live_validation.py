@@ -459,7 +459,11 @@ def test_scan_fails_closed_when_the_service_cannot_be_inspected(
         raise AssertionError("Phoenix must not be queried on an incomplete check")
 
     monkeypatch.setattr(lv, "_fetch_trace_payload", _must_not_be_called)
-    monkeypatch.setattr(lv, "service_environment", lambda service: {})
+    monkeypatch.setattr(
+        lv,
+        "service_environment",
+        lambda service, expected=None: lv.ServiceLookup({}, None, "synthetic problem"),
+    )
     monkeypatch.setenv("SYNTHETIC_KEY", "synthetic-stale-host-value")
 
     exit_code = lv.main(
@@ -592,22 +596,32 @@ def test_rejection_reasons_never_quote_the_value():
     assert SYNTHETIC_SECRET not in str(values)
 
 
+CONTAINER_A = "aaaaaaaaaaaa1111111111111111111111111111111111111111111111111111"
+CONTAINER_B = "bbbbbbbbbbbb2222222222222222222222222222222222222222222222222222"
+
+
+def _fake_run(container_id: str, env_listing: str | None = None):
+    """Stand in for `_run`, answering the two commands the helper issues."""
+    listing = env_listing or f"PATH=/usr/bin\nSYNTHETIC_KEY={SYNTHETIC_SECRET}\nEMPTY="
+
+    def run(command):
+        if command[:3] == ["docker", "compose", "ps"]:
+            return container_id
+        return listing
+
+    return run
+
+
 def test_service_environment_reads_the_injected_values(monkeypatch):
     """Ground truth: whatever the container's own Config.Env holds."""
-    monkeypatch.setattr(
-        lv,
-        "_run",
-        lambda command: (
-            "container-id"
-            if command[:3] == ["docker", "compose", "ps"]
-            else f"PATH=/usr/bin\nSYNTHETIC_KEY={SYNTHETIC_SECRET}\nEMPTY="
-        ),
-    )
+    monkeypatch.setattr(lv, "_run", _fake_run(CONTAINER_A))
 
-    values = lv.service_environment("orchestrator")
+    lookup = lv.service_environment("orchestrator")
 
-    assert values["SYNTHETIC_KEY"] == SYNTHETIC_SECRET
-    assert "EMPTY" not in values
+    assert lookup.problem is None
+    assert lookup.container_id == CONTAINER_A
+    assert lookup.values["SYNTHETIC_KEY"] == SYNTHETIC_SECRET
+    assert "EMPTY" not in lookup.values
 
 
 @pytest.mark.parametrize(
@@ -619,7 +633,92 @@ def test_service_environment_fails_closed(monkeypatch, ps_output):
     silently skipped check."""
     monkeypatch.setattr(lv, "_run", lambda command: ps_output)
 
-    assert lv.service_environment("orchestrator") == {}
+    lookup = lv.service_environment("orchestrator")
+
+    assert lookup.values == {}
+    assert lookup.problem is not None
+    assert "not running" in lookup.problem
+
+
+# --- binding the read to the instance that handled the request ----------
+
+
+def test_expected_container_matches_the_running_one(monkeypatch):
+    monkeypatch.setattr(lv, "_run", _fake_run(CONTAINER_A))
+
+    lookup = lv.service_environment(
+        "orchestrator", CONTAINER_A[: lv.MIN_CONTAINER_PREFIX]
+    )
+
+    assert lookup.problem is None
+    assert lookup.values["SYNTHETIC_KEY"] == SYNTHETIC_SECRET
+
+
+def test_a_replaced_container_is_a_problem_not_a_substitution(monkeypatch):
+    """Regression for a temporal binding gap: provenance is recorded before
+    the request and the scan runs after it, so a service recreated in
+    between resolves to a new container holding a new credential. Reading
+    that one finds it absent and reports clean while the credential the
+    request actually used is the one that leaked."""
+    monkeypatch.setattr(lv, "_run", _fake_run(CONTAINER_B))
+
+    lookup = lv.service_environment(
+        "orchestrator", CONTAINER_A[: lv.MIN_CONTAINER_PREFIX]
+    )
+
+    assert lookup.values == {}
+    assert lookup.problem is not None
+    assert "replaced between the request and this scan" in lookup.problem
+
+
+def test_a_too_short_container_prefix_is_rejected(monkeypatch):
+    """A prefix short enough to match a container other than the recorded
+    one defeats the point of binding."""
+    monkeypatch.setattr(lv, "_run", _fake_run(CONTAINER_A))
+
+    lookup = lv.service_environment("orchestrator", CONTAINER_A[:4])
+
+    assert lookup.values == {}
+    assert "at least" in lookup.problem
+
+
+def test_scan_cannot_pass_when_the_container_was_replaced(
+    monkeypatch, tmp_path, capsys
+):
+    """End-to-end: container A handled the request and its credential
+    leaked; container B is what the service resolves to at scan time. The
+    scan must fail closed before Phoenix is queried."""
+    needles_file = tmp_path / "needles.txt"
+    needles_file.write_text("harmless=synthetic-absent-value\n")
+
+    def _must_not_be_called(trace_id):  # pragma: no cover - asserted below
+        raise AssertionError("Phoenix must not be queried on an incomplete check")
+
+    monkeypatch.setattr(lv, "_fetch_trace_payload", _must_not_be_called)
+    monkeypatch.setattr(lv, "_run", _fake_run(CONTAINER_B))
+    monkeypatch.delenv("SYNTHETIC_KEY", raising=False)
+
+    exit_code = lv.main(
+        [
+            "scan",
+            "synthetic-trace-id",
+            "--needles-file",
+            str(needles_file),
+            "--env",
+            "SYNTHETIC_KEY",
+            "--env-from-service",
+            "orchestrator",
+            "--expect-container",
+            CONTAINER_A[: lv.MIN_CONTAINER_PREFIX],
+        ]
+    )
+
+    assert exit_code == 2
+
+    output = capsys.readouterr().out
+    assert "INCOMPLETE" in output
+    assert "replaced between the request and this scan" in output
+    assert SYNTHETIC_SECRET not in output
 
 
 def test_scan_command_fails_when_a_requested_env_needle_is_missing(

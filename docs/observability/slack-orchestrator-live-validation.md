@@ -74,7 +74,15 @@ python3 infra/observability/live_validation.py provenance
 
 It reports the repository SHA, whether the working tree is clean, and for
 `slack-gateway`, `orchestrator`, `hermes-agent`, `ollama` and
-`otel-collector`: the local image ID and the container's start time.
+`otel-collector`: the **container id**, the local image ID, and the
+container's start time.
+
+**Record the `orchestrator` container id.** §8's credential scan takes it
+as `--expect-container` so the credential is read from the instance that
+handled the request. Without it, a service recreated between the request
+and the scan resolves to a *new* container with a *new* credential: the
+scan finds that one absent and reports clean while the credential the
+request actually used is the one that leaked.
 
 **Known provenance limitation — do not overstate this.** `slack-gateway`
 and `orchestrator` are built locally from this repository, so they have
@@ -363,7 +371,9 @@ Check them:
 ```bash
 python3 infra/observability/live_validation.py scan <TRACE_ID> \
   --needles-file <path> \
-  --env HERMES_API_SERVER_KEY --env-from-service orchestrator
+  --env HERMES_API_SERVER_KEY \
+  --env-from-service orchestrator \
+  --expect-container <the orchestrator container id from §3>
 ```
 
 **The tool never prints a value** — only `absent` / `LEAKED` per label — so
@@ -388,6 +398,19 @@ the host environment happens to hold. A stale host value would scan clean
 against telemetry that leaked the *current* credential — a lower-authority
 answer is worse than no answer, because only one of them is visibly
 incomplete.
+
+**And it is bound to one instance.** "Authoritative" and "the same
+instance" are different properties: provenance is recorded *before* the
+request and the scan runs *after* it, so a service recreated in between is
+still an authoritative source — of the wrong credential.
+`--expect-container` closes that window. If `orchestrator` no longer
+resolves to the recorded id, the scan is `INCOMPLETE` (exit `2`, Phoenix
+not queried) and names the mismatch rather than reading the replacement.
+
+If the Orchestrator *was* legitimately restarted mid-validation, the run is
+over: its credential may differ from the one the request used, so nothing
+this scan reports would be evidence about that request. Start again from
+§3.
 
 The Orchestrator is the right service to read it from because it is the
 only **caller-side** holder: since #43 the Slack Gateway no longer has the
@@ -509,6 +532,9 @@ Stop and do not proceed (or do not continue) if any of these hold:
   observed (§14);
 - the trace cannot be interpreted — spans missing with no explanation, or
   more than one trace ID for one request;
+- any service was recreated between recording provenance and collecting
+  evidence — the run's provenance no longer describes what handled the
+  request;
 - the Slack workspace, channel, or thread is not one you control.
 
 ## 13. Evidence capture template
@@ -521,9 +547,9 @@ Operator:
 
 Repository SHA:
 Working tree:            clean / DIRTY
-Containers (image ID, started):
+Containers (container id, image ID, started):
   slack-gateway:
-  orchestrator:
+  orchestrator:            <- record the container id; §8 needs it
   hermes-agent:
   ollama:
   otel-collector:
@@ -545,6 +571,7 @@ Gateway → Orchestrator confirmed:                   YES / NO / UNKNOWN
 Orchestrator → Hermes confirmed:                    YES / NO / UNKNOWN
 Present in MLflow (trace id, state):
 Sensitive sentinel check (labels checked, result):  PASS / FAIL / UNKNOWN
+Credential read bound to the request's container:   YES / NO
 
 Unexpected side effects:                            YES / NO / UNKNOWN
 Post-validation checks performed:
@@ -669,6 +696,12 @@ that state did not occur. One observation, not a proof of the general case.
 
 - The operator's message wording was not §5's fixed string, so a later run
   following this runbook will be more reproducible than this one.
+- The credential scan was **not bound** to a recorded container id — §3's
+  `--expect-container` step did not exist yet. The binding did hold in
+  fact: `orchestrator` started at 11:24:42 and was never recreated, while
+  the only recreation that session (`slack-gateway`, 17:21:28) preceded the
+  17:27 request. But that is inferred from start times rather than pinned,
+  so it is weaker evidence than a later run following §3 will produce.
 - The sentinel check covered the seven labels listed above. It did **not**
   include the Slack message text or the model's response text, which §8
   asks for — neither was captured at the time, and neither is recoverable
