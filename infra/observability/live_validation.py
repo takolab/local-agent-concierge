@@ -656,33 +656,17 @@ def service_environment(
 
 def command_scan(args: argparse.Namespace) -> int:
     """Check whether sentinel values reached Phoenix. Values are never printed."""
-    needles: dict[str, str] = {}
-
-    if args.needles_file:
-        try:
-            needles.update(parse_needles(Path(args.needles_file).read_text()))
-        except NeedlesFileError as error:
-            # Caught here so a bad needles file exits as a defined
-            # INCOMPLETE rather than as a traceback -- a traceback would
-            # print the raising line's source and, on some Python
-            # versions, the offending expression's context.
-            print(f"INCOMPLETE -- {args.needles_file} cannot be used as supplied:")
-            print(f"  {error}")
-            print()
-            print("Nothing was checked.")
-            return 2
-
-    env_file_text = None
-    if args.env_file:
-        env_file_text = Path(args.env_file).read_text()
-
-    # Checked first, before the needles file is read and long before
-    # Phoenix is queried. `--env-from-service` without a binding reads
-    # whichever container is current at scan time, which is the exact
-    # false-PASS `--expect-container` exists to close: a service recreated
-    # between the request and the scan yields a different credential, finds
-    # it absent, and reports clean. Leaving the binding optional would have
-    # fixed the mechanism while leaving the path that needs it open.
+    # Argument-shape checks come first, before any file is read, any
+    # container is inspected, and long before Phoenix is queried: an
+    # invocation that cannot produce usable evidence should say so for
+    # that reason, not fail later on an unrelated missing file.
+    #
+    # `--env-from-service` without a binding reads whichever container is
+    # current at scan time, which is the exact false-PASS
+    # `--expect-container` exists to close: a service recreated between the
+    # request and the scan yields a different credential, finds it absent,
+    # and reports clean. Leaving the binding optional would have fixed the
+    # mechanism while leaving the path that needs it open.
     #
     # The reverse pairing is refused too. `--expect-container` alone does
     # nothing, and an option that silently does nothing is worse here than
@@ -707,6 +691,26 @@ def command_scan(args: argparse.Namespace) -> int:
             "container.\nNothing was checked."
         )
         return 2
+
+    needles: dict[str, str] = {}
+
+    if args.needles_file:
+        try:
+            needles.update(parse_needles(Path(args.needles_file).read_text()))
+        except NeedlesFileError as error:
+            # Caught here so a bad needles file exits as a defined
+            # INCOMPLETE rather than as a traceback -- a traceback would
+            # print the raising line's source and, on some Python
+            # versions, the offending expression's context.
+            print(f"INCOMPLETE -- {args.needles_file} cannot be used as supplied:")
+            print(f"  {error}")
+            print()
+            print("Nothing was checked.")
+            return 2
+
+    env_file_text = None
+    if args.env_file:
+        env_file_text = Path(args.env_file).read_text()
 
     lookup = (
         service_environment(args.env_from_service, args.expect_container)

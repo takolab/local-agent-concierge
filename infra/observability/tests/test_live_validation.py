@@ -736,6 +736,40 @@ def test_scan_refuses_an_unpaired_binding(
     assert SYNTHETIC_SECRET not in output
 
 
+def test_pair_validation_precedes_any_file_read(monkeypatch, tmp_path, capsys):
+    """The guards must run before the needles file is opened.
+
+    An invocation that cannot produce usable evidence should say so for
+    that reason, not fail later on an unrelated missing file -- and the
+    comment claiming this order is only true if the code actually has it.
+    """
+    missing = tmp_path / "does-not-exist.txt"
+    assert not missing.exists()
+
+    def _must_not_be_called(trace_id):  # pragma: no cover - asserted below
+        raise AssertionError("Phoenix must not be queried on an incomplete check")
+
+    monkeypatch.setattr(lv, "_fetch_trace_payload", _must_not_be_called)
+
+    exit_code = lv.main(
+        [
+            "scan",
+            "synthetic-trace-id",
+            "--needles-file",
+            str(missing),
+            "--env",
+            "SYNTHETIC_KEY",
+            "--env-from-service",
+            "orchestrator",
+        ]
+    )
+
+    assert exit_code == 2
+
+    output = capsys.readouterr().out
+    assert "--env-from-service requires --expect-container" in output
+
+
 def test_scan_cannot_pass_when_the_container_was_replaced(
     monkeypatch, tmp_path, capsys
 ):
