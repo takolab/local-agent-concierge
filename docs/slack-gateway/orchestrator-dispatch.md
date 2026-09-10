@@ -290,7 +290,10 @@ Milestone 6).
 The Slack Gateway no longer holds a Hermes credential at all.
 `HERMES_API_BASE_URL` and `HERMES_API_SERVER_KEY` were removed from its
 configuration and from its Compose service; the Orchestrator, which owns
-the Hermes hop, is the only service that still has them. No
+the Hermes hop, is now the only **caller-side** holder. (`hermes-agent`
+still holds the same value as its own `API_SERVER_KEY` — the server side
+it validates incoming requests against — so this narrows who can *call*
+Hermes, not how many containers the value exists in.) No
 `Authorization` header is sent to `POST /dispatch` — that endpoint has no
 authentication (`docs/orchestrator/domain-model.md`, "Authorization
 boundary"), and forwarding a bearer credential to an endpoint that does

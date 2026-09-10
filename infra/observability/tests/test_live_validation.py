@@ -261,8 +261,85 @@ def test_parse_needles_reads_labelled_values():
 def test_parse_needles_rejects_malformed_lines(text):
     """A silently dropped needle would turn a missed leak into a clean
     report, so a malformed line is an error, not a skip."""
-    with pytest.raises(ValueError):
+    with pytest.raises(lv.NeedlesFileError):
         lv.parse_needles(text)
+
+
+def test_parse_needles_rejects_a_duplicate_label():
+    """Regression for a false PASS: `needles[label] = value` overwrote the
+    earlier entry, so a repeated label silently dropped the first value
+    from the scan entirely."""
+    with pytest.raises(lv.NeedlesFileError, match="repeats a label"):
+        lv.parse_needles("m=first-value\nm=second-value\n")
+
+
+def test_duplicate_label_cannot_produce_a_clean_scan(
+    monkeypatch, tmp_path, capsys
+):
+    """End-to-end: the *first* of two same-labelled values is present in
+    the payload. Overwriting silently made that scan clean."""
+    needles_file = tmp_path / "needles.txt"
+    needles_file.write_text(f"m={SYNTHETIC_SECRET}\nm=synthetic-other-value\n")
+
+    def _must_not_be_called(trace_id):  # pragma: no cover - asserted below
+        raise AssertionError("Phoenix must not be queried on an unusable file")
+
+    monkeypatch.setattr(lv, "_fetch_trace_payload", _must_not_be_called)
+
+    exit_code = lv.main(
+        ["scan", "synthetic-trace-id", "--needles-file", str(needles_file)]
+    )
+
+    assert exit_code != 0
+
+    output = capsys.readouterr().out
+    assert "INCOMPLETE" in output
+    assert SYNTHETIC_SECRET not in output
+
+
+@pytest.mark.parametrize(
+    "line",
+    [f"={SYNTHETIC_SECRET}", SYNTHETIC_SECRET, f"label with space {SYNTHETIC_SECRET}"],
+    ids=["no_label", "pasted_value_only", "no_separator"],
+)
+def test_malformed_needle_errors_never_echo_the_input(line):
+    """A malformed entry is exactly where a secret is most likely sitting
+    -- a pasted value with no label, a stray `=`. Quoting the input to be
+    helpful printed the thing this tool exists to keep out of terminals
+    and tracebacks."""
+    with pytest.raises(lv.NeedlesFileError) as error:
+        lv.parse_needles(line + "\n")
+
+    assert SYNTHETIC_SECRET not in str(error.value)
+    assert SYNTHETIC_SECRET not in repr(error.value)
+
+
+def test_malformed_needles_file_exits_cleanly_without_the_secret(
+    monkeypatch, tmp_path, capsys
+):
+    """The error must surface as a defined INCOMPLETE, not an uncaught
+    traceback -- a traceback prints the raising line's source context."""
+    needles_file = tmp_path / "needles.txt"
+    needles_file.write_text(f"={SYNTHETIC_SECRET}\n")
+
+    monkeypatch.setattr(
+        lv,
+        "_fetch_trace_payload",
+        lambda trace_id: '{"data": []}',
+    )
+
+    exit_code = lv.main(
+        ["scan", "synthetic-trace-id", "--needles-file", str(needles_file)]
+    )
+
+    assert exit_code == 2
+
+    captured = capsys.readouterr()
+    assert "INCOMPLETE" in captured.out
+    assert "Nothing was checked." in captured.out
+    assert SYNTHETIC_SECRET not in captured.out
+    assert SYNTHETIC_SECRET not in captured.err
+    assert "Traceback" not in captured.err
 
 
 def test_scan_finds_a_present_value_case_insensitively():

@@ -64,8 +64,9 @@ recording here: the historical references below to
 `apps/slack-gateway/src/slack_gateway/hermes_client.py` describe a file
 Slice 6 **deleted** (its `HermesClient` was the Gateway's direct Hermes
 path, and keeping it would have left two dispatch authorities over one
-path), and `HermesAgent` is now the only holder of the Hermes credential
-in the running stack. The Gateway side is documented in
+path), and `HermesAgent` is now the only **caller-side** holder of the
+Hermes credential in the running stack — `hermes-agent` itself still holds
+the same value as the `API_SERVER_KEY` it validates against. The Gateway side is documented in
 `docs/slack-gateway/orchestrator-dispatch.md`.
 
 None of these six slices implement request classification or automatic

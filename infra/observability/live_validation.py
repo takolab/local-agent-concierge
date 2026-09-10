@@ -239,12 +239,29 @@ def check_expected_relationships(
     return results
 
 
+class NeedlesFileError(ValueError):
+    """A needles file that cannot be used as supplied.
+
+    Its message names the offending line *number* and nothing else --
+    never the line, a fragment of it, or the value. A malformed entry is
+    exactly where a secret is most likely to be sitting (a pasted value
+    with no label, a stray `=`), so quoting the input to be helpful would
+    print the thing this tool exists to keep out of terminals, tracebacks
+    and pasted evidence records.
+    """
+
+
 def parse_needles(text: str) -> dict[str, str]:
     """Parse a `label=value` needles file.
 
     Blank lines and `#` comments are ignored. The value may contain `=`.
-    Raises ValueError on a malformed line rather than skipping it -- a
-    silently dropped needle would turn a missed leak into a clean report.
+
+    Two things are errors rather than best-effort recoveries, both because
+    the failure mode is a clean report on an unchecked sentinel:
+
+    - a malformed line, which would otherwise be skipped;
+    - a duplicate label, which would otherwise overwrite the earlier value
+      and silently drop it from the scan.
     """
     needles: dict[str, str] = {}
 
@@ -254,12 +271,21 @@ def parse_needles(text: str) -> dict[str, str]:
             continue
 
         label, separator, value = line.partition("=")
-        if not separator or not label.strip() or not value.strip():
-            raise ValueError(
-                f"line {number} is not `label=value`: {line[:20]!r}..."
+        label = label.strip()
+
+        if not separator or not label or not value.strip():
+            raise NeedlesFileError(
+                f"line {number} is not a valid `label=value` entry"
             )
 
-        needles[label.strip()] = value.strip()
+        if label in needles:
+            raise NeedlesFileError(
+                f"line {number} repeats a label used earlier; "
+                "every sentinel needs its own label, or one of them is "
+                "never checked"
+            )
+
+        needles[label] = value.strip()
 
     return needles
 
@@ -548,7 +574,18 @@ def command_scan(args: argparse.Namespace) -> int:
     needles: dict[str, str] = {}
 
     if args.needles_file:
-        needles.update(parse_needles(Path(args.needles_file).read_text()))
+        try:
+            needles.update(parse_needles(Path(args.needles_file).read_text()))
+        except NeedlesFileError as error:
+            # Caught here so a bad needles file exits as a defined
+            # INCOMPLETE rather than as a traceback -- a traceback would
+            # print the raising line's source and, on some Python
+            # versions, the offending expression's context.
+            print(f"INCOMPLETE -- {args.needles_file} cannot be used as supplied:")
+            print(f"  {error}")
+            print()
+            print("Nothing was checked.")
+            return 2
 
     env_file_text = None
     if args.env_file:

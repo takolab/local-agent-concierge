@@ -344,8 +344,15 @@ not look for it, and do not record its absence as a defect.
 
 ### Sensitive values that must be absent
 
-Build a needles file — one `label=value` line each — from the values the
-run actually used. The Gateway's own log line supplies the identifiers:
+Build a needles file — one `label=value` line each, **every label
+distinct** — from the values the run actually used. A repeated label, or a
+malformed line, makes the file unusable (`INCOMPLETE`, exit `2`) rather
+than dropping an entry: a sentinel silently excluded from the scan is the
+same false PASS as one that was never supplied. Parse errors name the line
+*number* only and never quote its content, since a malformed entry is
+exactly where a pasted secret tends to be.
+
+The Gateway's own log line supplies the identifiers:
 
 ```bash
 docker compose logs --tail=50 slack-gateway | grep "Dispatching Slack message"
@@ -372,9 +379,15 @@ HERMES_API_SERVER_KEY` alone finds nothing on most machines.
 `--env-from-service` reads the value out of the **running container's own
 environment** — what Compose actually injected, after any interpolation it
 performed. That is the ground truth for "the credential this stack is
-using", and it needs no dotenv interpretation at all. The Orchestrator is
-the right service to read it from: since #43 it is the only one holding
-the Hermes credential.
+using", and it needs no dotenv interpretation at all.
+
+The Orchestrator is the right service to read it from because it is the
+only **caller-side** holder: since #43 the Slack Gateway no longer has the
+credential, and the Orchestrator owns the client side of the Hermes hop.
+The `hermes-agent` container holds the *same value* as its own
+`API_SERVER_KEY` — the server side it validates against — so either
+container would yield the right string to scan for, but the Orchestrator is
+the one whose possession of it this path depends on.
 
 A `--env-file` fallback exists, but it is deliberately **fail-closed**: any
 value whose Compose semantics this tool cannot reproduce — `${...}`
