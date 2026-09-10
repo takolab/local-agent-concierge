@@ -381,6 +381,14 @@ environment** — what Compose actually injected, after any interpolation it
 performed. That is the ground truth for "the credential this stack is
 using", and it needs no dotenv interpretation at all.
 
+**It is exclusive.** When `--env-from-service` is given, no other source is
+consulted for those names: an unreadable container, or one that does not
+carry the variable, fails the run rather than quietly substituting whatever
+the host environment happens to hold. A stale host value would scan clean
+against telemetry that leaked the *current* credential — a lower-authority
+answer is worse than no answer, because only one of them is visibly
+incomplete.
+
 The Orchestrator is the right service to read it from because it is the
 only **caller-side** holder: since #43 the Slack Gateway no longer has the
 credential, and the Orchestrator owns the client side of the Hermes hop.
@@ -479,7 +487,7 @@ Before deciding whether a retry is safe, inspect, in order:
 1. `docker compose logs --tail=100 orchestrator` — did `POST /dispatch`
    reach it, and what did it log?
 2. `docker compose logs --tail=100 hermes-agent` — did Hermes start a turn?
-3. the trace, if one was exported — how far down the chain did spans get?
+3. the trace, if one was exported — how far along the path did spans get?
 4. §14's side-effect checks.
 
 Record the decision and its basis in the run record.

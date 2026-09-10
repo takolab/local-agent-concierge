@@ -15,8 +15,8 @@ incapable of driving the validation:
   into a terminal, a CI log, or a pasted evidence record.
 
 Standard library only, matching the other stdlib-only tooling in this
-repository. Its pure logic (span-tree building, expected-chain checking,
-needle parsing and scanning) is unit-tested in
+repository. Its pure logic (span-tree building, expected-relationship
+checking, needle parsing and scanning) is unit-tested in
 `infra/observability/tests/test_live_validation.py` with fixtures -- those
 tests perform no network or Docker access, and they do not stand in for
 live evidence.
@@ -103,7 +103,7 @@ class TreeRow(NamedTuple):
     span: Span
 
 
-class ChainResult(NamedTuple):
+class RelationshipResult(NamedTuple):
     relationship: str
     ok: bool
     detail: str
@@ -149,8 +149,11 @@ def build_span_tree(spans: Iterable[Span]) -> list[TreeRow]:
     present in this set (a span from another trace, or one that never
     reached Phoenix) terminates the walk, so its child renders at the
     depth it can be proven to have rather than being dropped. A cyclic
-    parent chain -- which no correct exporter produces, but which must not
-    hang an evidence tool -- is bounded by the number of spans.
+    cyclic parent-link loop -- which no correct exporter produces, but
+    which must not hang an evidence tool -- is bounded by the number of
+    spans. (This walk is about resolving one span's depth; it is unrelated
+    to `EXPECTED_RELATIONSHIPS`, which is the shape the trace is checked
+    against.)
     """
     ordered = sorted(spans, key=lambda span: (span.start_time, span.name))
     by_id = {span.span_id: span for span in ordered if span.span_id}
@@ -174,7 +177,7 @@ def build_span_tree(spans: Iterable[Span]) -> list[TreeRow]:
 def check_expected_relationships(
     spans: Iterable[Span],
     expected: Iterable[tuple[str, str]] = EXPECTED_RELATIONSHIPS,
-) -> list[ChainResult]:
+) -> list[RelationshipResult]:
     """Check each expected parent -> child relationship by span name.
 
     Reports one result per relationship. A missing span and a
@@ -188,7 +191,7 @@ def check_expected_relationships(
     than guessed at.
     """
     spans = list(spans)
-    results: list[ChainResult] = []
+    results: list[RelationshipResult] = []
 
     by_name: dict[str, list[Span]] = {}
     for span in spans:
@@ -209,13 +212,13 @@ def check_expected_relationships(
                 if not found
             ]
             results.append(
-                ChainResult(relationship, False, f"missing span(s): {missing}")
+                RelationshipResult(relationship, False, f"missing span(s): {missing}")
             )
             continue
 
         if len(parents) > 1 or len(children) > 1:
             results.append(
-                ChainResult(
+                RelationshipResult(
                     relationship,
                     False,
                     "ambiguous: more than one span with this name in the trace",
@@ -225,10 +228,10 @@ def check_expected_relationships(
 
         parent, child = parents[0], children[0]
         if child.parent_id == parent.span_id:
-            results.append(ChainResult(relationship, True, "parented correctly"))
+            results.append(RelationshipResult(relationship, True, "parented correctly"))
         else:
             results.append(
-                ChainResult(
+                RelationshipResult(
                     relationship,
                     False,
                     f"child's parent_id is {child.parent_id!r}, "
@@ -373,7 +376,7 @@ def command_provenance(_: argparse.Namespace) -> int:
 
 
 def command_trace(args: argparse.Namespace) -> int:
-    """Print one trace's span tree and check the expected chain."""
+    """Print one trace's span tree and check the expected relationships."""
     try:
         payload_text = _fetch_trace_payload(args.trace_id)
     except OSError as error:
@@ -424,17 +427,23 @@ def resolve_env_needles(
     environ: dict[str, str],
     env_file_text: str | None = None,
     service_values: dict[str, str] | None = None,
+    service_name: str | None = None,
 ) -> tuple[dict[str, str], list[Unresolved]]:
     """Resolve `--env NAME` values, returning (resolved, unresolved).
 
-    Resolution order, most authoritative first:
+    **When `service_name` is given, that source is exclusive.** The running
+    container's environment is the credential this stack is actually using;
+    if it cannot be read, the honest outcome is "not checked", not a
+    quietly substituted value from somewhere else. Falling back would let
+    an unreadable container degrade the check to a stale host value --
+    scanning `OLD_SECRET`, reporting it absent, and exiting 0 while the
+    `NEW_SECRET` the container holds is the one that leaked. A
+    lower-authority answer is worse than no answer here, because only one
+    of them is visibly incomplete.
 
-    1. `service_values` -- read out of a **running container's** own
-       environment, i.e. the value Docker Compose actually injected. This
-       is ground truth and needs no dotenv interpretation at all.
-    2. the process environment.
-    3. an env-file, parsed by `parse_env_file` -- which refuses any value
-       whose Compose semantics this tool cannot reproduce.
+    With no service requested, resolution falls back in order: the process
+    environment, then an env-file parsed by `parse_env_file` (which
+    refuses any value whose Compose semantics this tool cannot reproduce).
 
     Unresolved names are *returned* with a reason, never skipped. The
     caller must fail on them: a sentinel that was not checked cannot
@@ -450,9 +459,22 @@ def resolve_env_needles(
     unresolved: list[Unresolved] = []
 
     for name in names:
-        value = (
-            service_values.get(name) or environ.get(name) or file_values.get(name)
-        )
+        if service_name is not None:
+            value = service_values.get(name)
+            if value:
+                resolved[name] = value
+            else:
+                unresolved.append(
+                    Unresolved(
+                        name,
+                        f"not present in the running {service_name!r} "
+                        "container's environment (no fallback is used when "
+                        "--env-from-service is given)",
+                    )
+                )
+            continue
+
+        value = environ.get(name) or file_values.get(name)
         if value:
             resolved[name] = value
         elif name in rejected:
@@ -596,6 +618,7 @@ def command_scan(args: argparse.Namespace) -> int:
         dict(os.environ),
         env_file_text,
         service_environment(args.env_from_service) if args.env_from_service else None,
+        args.env_from_service,
     )
     needles.update(resolved)
 
@@ -660,7 +683,8 @@ def main(argv: list[str] | None = None) -> int:
     provenance.set_defaults(func=command_provenance)
 
     trace = subparsers.add_parser(
-        "trace", help="span tree and expected-chain check for one trace"
+        "trace",
+        help="span tree and expected-relationship check for one trace",
     )
     trace.add_argument("trace_id")
     trace.set_defaults(func=command_trace)
@@ -687,7 +711,9 @@ def main(argv: list[str] | None = None) -> int:
         help=(
             "read --env names from this running Compose service's own "
             "environment -- the value Docker Compose actually injected. "
-            "The authoritative source; prefer it over --env-file."
+            "Exclusive: when given, no other source is consulted for those "
+            "names, so an unreadable container fails the run instead of "
+            "silently degrading to a stale value."
         ),
     )
     scan.add_argument(

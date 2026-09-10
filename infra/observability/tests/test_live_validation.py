@@ -397,18 +397,89 @@ def test_env_needle_falls_back_to_the_env_file():
     assert unresolved == []
 
 
-def test_service_environment_outranks_the_env_file():
-    """The running container's own environment is the value Compose
-    actually injected, so it wins over any local file's idea of it."""
+def test_service_values_are_consulted_only_when_requested():
+    """There is no precedence ladder any more: the container source is
+    either the requested authority (and then exclusive) or it is not
+    consulted at all. `command_scan` passes both arguments together or
+    neither, so this asserts the guard rather than a supported call."""
+    resolved, _ = lv.resolve_env_needles(
+        ["SYNTHETIC_KEY"],
+        {"SYNTHETIC_KEY": "synthetic-host-value"},
+        None,
+        {"SYNTHETIC_KEY": SYNTHETIC_SECRET},
+        service_name=None,
+    )
+
+    assert resolved == {"SYNTHETIC_KEY": "synthetic-host-value"}
+
+
+def test_service_authority_is_exclusive_and_fails_closed():
+    """Regression for a silent degradation: with `--env-from-service`
+    requested and the container unreadable, falling back to the host's
+    value would scan a stale credential -- reporting it absent while the
+    one the container actually holds is the one that leaked."""
     resolved, unresolved = lv.resolve_env_needles(
         ["SYNTHETIC_KEY"],
-        {"SYNTHETIC_KEY": "from-process"},
-        "SYNTHETIC_KEY=from-file\n",
+        {"SYNTHETIC_KEY": "synthetic-stale-host-value"},
+        "SYNTHETIC_KEY=synthetic-stale-file-value\n",
+        {},
+        "orchestrator",
+    )
+
+    assert resolved == {}
+    assert [entry.name for entry in unresolved] == ["SYNTHETIC_KEY"]
+    assert "orchestrator" in unresolved[0].reason
+    assert "no fallback" in unresolved[0].reason
+
+
+def test_service_authority_still_resolves_when_the_container_has_it():
+    resolved, unresolved = lv.resolve_env_needles(
+        ["SYNTHETIC_KEY"],
+        {"SYNTHETIC_KEY": "synthetic-stale-host-value"},
+        None,
         {"SYNTHETIC_KEY": SYNTHETIC_SECRET},
+        "orchestrator",
     )
 
     assert resolved == {"SYNTHETIC_KEY": SYNTHETIC_SECRET}
     assert unresolved == []
+
+
+def test_scan_fails_closed_when_the_service_cannot_be_inspected(
+    monkeypatch, tmp_path, capsys
+):
+    """End-to-end: `--env-from-service` supplied, `service_environment()`
+    returns {}, a stale value sits in the host environment. The command
+    must fail closed and never query Phoenix."""
+    needles_file = tmp_path / "needles.txt"
+    needles_file.write_text("harmless=synthetic-absent-value\n")
+
+    def _must_not_be_called(trace_id):  # pragma: no cover - asserted below
+        raise AssertionError("Phoenix must not be queried on an incomplete check")
+
+    monkeypatch.setattr(lv, "_fetch_trace_payload", _must_not_be_called)
+    monkeypatch.setattr(lv, "service_environment", lambda service: {})
+    monkeypatch.setenv("SYNTHETIC_KEY", "synthetic-stale-host-value")
+
+    exit_code = lv.main(
+        [
+            "scan",
+            "synthetic-trace-id",
+            "--needles-file",
+            str(needles_file),
+            "--env",
+            "SYNTHETIC_KEY",
+            "--env-from-service",
+            "orchestrator",
+        ]
+    )
+
+    assert exit_code == 2
+
+    output = capsys.readouterr().out
+    assert "INCOMPLETE" in output
+    assert "SYNTHETIC_KEY" in output
+    assert "synthetic-stale-host-value" not in output
 
 
 def test_unresolvable_env_needle_is_reported_not_skipped():
