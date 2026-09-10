@@ -16,6 +16,8 @@ from opentelemetry.trace import (
 )
 from slack_sdk.errors import SlackApiError
 
+from slack_gateway.orchestrator_client import dispatch_error_type
+
 def configure_tracing() -> None:
     resource = Resource.create(
         {
@@ -65,6 +67,12 @@ def trace_orchestrator_request() -> Iterator[Span]:
     Hermes hop (`orchestrator.telemetry`). Naming this span after the
     service actually called keeps those two hops distinguishable in one
     trace instead of collapsing them under a shared name.
+
+    A failure is recorded with the same bounded `error.type` the Slack
+    Gateway shows the user a message for, so a definite failure and an
+    unknown outcome stay distinguishable in the trace too -- classified in
+    one place (`orchestrator_client.dispatch_error_type`), never from the
+    exception's own text.
     """
     tracer = trace.get_tracer("slack_gateway")
 
@@ -80,10 +88,10 @@ def trace_orchestrator_request() -> Iterator[Span]:
     ) as span:
         try:
             yield span
-        except RuntimeError:
+        except RuntimeError as error:
             mark_span_error(
                 span,
-                error_type="orchestrator.request_error",
+                error_type=dispatch_error_type(error),
             )
             raise
 

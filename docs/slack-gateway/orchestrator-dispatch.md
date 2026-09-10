@@ -152,33 +152,73 @@ be handled — that is Milestone 6/7 work, not this change.
 
 ## Failure semantics
 
-Every failure of this boundary becomes a `RuntimeError` — the same
-exception type the message handler already caught around its previous
-outbound call — so the **user-facing Slack behavior is unchanged**: the
-existing `ERROR_MESSAGE` is posted in-thread and the processing status is
-removed.
+A failure of this boundary is not always evidence that nothing happened,
+so the Gateway distinguishes two outcomes and says a different thing for
+each. Both are `RuntimeError` subclasses, so the handler's existing
+`except RuntimeError` still catches everything; the type only decides what
+the user is told.
 
-| Condition | Orchestrator's answer | Gateway's `RuntimeError` |
-|---|---|---|
-| Orchestrator unreachable | — (no response) | `Failed to connect to the Orchestrator` |
-| Request exceeds the client timeout | — (no response) | `Orchestrator request timed out` |
-| Unknown `agent_name` | `404 unknown_agent` | `Orchestrator returned HTTP 404` |
-| Malformed request body | `400 invalid_request` | `Orchestrator returned HTTP 400` |
-| Agent raised (e.g. Hermes unreachable, non-2xx, unusable body) | `500 internal_error` | `Orchestrator returned HTTP 500` |
-| Body is not JSON | — | `Orchestrator response was not valid JSON` |
-| Body is not a valid `AgentResponse` | — | `Orchestrator response was not a valid AgentResponse` |
+| Condition | Orchestrator's answer | Exception | Message |
+|---|---|---|---|
+| Orchestrator unreachable (`ConnectError`, `ConnectTimeout`, `PoolTimeout`, `ProxyError`, `UnsupportedProtocol`, `LocalProtocolError`) | — (no response) | `DispatchFailedError`: `Failed to connect to the Orchestrator` | `ERROR_MESSAGE` |
+| Unknown `agent_name` | `404 unknown_agent` | `DispatchFailedError`: `Orchestrator returned HTTP 404` | `ERROR_MESSAGE` |
+| Malformed request body | `400 invalid_request` | `DispatchFailedError`: `Orchestrator returned HTTP 400` | `ERROR_MESSAGE` |
+| Agent raised (Hermes unreachable, non-2xx, unusable body) | `500 internal_error` | `DispatchFailedError`: `Orchestrator returned HTTP 500` | `ERROR_MESSAGE` |
+| Read/write timeout | — (no response) | `DispatchOutcomeUnknownError`: `Orchestrator request timed out` | `UNKNOWN_OUTCOME_MESSAGE` |
+| Transport error after the request was written (`ReadError`, `WriteError`, `CloseError`, `RemoteProtocolError`, …) | — (no response) | `DispatchOutcomeUnknownError`: `Lost contact with the Orchestrator` | `UNKNOWN_OUTCOME_MESSAGE` |
+| `2xx` body is not JSON | `200` | `DispatchOutcomeUnknownError`: `Orchestrator response was not valid JSON` | `UNKNOWN_OUTCOME_MESSAGE` |
+| `2xx` body is not a valid `AgentResponse` | `200` | `DispatchOutcomeUnknownError`: `Orchestrator response was not a valid AgentResponse` | `UNKNOWN_OUTCOME_MESSAGE` |
 
-These stay distinct in the *logs* rather than being collapsed into one
-generic message, but all of them produce the same single Slack reply,
-because a Slack user cannot act on the difference. None of the messages
-carries the underlying exception, the response body, or the instruction
-text.
+None of the messages carries the underlying exception, the response body,
+or the instruction text. The distinctions above stay visible in the logs
+and on the span (`error.type` is `orchestrator.request_error` or
+`orchestrator.outcome_unknown`).
 
-Timeout is deliberately its own case rather than part of the
-connection-failure one: they are materially different states, and only one
-of them says anything about what the Orchestrator did.
+### Why two messages, and not one
 
-### A failed dispatch does not mean the work stopped
+The Agent reachable through this path is **tool-capable**, not text-only.
+Hermes Agent's `/v1/responses` runs its configured toolsets and MCP
+servers: this repository has verified a real Terminal Tool side effect
+(`docs/roadmap.md` Milestone 2, "A controlled file-writing test confirmed
+that the Terminal Tool side effect occurred exactly once"), the runtime
+config carries a `terminal:` backend, and a real Slack message has been
+observed producing live `tools/call list_events` requests to the Google
+Calendar MCP (`docs/observability/google-calendar-mcp-telemetry.md`).
+
+So a dispatch whose outcome is unknown may have already executed a tool.
+Telling the user *"Please try again"* in that state invites an immediate
+retry that can duplicate a side effect. The two messages are:
+
+```text
+ERROR_MESSAGE            :warning: I couldn't complete that request. Please try again.
+UNKNOWN_OUTCOME_MESSAGE  :warning: I lost contact while the request was being
+                         processed. The result is unknown, so please check
+                         before retrying.
+```
+
+This is the one place the rewiring **deliberately changes user-facing
+Slack behavior**. Everything else on the failure path — the processing
+status cleanup, the log lines, the span handling — is unchanged.
+
+### Classification is fail-safe
+
+Only two things are treated as definite failures: an explicit error
+*status* from the Orchestrator, and the httpx errors that provably occur
+before any byte of the request is delivered (`_NOT_DELIVERED_ERRORS` in
+`orchestrator_client.py`). Everything else — including a `RuntimeError`
+from code this module did not classify — is reported as an unknown
+outcome.
+
+That direction is deliberate: showing "the result is unknown" when nothing
+actually ran costs the user an unnecessary check, while showing "please
+try again" after a tool ran can duplicate a real side effect. The
+allowlist shape also means a future httpx release adding a new error class
+cannot silently make an ambiguous outcome look safe.
+
+The two exception types are **siblings**, not parent and child, so an
+`except DispatchFailedError` cannot silently swallow the unknown case.
+
+### The timeout values do not establish an ordering
 
 The client timeout (330s) is set above the Orchestrator's own timeout on
 its Hermes call (300s) so that, in the ordinary case, the Gateway is still
@@ -189,31 +229,34 @@ ordering, not a guarantee, and nothing should be built on it as one.**
 write / pool *inactivity* timeouts — not a total end-to-end request
 deadline — and the Orchestrator's own `urllib` timeout is socket-level in
 the same way. Neither side has an execution deadline, so `330 > 300` does
-not establish that the Orchestrator always finishes first.
+not establish that the Orchestrator always finishes first. That is
+precisely why the unknown-outcome path above has to exist rather than
+being argued away.
 
-What that means for the table above:
+### Known residual gap: `500 internal_error`
 
-| Outcome | What it tells the caller |
-|---|---|
-| An error *status* from the Orchestrator (`4xx`/`5xx`) | The Orchestrator was reached and reported this deliberately. Evidence about the downstream state. |
-| `Orchestrator request timed out` | **Unknown completion state.** The request may have been delivered and may still be running. |
-| `Failed to connect to the Orchestrator` | Usually never delivered — but `httpx.RequestError` also covers errors raised after the request was written, so this is not proof of non-delivery either. |
-| Unusable response body | The Orchestrator answered; the dispatch itself completed. |
+The Orchestrator answers `500` both when its Hermes adapter never reached
+Hermes and when Hermes returned a non-2xx or an unusable body *after*
+possibly running tools. The body is the same generic `internal_error` in
+both cases, so the Gateway cannot tell them apart and classifies `500` as
+a definite failure — meaning a `500` that followed real tool execution is
+currently shown with the retry message.
 
-This is acceptable **only** because of what is on the other side today:
-the single registered Agent on this path generates text and performs no
-consequential side effect, so a Gateway-side timeout can at worst waste a
-model run. The user-facing error invites a retry, which today can only
-produce another text response.
+This is a real, known hole, left as-is on purpose: closing it means the
+Orchestrator distinguishing "the Agent was never successfully called" from
+"the Agent raised after starting", which is API-surface design and out of
+scope for this slice. It is recorded here and in "What this does not do"
+rather than papered over.
 
-It stops being acceptable the moment an Agent can act on the world — a
-calendar write, an email, a purchase. At that point a Gateway timeout
-followed by a user retry becomes an ambiguous or duplicated outcome, and
-this boundary needs an explicit execution-deadline or idempotency contract
-before that Agent exists. Designing one would mean changing the
-Orchestrator's API, which is out of scope for this slice; it is recorded
-here and in "What this does not do" as a prerequisite rather than
-resolved.
+### The larger contract this defers
+
+Splitting the message is the smallest correct change; it is not an
+execution-deadline or idempotency protocol. Neither side of this boundary
+has an execution deadline, and nothing here makes a retry safe — it only
+stops the Gateway from *claiming* one is. Before an Agent that performs
+consequential writes is reachable through this path, this boundary needs
+an explicit deadline or idempotency contract (see `docs/roadmap.md`
+Milestone 6).
 
 ## Credentials
 
@@ -266,12 +309,12 @@ their values changed.
 
 ## Verification
 
-**Automated only.** 52 tests in `apps/slack-gateway/tests`, run in the
+**Automated only.** 75 tests in `apps/slack-gateway/tests`, run in the
 service's own container (`docker compose --profile test run --rm
 slack-gateway-test`), which is what `.github/workflows/pytest.yml`
 executes:
 
-- `test_orchestrator_client.py` (19) — the request goes to `POST
+- `test_orchestrator_client.py` (36) — the request goes to `POST
   /dispatch` and not to `/v1/responses`; the body is exactly
   `{"agent_name", "request"}` with the 7 canonical `AgentRequest` fields,
   and round-trips back through `agent_request_from_dict` to the identical
@@ -280,9 +323,14 @@ executes:
   no active span still dispatches successfully; no credential header is
   ever sent; a valid `AgentResponse` (including `proposed_actions` /
   `memory_candidates`) is returned unwrapped; and each failure above maps
-  to its own bounded `RuntimeError` that leaks neither the body nor the
-  instruction text.
-- `test_slack_message_routing.py` (21) — a Slack message reaches the
+  to its own bounded exception that leaks neither the body nor the
+  instruction text; every httpx error that provably precedes delivery is a
+  `DispatchFailedError` and every one that can follow it is a
+  `DispatchOutcomeUnknownError`; the two types are siblings, so neither
+  can be swallowed by a handler written for the other; and
+  `dispatch_error_type` classifies anything unrecognized — including a
+  bare `RuntimeError` — as an unknown outcome.
+- `test_slack_message_routing.py` (24) — a Slack message reaches the
   Orchestrator under `agent_name: "hermes"`; the `AgentRequest` carries
   the mapping in the table above (including `trace_id is None` and empty
   `permissions`); thread-root conversation identity; the summary is posted
@@ -291,9 +339,15 @@ executes:
   events dispatch once; the eight ignored-event shapes reach neither the
   Orchestrator nor Slack; the span active during `dispatch()` is the
   `orchestrator.dispatch` CLIENT span and a child of `concierge.request`;
-  and the sentinel-based telemetry checks above.
-- `test_telemetry.py` (5) — the renamed span's name, kind, attributes,
-  sanitized error, and parent/child relationships.
+  and the sentinel-based telemetry checks above. A definite failure shows
+  the retry message while an unknown outcome shows the
+  "result is unknown" one — asserted on the property (says "unknown", does
+  not say "try again"), not only on the exact wording — and an
+  unclassified `RuntimeError` takes the unknown branch.
+- `test_telemetry.py` (8) — the renamed span's name, kind, attributes,
+  sanitized error, parent/child relationships, and the `error.type`
+  recorded for each of the two outcome classifications plus an
+  unclassified error.
 - `test_config.py` (7) — `ORCHESTRATOR_BASE_URL`'s default, override and
   URL validation, and that setting the removed `HERMES_API_*` variables
   resurrects neither a credential nor a second dispatch authority.
@@ -330,8 +384,11 @@ repository SHA and image digests.
   `AgentRequest` / `AgentResponse`, the Orchestrator, or Hermes Agent.
 - **No retry, fallback, or circuit breaking.** One request, one
   Orchestrator, one failure message.
-- **No execution-deadline or idempotency contract.** A failed dispatch
-  reports this client's outcome, not the downstream one — see "A failed
-  dispatch does not mean the work stopped" above. This must be resolved
-  before any Agent reachable through this path can perform a consequential
-  side effect.
+- **No execution-deadline or idempotency contract.** The Gateway now
+  *reports* an ambiguous outcome honestly, but nothing makes a retry safe
+  — see "Failure semantics" above. This must be resolved before an Agent
+  performing consequential writes is reachable through this path.
+- **`500 internal_error` is still classified as a definite failure**, even
+  though it can follow real tool execution — see "Known residual gap"
+  above. Closing it requires the Orchestrator to distinguish those two
+  states.

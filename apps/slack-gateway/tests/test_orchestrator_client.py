@@ -26,8 +26,13 @@ from opentelemetry.sdk.trace import TracerProvider
 
 from slack_gateway import telemetry
 from slack_gateway.orchestrator_client import (
+    ERROR_TYPE_DISPATCH_FAILED,
+    ERROR_TYPE_OUTCOME_UNKNOWN,
     HERMES_AGENT_NAME,
+    DispatchFailedError,
+    DispatchOutcomeUnknownError,
     OrchestratorClient,
+    dispatch_error_type,
 )
 
 SENTINEL_INSTRUCTION = "synthetic-instruction-sentinel"
@@ -275,7 +280,7 @@ def test_dispatch_maps_defined_error_statuses_to_runtime_error(
         response_factory=lambda: httpx.Response(status_code, json=body),
     )
 
-    with pytest.raises(RuntimeError) as error:
+    with pytest.raises(DispatchFailedError) as error:
         client.dispatch(HERMES_AGENT_NAME, _agent_request())
 
     assert str(error.value) == f"Orchestrator returned HTTP {status_code}"
@@ -290,7 +295,7 @@ def test_dispatch_maps_connection_failure_to_runtime_error() -> None:
         httpx.ConnectError("synthetic connect failure detail")
     )
 
-    with pytest.raises(RuntimeError) as error:
+    with pytest.raises(DispatchFailedError) as error:
         client.dispatch(HERMES_AGENT_NAME, _agent_request())
 
     assert str(error.value) == "Failed to connect to the Orchestrator"
@@ -313,7 +318,7 @@ def test_dispatch_maps_timeout_to_a_distinct_runtime_error() -> None:
         httpx.ReadTimeout("synthetic timeout detail")
     )
 
-    with pytest.raises(RuntimeError) as error:
+    with pytest.raises(DispatchOutcomeUnknownError) as error:
         client.dispatch(HERMES_AGENT_NAME, _agent_request())
 
     assert str(error.value) == "Orchestrator request timed out"
@@ -330,7 +335,7 @@ def test_dispatch_maps_non_json_body_to_runtime_error() -> None:
         ),
     )
 
-    with pytest.raises(RuntimeError) as error:
+    with pytest.raises(DispatchOutcomeUnknownError) as error:
         client.dispatch(HERMES_AGENT_NAME, _agent_request())
 
     assert str(error.value) == "Orchestrator response was not valid JSON"
@@ -361,13 +366,102 @@ def test_dispatch_maps_non_agent_response_body_to_runtime_error(
         response_factory=lambda: httpx.Response(200, json=body),
     )
 
-    with pytest.raises(RuntimeError) as error:
+    with pytest.raises(DispatchOutcomeUnknownError) as error:
         client.dispatch(HERMES_AGENT_NAME, _agent_request())
 
     assert str(error.value) == (
         "Orchestrator response was not a valid AgentResponse"
     )
     assert "synthetic" not in str(error.value)
+
+
+# --- Definite failure vs unknown outcome -------------------------------
+#
+# The split exists because the Agent reachable through this path is
+# tool-capable: presenting a possibly-delivered request as a safe retry can
+# duplicate a real side effect. Only errors that provably precede delivery,
+# and explicit error statuses, may be classified as definite failures.
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ConnectError("synthetic"),
+        httpx.ConnectTimeout("synthetic"),
+        httpx.PoolTimeout("synthetic"),
+        httpx.ProxyError("synthetic"),
+        httpx.UnsupportedProtocol("synthetic"),
+        httpx.LocalProtocolError("synthetic"),
+    ],
+    ids=lambda error: type(error).__name__,
+)
+def test_errors_before_delivery_are_definite_failures(
+    error: Exception,
+) -> None:
+    client = _client_raising(error)
+
+    with pytest.raises(DispatchFailedError) as raised:
+        client.dispatch(HERMES_AGENT_NAME, _agent_request())
+
+    assert not isinstance(raised.value, DispatchOutcomeUnknownError)
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        httpx.ReadTimeout("synthetic"),
+        httpx.WriteTimeout("synthetic"),
+        httpx.ReadError("synthetic"),
+        httpx.WriteError("synthetic"),
+        httpx.CloseError("synthetic"),
+        httpx.RemoteProtocolError("synthetic"),
+    ],
+    ids=lambda error: type(error).__name__,
+)
+def test_errors_that_can_follow_delivery_are_an_unknown_outcome(
+    error: Exception,
+) -> None:
+    client = _client_raising(error)
+
+    with pytest.raises(DispatchOutcomeUnknownError) as raised:
+        client.dispatch(HERMES_AGENT_NAME, _agent_request())
+
+    assert not isinstance(raised.value, DispatchFailedError)
+
+
+def test_the_two_outcomes_are_siblings_not_parent_and_child() -> None:
+    """Neither may be caught by a handler written for the other.
+
+    If the unknown case were a subclass of the failed case, an
+    `except DispatchFailedError` would silently swallow it -- exactly the
+    confusion the split exists to prevent. Both stay `RuntimeError`
+    subclasses so the Gateway's existing handling catches either.
+    """
+    assert not issubclass(DispatchOutcomeUnknownError, DispatchFailedError)
+    assert not issubclass(DispatchFailedError, DispatchOutcomeUnknownError)
+
+    assert issubclass(DispatchFailedError, RuntimeError)
+    assert issubclass(DispatchOutcomeUnknownError, RuntimeError)
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (DispatchFailedError("x"), ERROR_TYPE_DISPATCH_FAILED),
+        (DispatchOutcomeUnknownError("x"), ERROR_TYPE_OUTCOME_UNKNOWN),
+        (RuntimeError("x"), ERROR_TYPE_OUTCOME_UNKNOWN),
+        (ValueError("x"), ERROR_TYPE_OUTCOME_UNKNOWN),
+    ],
+    ids=["failed", "unknown", "unclassified_runtime", "unclassified_other"],
+)
+def test_dispatch_error_type_defaults_to_unknown(
+    error: BaseException,
+    expected: str,
+) -> None:
+    """Fail-safe classification: only an explicit definite failure is
+    reported as one. Under-reporting ambiguity is the dangerous
+    direction."""
+    assert dispatch_error_type(error) == expected
 
 
 def test_dispatch_failures_never_carry_the_instruction_text() -> None:

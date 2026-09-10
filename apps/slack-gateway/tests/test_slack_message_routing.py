@@ -23,7 +23,11 @@ from slack_sdk.errors import SlackApiError
 
 from slack_gateway import slack_app
 from slack_gateway.event_deduplicator import EventDeduplicator
-from slack_gateway.orchestrator_client import HERMES_AGENT_NAME
+from slack_gateway.orchestrator_client import (
+    HERMES_AGENT_NAME,
+    DispatchFailedError,
+    DispatchOutcomeUnknownError,
+)
 
 SENTINEL_TEXT = "synthetic-instruction-sentinel"
 SENTINEL_USER = "U-synthetic-user"
@@ -242,10 +246,11 @@ def test_non_completed_status_still_delivers_the_summary() -> None:
     assert client.thread_replies[0]["text"] == SENTINEL_SUMMARY
 
 
-def test_dispatch_failure_shows_the_existing_user_facing_error() -> None:
+def test_definite_failure_shows_the_existing_user_facing_error() -> None:
+    """A dispatch that provably did not run keeps the retry message."""
     client, _ = _handle(
         orchestrator_client=FakeOrchestratorClient(
-            error=RuntimeError("synthetic dispatch failure detail"),
+            error=DispatchFailedError("synthetic dispatch failure detail"),
         ),
     )
 
@@ -258,6 +263,53 @@ def test_dispatch_failure_shows_the_existing_user_facing_error() -> None:
 
     # The processing status is still cleaned up on the failure path.
     assert len(client.deleted) == 1
+
+
+def test_unknown_outcome_does_not_invite_a_retry() -> None:
+    """An ambiguous outcome must not be presented as a safe retry.
+
+    The Agent reachable through this path is tool-capable, so a retry
+    after a possibly-delivered request can duplicate a real side effect.
+    """
+    client, _ = _handle(
+        orchestrator_client=FakeOrchestratorClient(
+            error=DispatchOutcomeUnknownError("synthetic timeout detail"),
+        ),
+    )
+
+    replies = client.thread_replies
+    assert len(replies) == 1
+
+    text = replies[0]["text"]
+    assert text == slack_app.UNKNOWN_OUTCOME_MESSAGE
+    assert text != slack_app.ERROR_MESSAGE
+
+    # The distinguishing property, asserted directly rather than via the
+    # exact wording: the ambiguous message says the result is unknown and
+    # does not tell the user to try again.
+    assert "unknown" in text.lower()
+    assert "try again" not in text.lower()
+
+    assert "synthetic timeout detail" not in text
+
+    # Cleanup behavior is identical to the definite-failure path.
+    assert len(client.deleted) == 1
+
+
+def test_unclassified_runtime_error_is_treated_as_unknown() -> None:
+    """Fail-safe: only an explicit DispatchFailedError gets the retry
+    message. Anything else -- including a RuntimeError from code this
+    module did not classify -- is reported as an unknown outcome, because
+    under-reporting ambiguity is the dangerous direction."""
+    client, _ = _handle(
+        orchestrator_client=FakeOrchestratorClient(
+            error=RuntimeError("synthetic unclassified detail"),
+        ),
+    )
+
+    assert client.thread_replies[0]["text"] == (
+        slack_app.UNKNOWN_OUTCOME_MESSAGE
+    )
 
 
 def test_slack_delivery_failure_after_dispatch_is_survived() -> None:
@@ -346,14 +398,26 @@ def test_dispatch_runs_inside_the_slack_request_trace(
     assert dispatch_span.context.trace_id == request_span.context.trace_id
 
 
+@pytest.mark.parametrize(
+    ("error", "expected_error_type"),
+    [
+        (
+            DispatchFailedError("synthetic dispatch failure detail"),
+            "orchestrator.request_error",
+        ),
+        (
+            DispatchOutcomeUnknownError("synthetic dispatch failure detail"),
+            "orchestrator.outcome_unknown",
+        ),
+    ],
+    ids=["failed", "outcome_unknown"],
+)
 def test_dispatch_failure_marks_both_spans_with_a_bounded_error(
     exported_spans: list[ReadableSpan],
+    error: RuntimeError,
+    expected_error_type: str,
 ) -> None:
-    _handle(
-        orchestrator_client=FakeOrchestratorClient(
-            error=RuntimeError("synthetic dispatch failure detail"),
-        ),
-    )
+    _handle(orchestrator_client=FakeOrchestratorClient(error=error))
 
     spans = {span.name: span for span in exported_spans}
 
@@ -361,7 +425,7 @@ def test_dispatch_failure_marks_both_spans_with_a_bounded_error(
         span = spans[name]
         assert span.status.status_code == StatusCode.ERROR
         assert span.status.description is None
-        assert span.attributes["error.type"] == "orchestrator.request_error"
+        assert span.attributes["error.type"] == expected_error_type
         assert len(span.events) == 0
         assert "synthetic dispatch failure detail" not in str(span.attributes)
 

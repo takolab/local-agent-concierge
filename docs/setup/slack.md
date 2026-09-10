@@ -682,19 +682,31 @@ Updating the temporary message is intentionally avoided because Slack may displa
 
 ## User-Facing Error Handling
 
-When the Slack Gateway cannot complete a request — the Orchestrator being unreachable, the dispatch timing out, the Orchestrator returning an error status because Hermes itself failed, or an unusable response body — it posts a generic user-facing error:
+When the Slack Gateway cannot complete a request it posts one of two generic user-facing messages, chosen by whether the request could have run.
+
+**The dispatch definitely did not run** — the Orchestrator was unreachable, or it answered with an error status (`404` unknown agent, `400` malformed request, `500` because Hermes itself failed):
 
 ```text
 ⚠️ I couldn't complete that request. Please try again.
 ```
 
-Internal exception details are written to container logs rather than exposed to the Slack user.
+**The outcome is unknown** — the dispatch timed out reading or writing, contact was lost after the request had been written, or the Orchestrator answered but the body could not be read as an `AgentResponse`:
+
+```text
+⚠️ I lost contact while the request was being processed. The result is unknown, so please check before retrying.
+```
+
+The second message exists because the Agent behind this path is tool-capable: Hermes Agent runs its configured toolsets and MCP servers, so a request whose outcome is unknown may already have performed a real side effect. Telling the user to "try again" in that state could duplicate it. See [Slack Gateway → Orchestrator dispatch](../slack-gateway/orchestrator-dispatch.md) for the full classification, including the known `500 internal_error` gap.
+
+Internal exception details are written to container logs rather than exposed to the Slack user. The Gateway log line for a failed dispatch carries `outcome=orchestrator.request_error` or `outcome=orchestrator.outcome_unknown`, which is the same classification the Slack message reflects.
 
 This separation prevents implementation details, internal URLs, and provider errors from being shown unnecessarily in Slack.
 
 ## Verify the Downstream-Unavailable Error
 
-Two independent hops can now fail this way. Stopping Hermes Agent exercises the Orchestrator's own failure mapping (the Gateway sees `HTTP 500`); stopping the Orchestrator exercises the Gateway's connection failure. Both must produce the same Slack message.
+Two independent hops can now fail this way. Stopping Hermes Agent exercises the Orchestrator's own failure mapping (the Gateway sees `HTTP 500`); stopping the Orchestrator exercises the Gateway's connection failure. Both are *definite failures* — the request provably did not run — so both must produce the same `Please try again` message.
+
+The unknown-outcome message is not reachable by stopping a container: it needs contact to be lost after the request was written, which these procedures do not reproduce. It is covered by automated tests instead.
 
 Stop the Hermes Agent container:
 

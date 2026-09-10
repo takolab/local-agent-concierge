@@ -10,8 +10,11 @@ from slack_sdk.web import WebClient
 from slack_gateway.config import Settings
 from slack_gateway.event_deduplicator import EventDeduplicator
 from slack_gateway.orchestrator_client import (
+    ERROR_TYPE_DISPATCH_FAILED,
+    ERROR_TYPE_OUTCOME_UNKNOWN,
     HERMES_AGENT_NAME,
     OrchestratorClient,
+    dispatch_error_type,
 )
 from slack_gateway.telemetry import (
     mark_span_error,
@@ -27,6 +30,27 @@ ERROR_MESSAGE = (
     ":warning: I couldn't complete that request. "
     "Please try again."
 )
+
+# Shown when the dispatch's outcome is unknown rather than failed -- the
+# request may have been delivered and may still be running, or the Agent
+# ran and only its result was lost. Deliberately does NOT invite a retry:
+# the Agent reachable through this path is tool-capable (Hermes Agent runs
+# its configured toolsets and MCP servers), so an immediate retry can
+# duplicate a real side effect. See
+# docs/slack-gateway/orchestrator-dispatch.md.
+UNKNOWN_OUTCOME_MESSAGE = (
+    ":warning: I lost contact while the request was being processed. "
+    "The result is unknown, so please check before retrying."
+)
+
+# The user-facing text for each classification `dispatch_error_type`
+# produces. Keyed by that vocabulary rather than by exception type so
+# there is exactly one place deciding what a failure *is*, and this map
+# only decides how to say it.
+FAILURE_MESSAGES = {
+    ERROR_TYPE_DISPATCH_FAILED: ERROR_MESSAGE,
+    ERROR_TYPE_OUTCOME_UNKNOWN: UNKNOWN_OUTCOME_MESSAGE,
+}
 
 def _post_thread_message_and_remove_processing_status(
     *,
@@ -256,21 +280,31 @@ def handle_slack_message(
                     HERMES_AGENT_NAME,
                     agent_request,
                 )
-        except RuntimeError:
+        except RuntimeError as error:
+            # Two materially different outcomes, told apart by the
+            # exception's type: the dispatch definitely did not run, or it
+            # may have run and the outcome is unknown. Anything this
+            # client did not classify as a definite failure lands in the
+            # unknown bucket -- see `dispatch_error_type`.
+            error_type = dispatch_error_type(error)
+            failure_text = FAILURE_MESSAGES[error_type]
+
             mark_span_error(
                 request_span,
-                error_type="orchestrator.request_error",
+                error_type=error_type,
             )
 
             logger.exception(
                 "Failed to process Slack message through the "
                 "Orchestrator "
-                "(event_id=%s channel=%s user=%s ts=%s agent=%s)",
+                "(event_id=%s channel=%s user=%s ts=%s agent=%s "
+                "outcome=%s)",
                 event_id,
                 channel_id,
                 user_id,
                 message_ts,
                 HERMES_AGENT_NAME,
+                error_type,
             )
 
             try:
@@ -280,7 +314,7 @@ def handle_slack_message(
                         channel_id=channel_id,
                         thread_ts=root_thread_ts,
                         processing_message_ts=processing_message_ts,
-                        text=ERROR_MESSAGE,
+                        text=failure_text,
                         logger=logger,
                         event_id=event_id,
                     )
@@ -300,11 +334,12 @@ def handle_slack_message(
             logger.info(
                 "Orchestrator processing error displayed in Slack "
                 "(event_id=%s channel=%s ts=%s "
-                "thread_ts=%s delivery=%s)",
+                "thread_ts=%s outcome=%s delivery=%s)",
                 event_id,
                 channel_id,
                 message_ts,
                 root_thread_ts,
+                error_type,
                 delivery_method,
             )
             return
