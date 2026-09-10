@@ -123,9 +123,95 @@ header returning the identical response, with no Collector reachable at
 the configured endpoint — a live check that telemetry export failure does
 not change dispatch behavior.
 
-**Not verified end-to-end against the live stack.** No run of a real
-Slack Gateway → Orchestrator → Hermes Agent request has been observed in
-Phoenix or MLflow, because nothing calls the Orchestrator yet. The
-Orchestrator's half of the chain is verified by the tests above; the
-joined trace across all three services is not, and should be confirmed
-when the Slack Gateway is rewired.
+### End-to-end verification (manual)
+
+Run on 2026-09-10 against the real stack — the actual `orchestrator`,
+`hermes-agent` and `ollama` containers, exporting through the real
+`otel-collector` to Phoenix and MLflow. No stubs. Two `POST /dispatch`
+requests with `agent_name: "hermes"`, differing only in whether they
+carried an incoming `traceparent`.
+
+**With an incoming `traceparent`.** Sent
+`00-7075ec6bb22fa7f31f5840bceaa7850f-40d6e99612795bc1-01`; HTTP 200 in
+9.4s with the model's real answer. Phoenix's span API
+(`GET /v1/projects/{project}/spans?trace_id=...`) returned three spans on
+that one trace, whose `span_id`/`parent_id` values chain exactly:
+
+```text
+40d6e99612795bc1                             <- the traceparent that was sent
+  └─ a6019548472c8eaf   POST /dispatch       orchestrator   SERVER
+       └─ 99f4b9329c8063be   hermes.request  orchestrator   CLIENT
+            └─ 31e467eae5fc6fb2   /v1/responses   hermes-agent   SERVER
+```
+
+The last link is the one that could not be proven before: every earlier
+check of `hermes.request` → Hermes' own SERVER span used a stub Hermes
+server, not the real, auto-instrumented one.
+
+**Without a `traceparent`.** `POST /dispatch` became a true root span and
+the same three-span tree formed beneath it.
+
+**Attributes actually stored in Phoenix.** The two Orchestrator spans
+carried exactly the closed sets documented above, and nothing else:
+
+```text
+POST /dispatch   concierge.operation, http.method, http.route,
+                 http.status_code
+hermes.request   concierge.downstream.service, concierge.operation
+```
+
+(`hermes.request` shows no `http.status_code` because that is only set on
+a failure, and this call succeeded.) Hermes Agent's own `/v1/responses`
+span — produced by its auto-instrumentation, not by this repository —
+carried standard HTTP semantic-convention fields only: scheme, host,
+method, route, target, url, status code, flavor, server name, port and
+user agent. No request or response body, and no `Authorization`.
+
+No span carried `redaction.masked.count`, only `redaction.ignored.count`
+— nothing was flagged sensitive by the Collector because nothing
+sensitive was sent.
+
+**Redaction, checked with sentinels.** The instruction text, the model's
+response text, `user_id`, `conversation_id`, and any `Bearer` /
+`Authorization` string were each searched for across both Phoenix's
+stored spans and the Collector's debug output: **zero occurrences**.
+
+The request also carried a deliberately mismatched JSON
+`"trace_id": "json-side-correlation-id"`. It appears nowhere in the
+telemetry, and propagation followed the HTTP `traceparent` — confirming
+on the live stack what "`AgentRequest.trace_id` is not W3C Trace Context"
+above asserts.
+
+Incidentally, `/v1/responses` carries
+`http.user_agent: Python-urllib/3.12`, which identifies the caller as the
+Orchestrator rather than the Slack Gateway (which uses `httpx`) — useful
+when telling the two paths apart in a backend.
+
+### MLflow shows `IN_PROGRESS` for a synthetic parent — expected
+
+The first request's trace sat at `state: IN_PROGRESS` in MLflow while the
+second showed `state: OK`. This is not a defect and not something to fix:
+the first request's `traceparent` named a parent span that does not
+exist, because the "caller" was a hand-written header rather than a real
+instrumented service, so MLflow waits for a root span that will never
+arrive. The second request sent no `traceparent`, making the
+Orchestrator's own SERVER span the root, and MLflow settled immediately.
+
+Confirmed by running exactly that second request rather than assuming.
+Worth knowing before wiring the Slack Gateway: with a real caller the
+root span does exist, so this should not appear — if it does, the caller's
+own span is not reaching the Collector, which is a different problem.
+
+### Still not verified
+
+- **The Slack Gateway as the caller.** It still calls Hermes Agent
+  directly (`apps/slack-gateway/src/slack_gateway/hermes_client.py`), so
+  nothing links `concierge.request` to `POST /dispatch` yet. A Slack
+  message produces the Milestone 5 trace, not this one. That link is the
+  next slice's to prove.
+- **The error paths, on the live stack.** Hermes returning a non-success
+  status, an unreachable Hermes, and an unusable response body are all
+  covered by automated tests, including the `error.type` values recorded
+  — but none has been observed live.
+- **Hermes Agent's outbound MCP calls**, which remain an upstream gap
+  (see "The chain" above) and are unaffected by any of this.

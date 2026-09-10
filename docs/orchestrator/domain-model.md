@@ -1028,6 +1028,20 @@ OpenTelemetry pins must match the sibling services'. Neither the
 Dockerfile nor `.github/workflows/orchestrator.yml` needed changes — both
 install from `pyproject.toml`.
 
+### Confirmed on the live stack
+
+Everything above is covered by `test_trace_propagation.py`, which needs
+no Hermes Agent, no Ollama and no Collector. It was additionally
+confirmed against the real stack after this slice merged: a real
+`POST /dispatch` to `agent_name: "hermes"` produced the full
+`POST /dispatch` -> `hermes.request` -> `/v1/responses` chain as one
+trace in both Phoenix and MLflow, with no instruction text, response
+text, identifier or credential reaching either backend. The evidence,
+and the list of what is still unverified (the Slack Gateway as caller,
+and the error paths), is in
+`docs/observability/orchestrator-trace-context.md`, "End-to-end
+verification (manual)".
+
 ### What this slice does not do
 
 - It does not connect the Slack Gateway to the Orchestrator. That is
