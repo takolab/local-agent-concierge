@@ -141,33 +141,65 @@ def test_cyclic_parent_chain_terminates():
     assert all(row.depth <= len(spans) for row in rows)
 
 
-# --- check_expected_chain ----------------------------------------------
+# --- check_expected_relationships --------------------------------------
 
 
-def test_expected_chain_passes_for_a_correctly_parented_trace():
-    results = lv.check_expected_chain(_healthy_trace())
+def test_expected_relationships_pass_for_a_correctly_parented_trace():
+    results = lv.check_expected_relationships(_healthy_trace())
 
-    assert len(results) == len(lv.EXPECTED_CHAIN) - 1
+    assert len(results) == len(lv.EXPECTED_RELATIONSHIPS)
     assert all(result.ok for result in results)
 
 
-def test_expected_chain_reports_a_missing_span_distinctly():
+def test_a_trace_missing_slack_response_cannot_pass():
+    """Regression for a false PASS: `slack.response` is a second child of
+    `concierge.request`, not part of the dispatch chain, so a purely linear
+    expectation ignored it -- and a trace where the Slack reply never
+    emitted reported every link OK. The runbook requires all six spans."""
+    spans = [s for s in _healthy_trace() if s.name != "slack.response"]
+
+    results = lv.check_expected_relationships(spans)
+    failed = [r for r in results if not r.ok]
+
+    assert len(failed) == 1
+    assert failed[0].relationship == "concierge.request -> slack.response"
+    assert "missing" in failed[0].detail
+
+
+def test_every_expected_span_is_covered_by_some_relationship():
+    """Requiring all relationships must also require all six spans -- that
+    equivalence is what lets the command's exit status stand in for the
+    runbook's span-count criterion."""
+    assert set(lv.EXPECTED_SPAN_NAMES) == {
+        "concierge.request",
+        "orchestrator.dispatch",
+        "POST /dispatch",
+        "hermes.request",
+        "/v1/responses",
+        "slack.response",
+    }
+
+    covered = {name for pair in lv.EXPECTED_RELATIONSHIPS for name in pair}
+    assert covered == set(lv.EXPECTED_SPAN_NAMES)
+
+
+def test_expected_relationships_report_a_missing_span_distinctly():
     spans = [s for s in _healthy_trace() if s.name != "POST /dispatch"]
 
-    results = {r.relationship: r for r in lv.check_expected_chain(spans)}
+    results = {r.relationship: r for r in lv.check_expected_relationships(spans)}
 
     broken = results["orchestrator.dispatch -> POST /dispatch"]
     assert not broken.ok
     assert "missing" in broken.detail
 
 
-def test_expected_chain_reports_a_broken_parent_link_distinctly():
+def test_expected_relationships_report_a_broken_parent_link_distinctly():
     """A hop that emitted but did not continue the trace is a different
     failure from a hop that never emitted."""
     spans = _healthy_trace()
     spans[2] = _span("POST /dispatch", "c3", None, "2020-01-01T00:00:02")
 
-    results = {r.relationship: r for r in lv.check_expected_chain(spans)}
+    results = {r.relationship: r for r in lv.check_expected_relationships(spans)}
 
     broken = results["orchestrator.dispatch -> POST /dispatch"]
     assert not broken.ok
@@ -175,17 +207,17 @@ def test_expected_chain_reports_a_broken_parent_link_distinctly():
     assert "missing" not in broken.detail
 
 
-def test_expected_chain_reports_ambiguity_rather_than_guessing():
+def test_expected_relationships_report_ambiguity_rather_than_guessing():
     spans = _healthy_trace()
     spans.append(_span("hermes.request", "d9", "c3", "2020-01-01T00:00:09"))
 
-    results = {r.relationship: r for r in lv.check_expected_chain(spans)}
+    results = {r.relationship: r for r in lv.check_expected_relationships(spans)}
 
     assert not results["POST /dispatch -> hermes.request"].ok
     assert "ambiguous" in results["POST /dispatch -> hermes.request"].detail
 
 
-def test_expected_chain_matches_the_span_names_the_code_emits():
+def test_expected_span_names_match_what_the_code_emits():
     """Guards the runbook against drift: these names come from
     slack_gateway.telemetry, orchestrator.telemetry, and Hermes Agent's
     auto-instrumented route."""
@@ -198,16 +230,9 @@ def test_expected_chain_matches_the_span_names_the_code_emits():
 
     assert '"concierge.request"' in gateway
     assert '"orchestrator.dispatch"' in gateway
+    assert '"slack.response"' in gateway
     assert 'DISPATCH_SPAN_NAME = "POST /dispatch"' in orchestrator
     assert 'HERMES_SPAN_NAME = "hermes.request"' in orchestrator
-
-    assert lv.EXPECTED_CHAIN == (
-        "concierge.request",
-        "orchestrator.dispatch",
-        "POST /dispatch",
-        "hermes.request",
-        "/v1/responses",
-    )
 
 
 def test_phoenix_project_matches_the_collector_configuration():
@@ -270,6 +295,133 @@ def test_scan_results_never_carry_the_needle_value():
     assert results[0].found is True
     assert SYNTHETIC_SECRET not in str(results)
     assert SYNTHETIC_SECRET not in "".join(r.label for r in results)
+
+
+# --- env sentinel resolution -------------------------------------------
+
+
+def test_env_needle_resolves_from_the_process_environment():
+    resolved, unresolved = lv.resolve_env_needles(
+        ["SYNTHETIC_KEY"], {"SYNTHETIC_KEY": SYNTHETIC_SECRET}
+    )
+
+    assert resolved == {"SYNTHETIC_KEY": SYNTHETIC_SECRET}
+    assert unresolved == []
+
+
+def test_env_needle_falls_back_to_the_env_file():
+    """Docker Compose reads .env itself; a host-side python3 process does
+    not, which is exactly how a required sentinel came to be skipped."""
+    resolved, unresolved = lv.resolve_env_needles(
+        ["SYNTHETIC_KEY"], {}, f"SYNTHETIC_KEY={SYNTHETIC_SECRET}\n"
+    )
+
+    assert resolved == {"SYNTHETIC_KEY": SYNTHETIC_SECRET}
+    assert unresolved == []
+
+
+def test_unresolvable_env_needle_is_reported_not_skipped():
+    """Regression for a false PASS: an explicitly requested sentinel that
+    could not be resolved must reach the caller as unresolved, so the run
+    can be failed. Skipping it let `scan` exit 0 while never checking a
+    credential."""
+    resolved, unresolved = lv.resolve_env_needles(
+        ["SYNTHETIC_KEY"], {}, "SOMETHING_ELSE=value\n"
+    )
+
+    assert resolved == {}
+    assert unresolved == ["SYNTHETIC_KEY"]
+
+
+def test_scan_command_fails_when_a_requested_env_needle_is_missing(
+    monkeypatch, tmp_path, capsys
+):
+    """End-to-end regression: other needles present and clean, the
+    credential unresolvable -- the command must not return success, and
+    must not even query Phoenix."""
+    needles_file = tmp_path / "needles.txt"
+    needles_file.write_text("harmless=synthetic-absent-value\n")
+
+    def _must_not_be_called(trace_id):  # pragma: no cover - asserted below
+        raise AssertionError("Phoenix must not be queried on an incomplete check")
+
+    monkeypatch.setattr(lv, "_fetch_trace_payload", _must_not_be_called)
+    monkeypatch.delenv("SYNTHETIC_KEY", raising=False)
+
+    exit_code = lv.main(
+        [
+            "scan",
+            "synthetic-trace-id",
+            "--needles-file",
+            str(needles_file),
+            "--env",
+            "SYNTHETIC_KEY",
+        ]
+    )
+
+    assert exit_code != 0
+
+    output = capsys.readouterr().out
+    assert "INCOMPLETE" in output
+    assert "SYNTHETIC_KEY" in output
+    assert "Nothing was checked." in output
+
+
+def test_scan_command_succeeds_when_every_needle_resolves_and_is_absent(
+    monkeypatch, tmp_path
+):
+    needles_file = tmp_path / "needles.txt"
+    needles_file.write_text("harmless=synthetic-absent-value\n")
+
+    monkeypatch.setattr(
+        lv,
+        "_fetch_trace_payload",
+        lambda trace_id: '{"data": [{"name": "concierge.request"}]}',
+    )
+    monkeypatch.setenv("SYNTHETIC_KEY", SYNTHETIC_SECRET)
+
+    exit_code = lv.main(
+        [
+            "scan",
+            "synthetic-trace-id",
+            "--needles-file",
+            str(needles_file),
+            "--env",
+            "SYNTHETIC_KEY",
+        ]
+    )
+
+    assert exit_code == 0
+
+
+def test_scan_command_fails_when_a_needle_leaks(monkeypatch, tmp_path, capsys):
+    needles_file = tmp_path / "needles.txt"
+    needles_file.write_text("leaked=synthetic-leaked-value\n")
+
+    monkeypatch.setattr(
+        lv,
+        "_fetch_trace_payload",
+        lambda trace_id: '{"data": [{"x": "synthetic-leaked-value"}]}',
+    )
+
+    exit_code = lv.main(
+        ["scan", "synthetic-trace-id", "--needles-file", str(needles_file)]
+    )
+
+    assert exit_code != 0
+
+    output = capsys.readouterr().out
+    assert "LEAKED" in output
+    # Even on a leak, the tool reports the label, never the value.
+    assert "synthetic-leaked-value" not in output
+
+
+def test_env_file_parsing_ignores_comments_and_strips_one_quote_pair():
+    values = lv.parse_env_file(
+        '# comment\n\nA=1\nB="quoted"\nC=\nNO_SEPARATOR\n'
+    )
+
+    assert values == {"A": "1", "B": "quoted"}
 
 
 # --- surface -----------------------------------------------------------

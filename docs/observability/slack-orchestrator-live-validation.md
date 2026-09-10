@@ -272,10 +272,17 @@ Retrieve and check the shape:
 python3 infra/observability/live_validation.py trace <TRACE_ID>
 ```
 
-This prints the span tree, then checks each expected parent → child link,
-distinguishing *missing span* (a hop did not emit) from *wrong parent* (the
-hop emitted but trace context did not continue). Exit status is non-zero if
-any link fails.
+This prints the span tree, then checks each expected parent → child
+relationship, distinguishing *missing span* (a hop did not emit) from
+*wrong parent* (the hop emitted but trace context did not continue). Exit
+status is non-zero if any relationship fails.
+
+The expectation is a set of relationships, not one linear chain, because
+the trace is not linear: `slack.response` is a **second child of
+`concierge.request`**, not a descendant of the dispatch. Every one of the
+six expected spans appears in at least one relationship, so a non-zero exit
+also covers §9's "all six spans" criterion — including the case where the
+dispatch chain is perfect but the Slack reply never emitted.
 
 **Evidence-channel limitations, both observed:**
 
@@ -348,13 +355,23 @@ Check them:
 
 ```bash
 python3 infra/observability/live_validation.py scan <TRACE_ID> \
-  --needles-file <path> --env HERMES_API_SERVER_KEY
+  --needles-file <path> --env HERMES_API_SERVER_KEY --env-file .env
 ```
 
 **The tool never prints a value** — only `absent` / `LEAKED` per label — so
 a real credential and real Slack identifiers can be checked without being
 echoed into a terminal, a CI log, or a pasted evidence record. Keep the
 needles file outside the repository.
+
+`--env-file .env` is required for the credential here, and is the supported
+way to supply it: **Docker Compose reads `.env` itself, but a host-side
+`python3` process does not**, so `--env HERMES_API_SERVER_KEY` alone finds
+nothing on most machines. A requested sentinel that cannot be resolved is
+a hard failure (`INCOMPLETE`, exit `2`, Phoenix not even queried) rather
+than a warning — an unchecked sentinel must never be able to look like a
+clean run. The alternative is to put the value in the needles file
+instead; do not `export` it into your shell, where it reaches shell
+history and every child process.
 
 Cover at least: the Slack event id (`task_id`), user id, channel id,
 workspace id, the `conversation_id` string, the message timestamp, the
@@ -367,9 +384,11 @@ PASS =
     the expected Slack reply is observed in-thread
   + the Gateway log shows POST /dispatch → 200 and status=completed
   + one trace contains all six expected spans with one trace ID
-  + every expected parent → child link is correct
+  + every expected parent → child relationship is correct
+    (`trace` exits 0 — it checks both of the above together)
   + runtime provenance is recorded and internally consistent (§3)
-  + every sensitive sentinel reports `absent`
+  + every sensitive sentinel reports `absent`, and none was skipped
+    (`scan` exits 0; an unresolved sentinel exits 2 as `INCOMPLETE`)
   + no unexpected side effect is observed (§14)
 ```
 
