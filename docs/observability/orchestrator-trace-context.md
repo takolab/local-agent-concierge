@@ -234,7 +234,7 @@ Incidentally, `/v1/responses` carries
 Orchestrator rather than the Slack Gateway (which uses `httpx`) — useful
 when telling the two paths apart in a backend.
 
-### MLflow shows `IN_PROGRESS` until the root span arrives
+### A missing root span holds a trace `IN_PROGRESS` in MLflow
 
 The first request's trace sat at `state: IN_PROGRESS` in MLflow while the
 second showed `state: OK`. That pairing is only *consistent with* a
@@ -254,18 +254,26 @@ than inferred, on a third trace
    `IdGenerator` that returns those two fixed ids, run from inside the
    `orchestrator` container so it reaches the Collector on the compose
    network.)
-3. Phoenix then showed four spans with `POST /dispatch` re-parented onto
-   it, and the same MLflow trace moved to **`OK`**.
+3. Phoenix then showed four spans, with the newly arrived root resolving
+   the previously missing parent of `POST /dispatch`, and the same MLflow
+   trace moved to **`OK`**. Nothing about the child span changed: its
+   `parent_span_id` was `0330406cb8ca6bed` all along, and the backend
+   simply had nothing to resolve it against until step 2.
 
-The arrival of the missing root is therefore the cause, not merely a
-correlate: it was the only variable changed, on an already-`IN_PROGRESS`
-trace, and the transition followed.
+**What this establishes.** A missing root span is *sufficient* to hold a
+trace `IN_PROGRESS`, and the arrival of exactly that root is sufficient
+to release it — one variable, changed on an already-`IN_PROGRESS` trace,
+with the transition following.
 
-This matters before wiring the Slack Gateway. There, the caller's own
-root span is real and exported, so `IN_PROGRESS` should not persist — and
-if it does, this experiment is what licenses reading it as "the caller's
-span is not reaching the Collector" rather than as a benign artifact of
-how the trace was constructed.
+**What it does not establish.** The converse. `IN_PROGRESS` does not
+imply a missing root span; other causes are not ruled out, and this
+experiment says nothing about them.
+
+So treat this as the first thing to check, not as a diagnosis. If
+`IN_PROGRESS` persists once the Slack Gateway is the caller, verify
+whether the caller's own root span reached the Collector — a missing root
+is one known sufficient cause of this state, not its only possible
+one.
 
 ### Still not verified
 
