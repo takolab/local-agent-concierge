@@ -74,15 +74,19 @@ python3 infra/observability/live_validation.py provenance
 
 It reports the repository SHA, whether the working tree is clean, and for
 `slack-gateway`, `orchestrator`, `hermes-agent`, `ollama` and
-`otel-collector`: the **container id**, the local image ID, and the
-container's start time.
+`otel-collector`: a **12-character container ID prefix**, the local image
+ID, and the container's start time. The prefix is what `--expect-container`
+compares against — twelve characters is what `docker ps` shows and what the
+tool requires as a minimum.
 
-**Record the `orchestrator` container id.** §8's credential scan takes it
-as `--expect-container` so the credential is read from the instance that
+**Record the `orchestrator` one.** §8's credential scan takes it as
+`--expect-container` so the credential is read from the instance that
 handled the request. Without it, a service recreated between the request
 and the scan resolves to a *new* container with a *new* credential: the
 scan finds that one absent and reports clean while the credential the
-request actually used is the one that leaked.
+request actually used is the one that leaked. `scan` will not run a
+service-backed credential read unbound — the two options are a required
+pair.
 
 **Known provenance limitation — do not overstate this.** `slack-gateway`
 and `orchestrator` are built locally from this repository, so they have
@@ -373,7 +377,7 @@ python3 infra/observability/live_validation.py scan <TRACE_ID> \
   --needles-file <path> \
   --env HERMES_API_SERVER_KEY \
   --env-from-service orchestrator \
-  --expect-container <the orchestrator container id from §3>
+  --expect-container <the orchestrator container prefix from §3>
 ```
 
 **The tool never prints a value** — only `absent` / `LEAKED` per label — so
@@ -403,9 +407,12 @@ incomplete.
 instance" are different properties: provenance is recorded *before* the
 request and the scan runs *after* it, so a service recreated in between is
 still an authoritative source — of the wrong credential.
-`--expect-container` closes that window. If `orchestrator` no longer
-resolves to the recorded id, the scan is `INCOMPLETE` (exit `2`, Phoenix
-not queried) and names the mismatch rather than reading the replacement.
+`--expect-container` closes that window, and it is **not optional**:
+`--env-from-service` without it is `INCOMPLETE`, as is `--expect-container`
+without `--env-from-service` (which would bind nothing). If `orchestrator`
+no longer resolves to the recorded prefix, the scan is `INCOMPLETE` (exit
+`2`, Phoenix not queried) and names the mismatch rather than reading the
+replacement.
 
 If the Orchestrator *was* legitimately restarted mid-validation, the run is
 over: its credential may differ from the one the request used, so nothing
@@ -547,9 +554,9 @@ Operator:
 
 Repository SHA:
 Working tree:            clean / DIRTY
-Containers (container id, image ID, started):
+Containers (container ID prefix, image ID, started):
   slack-gateway:
-  orchestrator:            <- record the container id; §8 needs it
+  orchestrator:            <- record the prefix; §8 requires it
   hermes-agent:
   ollama:
   otel-collector:
@@ -696,8 +703,8 @@ that state did not occur. One observation, not a proof of the general case.
 
 - The operator's message wording was not §5's fixed string, so a later run
   following this runbook will be more reproducible than this one.
-- The credential scan was **not bound** to a recorded container id — §3's
-  `--expect-container` step did not exist yet. The binding did hold in
+- The credential scan was **not bound** to a recorded container prefix —
+  §3's `--expect-container` step did not exist yet. The binding did hold in
   fact: `orchestrator` started at 11:24:42 and was never recreated, while
   the only recreation that session (`slack-gateway`, 17:21:28) preceded the
   17:27 request. But that is inferred from start times rather than pinned,

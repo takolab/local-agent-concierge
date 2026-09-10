@@ -476,6 +476,11 @@ def test_scan_fails_closed_when_the_service_cannot_be_inspected(
             "SYNTHETIC_KEY",
             "--env-from-service",
             "orchestrator",
+            # Supplied so this exercises the inspection-failure path rather
+            # than stopping at the unpaired-binding guard, which has its own
+            # test above.
+            "--expect-container",
+            CONTAINER_A[:12],
         ]
     )
 
@@ -680,6 +685,55 @@ def test_a_too_short_container_prefix_is_rejected(monkeypatch):
 
     assert lookup.values == {}
     assert "at least" in lookup.problem
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "expected_message"),
+    [
+        (
+            ["--env", "SYNTHETIC_KEY", "--env-from-service", "orchestrator"],
+            "--env-from-service requires --expect-container",
+        ),
+        (
+            ["--expect-container", CONTAINER_A[:12]],
+            "--expect-container requires --env-from-service",
+        ),
+    ],
+    ids=["service_without_binding", "binding_without_service"],
+)
+def test_scan_refuses_an_unpaired_binding(
+    monkeypatch, tmp_path, capsys, extra_args, expected_message
+):
+    """Regression for a contract gap: `--expect-container` closed the
+    replaced-container hole only when supplied, so a service-backed scan
+    could still run unbound and read whichever container is current. The
+    reverse pairing binds nothing, and an option that silently does nothing
+    reads, in a pasted evidence record, exactly like one that was
+    enforced."""
+    needles_file = tmp_path / "needles.txt"
+    needles_file.write_text("harmless=synthetic-absent-value\n")
+
+    def _must_not_be_called(trace_id):  # pragma: no cover - asserted below
+        raise AssertionError("Phoenix must not be queried on an incomplete check")
+
+    def _run_must_not_be_called(command):  # pragma: no cover - asserted below
+        raise AssertionError("no container is inspected on an incomplete check")
+
+    monkeypatch.setattr(lv, "_fetch_trace_payload", _must_not_be_called)
+    monkeypatch.setattr(lv, "_run", _run_must_not_be_called)
+    monkeypatch.setenv("SYNTHETIC_KEY", SYNTHETIC_SECRET)
+
+    exit_code = lv.main(
+        ["scan", "synthetic-trace-id", "--needles-file", str(needles_file)]
+        + extra_args
+    )
+
+    assert exit_code == 2
+
+    output = capsys.readouterr().out
+    assert "INCOMPLETE" in output
+    assert expected_message in output
+    assert SYNTHETIC_SECRET not in output
 
 
 def test_scan_cannot_pass_when_the_container_was_replaced(

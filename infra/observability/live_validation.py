@@ -364,7 +364,8 @@ def command_provenance(_: argparse.Namespace) -> int:
             ["docker", "inspect", container, "--format", "{{.State.StartedAt}}"]
         )
         print(
-            f"  {service:<16} container={container[:MIN_CONTAINER_PREFIX]}  "
+            f"  {service:<16} container[:{MIN_CONTAINER_PREFIX}]="
+            f"{container[:MIN_CONTAINER_PREFIX]}  "
             f"image={image[:26]}  started={started[:19]}"
         )
 
@@ -375,10 +376,12 @@ def command_provenance(_: argparse.Namespace) -> int:
         "and no mechanical link to a\n      source commit -- the repository "
         "SHA above plus a clean tree is what ties\n      them to source. See "
         "the runbook's 'Exact Runtime Provenance' section.\n\n"
-        "      Record the orchestrator `container` value: pass it to "
-        "`scan --expect-container`\n      so the credential is read from "
-        "the instance that handled the request, not\n      from whatever "
-        "is running when the scan happens."
+        f"      `container[:{MIN_CONTAINER_PREFIX}]` is an ID *prefix*, "
+        "which is what `--expect-container`\n      compares against. "
+        "Record the orchestrator one and pass it to `scan`: without it\n"
+        "      the credential is read from whatever is running when the "
+        "scan happens, not\n      from the instance that handled the "
+        "request. `scan` refuses to run unbound."
     )
     return 0
 
@@ -673,6 +676,38 @@ def command_scan(args: argparse.Namespace) -> int:
     if args.env_file:
         env_file_text = Path(args.env_file).read_text()
 
+    # Checked first, before the needles file is read and long before
+    # Phoenix is queried. `--env-from-service` without a binding reads
+    # whichever container is current at scan time, which is the exact
+    # false-PASS `--expect-container` exists to close: a service recreated
+    # between the request and the scan yields a different credential, finds
+    # it absent, and reports clean. Leaving the binding optional would have
+    # fixed the mechanism while leaving the path that needs it open.
+    #
+    # The reverse pairing is refused too. `--expect-container` alone does
+    # nothing, and an option that silently does nothing is worse here than
+    # one that errors: it reads, in a pasted evidence record, exactly like
+    # a binding that was enforced.
+    if args.env_from_service and not args.expect_container:
+        print("INCOMPLETE -- --env-from-service requires --expect-container.")
+        print()
+        print(
+            "Without it the credential is read from whichever container is "
+            "running now,\nnot the one that handled the request. Record the "
+            "container from\n`live_validation.py provenance` before the "
+            "request and pass it here.\nNothing was checked."
+        )
+        return 2
+
+    if args.expect_container and not args.env_from_service:
+        print("INCOMPLETE -- --expect-container requires --env-from-service.")
+        print()
+        print(
+            "On its own it binds nothing: no source is being read from a "
+            "container.\nNothing was checked."
+        )
+        return 2
+
     lookup = (
         service_environment(args.env_from_service, args.expect_container)
         if args.env_from_service
@@ -780,16 +815,19 @@ def main(argv: list[str] | None = None) -> int:
             "environment -- the value Docker Compose actually injected. "
             "Exclusive: when given, no other source is consulted for those "
             "names, so an unreadable container fails the run instead of "
-            "silently degrading to a stale value."
+            "silently degrading to a stale value. Requires "
+            "--expect-container."
         ),
     )
     scan.add_argument(
         "--expect-container",
         help=(
-            "container id recorded in the pre-run provenance. The scan "
-            "fails unless --env-from-service still resolves to it, so a "
-            "service recreated between the request and this scan cannot "
-            "be read as if it were the instance that handled the request."
+            "container ID prefix recorded in the pre-run provenance, at "
+            f"least {MIN_CONTAINER_PREFIX} characters. The scan fails "
+            "unless --env-from-service still resolves to a container with "
+            "this prefix, so a service recreated between the request and "
+            "this scan cannot be read as if it were the instance that "
+            "handled the request. Requires --env-from-service."
         ),
     )
     scan.add_argument(
