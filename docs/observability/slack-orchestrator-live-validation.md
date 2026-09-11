@@ -133,8 +133,8 @@ as "the rewiring is broken" rather than "the Collector is down".
 
 It has a known failure mode after a Docker Desktop / WSL engine restart.
 The single-file bind mount (`otel-collector.yaml` → `/etc/otelcol-contrib/config.yaml`)
-does not survive it, and `restart: unless-stopped` keeps retrying the stale
-mount path:
+does not survive it, and the container's own automatic restart fails on the
+stale mount path:
 
 ```text
 Exited (127)
@@ -142,13 +142,32 @@ Exited (127)
   "/etc/otelcol-contrib/config.yaml": not a directory
 ```
 
-Restarting does not fix it; the container must be **recreated** so the
-mount is re-resolved:
+Recover by **replacing** the container, so the mount is resolved afresh,
+and confirm the replacement actually happened:
 
 ```bash
-docker compose up -d --no-deps otel-collector
+docker compose ps -q otel-collector                       # container id before
+docker compose up -d --no-deps --force-recreate otel-collector
+docker compose ps -q otel-collector                       # must differ
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:13133/   # expect 200
 ```
+
+`--force-recreate` is specified rather than a plain `up -d` because only
+the explicit form *guarantees* a replacement: Compose may otherwise decide
+the existing container's configuration is unchanged and simply start it
+again, leaving whatever state the stale mount is in. Given that this
+service's failure is invisible from Slack's point of view, a recovery step
+that might quietly not recover is the wrong shape.
+
+**What was actually observed, as opposed to inferred.** On 2026-09-10 the
+exit above occurred after an engine restart, and a plain
+`docker compose up -d --no-deps otel-collector` restored it — Compose
+reported `Starting`/`Started`, i.e. it *started the existing container*
+rather than replacing it, and the Collector came back healthy. So a
+restart-shaped recovery is not known to be insufficient; this runbook does
+not claim it is. `--force-recreate` is prescribed because it removes the
+question, not because the weaker form was seen to fail. It was verified to
+replace the container (id changed, health `200`).
 
 Then confirm the Gateway can actually reach the Orchestrator — this is the
 new hop, and the only precondition specific to it:
@@ -465,9 +484,54 @@ must never be able to look like a clean run. Do not `export` the value into
 your shell as a workaround; that puts it in shell history and every child
 process.
 
-Cover at least: the Slack event id (`task_id`), user id, channel id,
-workspace id, the `conversation_id` string, the message timestamp, the
-message text, the model's response text, and `HERMES_API_SERVER_KEY`.
+#### The required set
+
+These are the sentinels a PASS depends on. All are obtainable from the
+Gateway log and the running Orchestrator, so a run has no excuse for
+skipping one:
+
+| Label | Source |
+|---|---|
+| Slack event id (`task_id`) | Gateway log |
+| Slack user id | Gateway log |
+| Slack channel id | Gateway log |
+| Slack workspace id | Gateway log |
+| `conversation_id` string | Gateway log |
+| message timestamp | Gateway log |
+| `HERMES_API_SERVER_KEY` | `--env-from-service orchestrator` |
+
+#### The optional content extension
+
+Checking whether the **message text** or the **model's response text**
+leaked is a stronger check, and it is deliberately *not* part of the
+required set. Neither value exists anywhere this procedure can read: the
+Gateway logs identifiers and a response *length*, never content — and that
+data minimisation is a property worth keeping, not a gap to close by
+logging more.
+
+The operator, however, knows both: they sent one and read the other. To
+include them, append two lines to the needles file by hand:
+
+```text
+message text=<exactly what you sent>
+response text=<exactly what Slack replied>
+```
+
+`scan` reports only `absent` / `LEAKED`, so neither value is echoed back.
+Three practical notes:
+
+- The file is line-based, so a **multi-line** message cannot be expressed.
+  §5's fixed input and its expected reply are both single lines, which is
+  one more reason to use them.
+- Use the text verbatim, punctuation included. A near-miss scans clean and
+  proves nothing.
+- Delete the file when the run is over. It is the only artifact of a
+  validation that contains message content, and it must never be inside
+  this repository.
+
+A run that does this records `content sentinels: checked`. A run that does
+not records `content sentinels: not performed` — **not** a failure, and not
+a caveat on PASS, because PASS is defined against the required set above.
 
 ## 9. Success criteria
 
@@ -479,10 +543,22 @@ PASS =
   + every expected parent → child relationship is correct
     (`trace` exits 0 — it checks both of the above together)
   + runtime provenance is recorded and internally consistent (§3)
-  + every sensitive sentinel reports `absent`, and none was skipped
-    (`scan` exits 0; an unresolved sentinel exits 2 as `INCOMPLETE`)
+  + every sentinel in §8's REQUIRED SET reports `absent`, and none was
+    skipped (`scan` exits 0; an unresolved one exits 2 as `INCOMPLETE`)
   + no unexpected side effect is observed (§14)
 ```
+
+**PASS is defined against the required set, and means exactly that.** §8's
+optional content extension — message and response text — is not part of it,
+because neither value exists anywhere this procedure can read, and the
+alternative (logging message content) is a worse trade than the check is
+worth. A run that performed the extension records so and is stronger
+evidence; a run that did not is still a PASS, and its record says
+`content sentinels: not performed` so no reader can mistake the scope.
+
+The invariant being protected: **a PASS must never imply a check the run
+did not actually perform.** Adding a sentinel to §8's required set means
+committing to it being obtainable every time.
 
 Do not require what this stack cannot provide: span kind via the Phoenix
 REST API, span attributes via MLflow, or a registry digest for a locally
@@ -601,7 +677,8 @@ Expected parent-child relationships:                PASS / FAIL / UNKNOWN
 Gateway → Orchestrator confirmed:                   YES / NO / UNKNOWN
 Orchestrator → Hermes confirmed:                    YES / NO / UNKNOWN
 Present in MLflow (trace id, state):
-Sensitive sentinel check (labels checked, result):  PASS / FAIL / UNKNOWN
+Sensitive sentinel check -- required set (§8):      PASS / FAIL / UNKNOWN
+Content sentinels (message / response text):        checked / not performed
 Credential read bound to the request's container:   YES / NO
 
 Unexpected side effects:                            YES / NO / UNKNOWN
@@ -725,9 +802,11 @@ Gateway → Orchestrator:  YES
 Orchestrator → Hermes:   YES (`http.status_code = 200` on POST /dispatch)
 Present in MLflow:       tr-bb3d8ce5fcb43e4e8cb8ad895e077950
                          service=slack-gateway  state=OK
-Sensitive sentinel check: PASS -- 7 labels, 0 leaked, `scan` exit 0,
-                         credential read bound to orchestrator df6eb0bff364
-Credential read bound to the request's container:  YES
+Sensitive sentinel check -- required set (§8):
+                         PASS -- all 7 required labels, 0 leaked, exit 0
+Content sentinels (message / response text):
+                         not performed -- see §8's optional extension
+Credential read bound to the request's container:  YES (df6eb0bff364)
 
 Unexpected side effects: NO -- no `tools/call` span for this request (only
                          the routine MCP keepalive); the only persistent
@@ -751,12 +830,13 @@ so Phoenix's storage is durable across one.
 
 **Limitations of this run.**
 
-- The sentinel check again covered the seven identifier/credential labels
-  and **not** the Slack message text or the model's response text, which §8
-  asks for. Neither was captured. The next run can close this without
-  exposing either value: append two `label=value` lines to the needles file
-  and re-run `scan`, which reports only `absent` / `LEAKED`.
-- The message wording was operator-chosen rather than §5's fixed string.
+- The optional content extension was not performed, so this run says
+  nothing about whether the message or response text leaked. That is a
+  scope statement, not a caveat on the PASS: §9 defines PASS against §8's
+  required set, all seven of which were checked.
+- The message wording was operator-chosen rather than §5's fixed string,
+  which also means the content extension would have been awkward here —
+  §5's single-line input and reply are what make it expressible.
 - Only the success path ran; the failure and unknown-outcome paths remain
   test-covered only.
 - No Calendar tool was invoked, so Hermes' outbound-MCP propagation gap was
@@ -819,10 +899,11 @@ Orchestrator → Hermes confirmed:          YES — `hermes.request` →
                                           = 200` on `POST /dispatch`
 Present in MLflow:                        tr-ff731430ed03161076ae1857d8dea219
                                           service=slack-gateway  state=OK
-Sensitive sentinel check:                 PASS — 7 labels, 0 leaked:
-                                          Slack event/user/channel/workspace
-                                          ids, conversation_id, message ts,
-                                          HERMES_API_SERVER_KEY
+Sensitive sentinel check — required set (§8):
+                                          PASS — all 7 required labels,
+                                          0 leaked
+Content sentinels (message / response text):
+                                          not performed
 
 Unexpected side effects:                  NO — the only other trace in the
                                           window was the routine
@@ -851,10 +932,10 @@ that state did not occur. One observation, not a proof of the general case.
   the only recreation that session (`slack-gateway`, 17:21:28) preceded the
   17:27 request. But that is inferred from start times rather than pinned,
   so it is weaker evidence than a later run following §3 will produce.
-- The sentinel check covered the seven labels listed above. It did **not**
-  include the Slack message text or the model's response text, which §8
-  asks for — neither was captured at the time, and neither is recoverable
-  from the evidence now. A later run should include both.
+- The optional content extension (§8) was not performed; neither value was
+  captured at the time and neither is recoverable now. This is a scope
+  statement rather than a caveat on the PASS, which §9 defines against §8's
+  required set.
 - Span *kind* was not verified: Phoenix's REST API reports `UNKNOWN` (§7).
 - Only the success path ran. The failure and unknown-outcome paths were not
   exercised and remain test-covered only.
