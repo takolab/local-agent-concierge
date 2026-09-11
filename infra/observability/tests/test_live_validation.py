@@ -236,6 +236,90 @@ def test_expected_span_names_match_what_the_code_emits():
     assert 'HERMES_SPAN_NAME = "hermes.request"' in orchestrator
 
 
+def test_provenance_covers_every_service_an_evidence_record_depends_on():
+    """Regression: `phoenix` and `mlflow` were absent, so a record pinned
+    the trace producers but not the backends it was read from -- which is
+    what a later correlation would need."""
+    assert set(lv.PROVENANCE_SERVICES) == {
+        "slack-gateway",
+        "orchestrator",
+        "hermes-agent",
+        # Reachable from this path via Hermes' tools, so its identity is
+        # part of what an evidence record has to pin.
+        "google-calendar-mcp",
+        "ollama",
+        "otel-collector",
+        # Where the evidence is read from.
+        "phoenix",
+        "mlflow",
+    }
+
+    compose = (REPO_ROOT / "docker-compose.yml").read_text()
+    for service in lv.PROVENANCE_SERVICES:
+        assert f"\n  {service}:" in compose, service
+
+
+RUNBOOK = REPO_ROOT / "docs/observability/slack-orchestrator-live-validation.md"
+
+
+def test_the_runbook_records_every_service_the_helper_reports():
+    """Binds the evidence schema to `PROVENANCE_SERVICES`.
+
+    This pairing has drifted twice: the helper gained services while §3's
+    prose and §13's template still enumerated the older, shorter set, so a
+    completed record would silently omit identities the expanded set was
+    added to preserve. A summary "all 8 recorded: YES" is not a
+    substitute -- a later investigator cannot correlate anything from it --
+    so the template must have a row per service, and this asserts it does.
+    """
+    runbook = RUNBOOK.read_text()
+
+    template_start = runbook.index("Containers (container ID prefix, image ID, started)")
+    template = runbook[template_start : template_start + 600]
+
+    taxonomy_start = runbook.index("What each kind of service can actually prove")
+    taxonomy = runbook[taxonomy_start : taxonomy_start + 1400]
+
+    for service in lv.PROVENANCE_SERVICES:
+        assert f"  {service}:" in template, (
+            f"§13's evidence template has no row for {service!r}"
+        )
+        # §3's taxonomy too: a service absent from it leaves the reader
+        # inferring by elimination what that identity is worth.
+        assert f"`{service}`" in taxonomy, (
+            f"§3's service-identity table has no row for {service!r}"
+        )
+
+
+def test_the_helper_does_not_restate_retired_provenance_rules(monkeypatch, capsys):
+    """The helper points at §3; it does not carry its own copy of the rules.
+
+    Its provenance note once claimed the repository SHA plus a clean tree
+    ties a local image to its source. §3 retired that -- a clean checkout
+    says nothing about what the running image was built from, and this
+    stack actually exhibited a case where the two disagreed. The claim
+    survived in the helper after the runbook dropped it, which is the
+    fourth time a rule duplicated between code and docs has drifted, so
+    reintroducing it fails here.
+    """
+    # Asserted against what `provenance` actually prints, not against the
+    # module source: the source also contains a comment *explaining* that
+    # the rule was retired, and a raw-source scan cannot tell the two
+    # apart. What matters is what the operator reads.
+    monkeypatch.setattr(lv, "_run", lambda command: "")
+
+    lv.main(["provenance"])
+    printed = capsys.readouterr().out.lower()
+
+    for retired in ("clean tree is what ties", "plus a clean tree"):
+        assert retired not in printed, (
+            f"the helper prints a retired provenance rule: {retired!r}"
+        )
+
+    # It must still send the reader somewhere authoritative.
+    assert "exact runtime provenance" in printed
+
+
 def test_phoenix_project_matches_the_collector_configuration():
     """A rename in otel-collector.yaml must fail here rather than make the
     helper silently query an empty project."""
