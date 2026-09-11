@@ -244,8 +244,12 @@ def test_provenance_covers_every_service_an_evidence_record_depends_on():
         "slack-gateway",
         "orchestrator",
         "hermes-agent",
+        # Reachable from this path via Hermes' tools, so its identity is
+        # part of what an evidence record has to pin.
+        "google-calendar-mcp",
         "ollama",
         "otel-collector",
+        # Where the evidence is read from.
         "phoenix",
         "mlflow",
     }

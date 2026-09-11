@@ -61,6 +61,7 @@ PROVENANCE_SERVICES = (
     "slack-gateway",
     "orchestrator",
     "hermes-agent",
+    "google-calendar-mcp",
     "ollama",
     "otel-collector",
     "phoenix",

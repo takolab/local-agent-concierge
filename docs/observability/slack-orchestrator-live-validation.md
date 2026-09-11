@@ -118,28 +118,69 @@ whose layers all hit the cache keeps the original date. On this stack it
 reported `2026-09-08` for an orchestrator image that in fact contains
 2026-09-10 source. It is not evidence of when anything was built.
 
-**The check that does prove it: compare the running source against the
-repository.** For the two locally built services this is direct evidence,
-and it is mechanical:
+**The check: compare the running image's inputs against the recorded
+commit.** Not against your working tree — that moves. Against the SHA this
+run is pinned to:
 
 ```bash
-for f in services/orchestrator/src/orchestrator/*.py; do
-  n=$(basename "$f")
-  c=$(docker compose exec -T orchestrator cat "/app/src/orchestrator/$n" | sha256sum | cut -c1-12)
-  r=$(sha256sum "$f" | cut -c1-12)
-  [ "$c" = "$r" ] && echo "MATCH   $n" || echo "DIFFERS $n"
-done
+SHA=<the repository SHA recorded above>
+
+check() {                       # check <compose-service> <repo-dir>
+  ok=1
+  for f in $(git ls-tree -r --name-only "$SHA" -- "$2/src" "$2/pyproject.toml"); do
+    case "$f" in
+      */pyproject.toml) dst=/app/pyproject.toml ;;
+      *)                dst="/app/src/${f#$2/src/}" ;;
+    esac
+    c=$(docker compose exec -T "$1" sha256sum "$dst" 2>/dev/null | cut -c1-12)
+    r=$(git show "$SHA:$f" | sha256sum | cut -c1-12)
+    [ "$c" = "$r" ] || { echo "DIFFERS $f"; ok=0; }
+  done
+  for f in $(git ls-tree -r --name-only "$SHA" -- packages/agent-contracts/src/agent_contracts); do
+    c=$(docker compose exec -T "$1" sha256sum \
+          "/usr/local/lib/python3.12/site-packages/agent_contracts/$(basename $f)" \
+          2>/dev/null | cut -c1-12)
+    r=$(git show "$SHA:$f" | sha256sum | cut -c1-12)
+    [ "$c" = "$r" ] || { echo "DIFFERS $f"; ok=0; }
+  done
+  [ $ok -eq 1 ] && echo "$1: all inputs match $SHA"
+}
+
+check orchestrator   services/orchestrator
+check slack-gateway  apps/slack-gateway
 ```
 
-and the same shape for `slack-gateway` against `/app/src/slack_gateway/`.
+It covers all three things those Dockerfiles copy in: the service's Python
+source, its `pyproject.toml`, and `packages/agent-contracts` as installed
+into the image. Checking only `src/*.py` would report a match while the
+image carried a different contract package or dependency set.
+
 Any `DIFFERS` means the running image was not built from the recorded SHA.
 Diff that file and record whether the difference is executable code or only
 comments — the distinction changes what the run's evidence is worth, and
 only the diff can tell you.
 
-Record the outcome as `source matches recorded SHA: YES / NO (detail)`
+**What this does not cover, and must not be implied by a `YES`:**
+
+| Outside the boundary | Why |
+|---|---|
+| The `Dockerfile`s themselves | Not present in the image; a changed build definition cannot be detected from a running container |
+| Build args, base-image pulls, install-time resolution | Not reconstructible after the fact |
+| `hermes-agent`'s repository-controlled layer | Its Dockerfile pins an upstream base and adds instrumentation via `uv pip install` + `PYTHONPATH`; it copies no repository file, so there is nothing to hash-compare. Its identity here is the pin *in the repository at the recorded SHA*, not a verified image property |
+| `google-calendar-mcp` | Built from its own directory and reachable from this path via Hermes' tools; its image id is recorded, its source is not compared |
+| Upstream `:latest` images | Not reproducible identities at all (see the table above) |
+
+Record the outcome as:
+
+```text
+Runtime Python inputs match recorded SHA:  YES / NO (detail)
+Outside that boundary:                     Dockerfiles, build args,
+                                           hermes-agent's instrumentation
+                                           layer, upstream :latest images
+```
+
 rather than a bare "provenance consistent", which asserts a conclusion
-without naming what was compared.
+without naming what was compared or what was not.
 
 The Collector's config identity is the repository file
 `infra/observability/otel-collector.yaml` at the recorded SHA; it is
@@ -637,6 +678,20 @@ PASS with a footnote — it is a different result. Record one of:
 | `INCONCLUSIVE` | a criterion was exercised, but its evidence is unusable or ambiguous — the trace never arrived, the backends disagree, a sentinel could not be resolved. Distinct from `NOT A RUNBOOK PASS` (not attempted) and from `FAIL` (attempted, answered, wrong) |
 | `FAIL` | a criterion was exercised and not met |
 
+**Aggregating a mixed run.** A run can have several non-passing criteria at
+once — one not exercised, another inconclusive. Two rules, both required:
+
+1. **Record every criterion's own state.** The overall label never stands
+   alone; a record that names only the worst outcome hides the rest.
+2. **The overall result is the worst state present**, in the order
+   `FAIL` > `NOT A RUNBOOK PASS` > `INCONCLUSIVE` > `PASS`.
+
+`NOT A RUNBOOK PASS` outranks `INCONCLUSIVE` because the two call for
+different work: a criterion that was never exercised is fixed by running
+it, while an inconclusive one needs the evidence channel investigated
+first. Putting the cheaper action in the headline is the more useful
+default, and rule 1 means nothing is lost either way.
+
 Deliberately **not** `INCOMPLETE` at run level: this document already uses
 that word for the specific thing `scan` and `trace` print when the evidence
 they were given is unusable (exit `2`). A run can be `NOT A RUNBOOK PASS`
@@ -711,8 +766,11 @@ Record the decision and its basis in the run record.
 
 Stop and do not proceed (or do not continue) if any of these hold:
 
-- the working tree is dirty, or a container predates the build at the
-  recorded SHA — provenance cannot be established (§3);
+- the working tree is dirty, or §3's source comparison reports `DIFFERS`
+  for anything you cannot show to be comment-only — the run would be
+  evidence about a build you cannot name. (The retired form of this
+  condition was "a container predates the build at the recorded SHA";
+  §3 explains why image and start timestamps are not evidence.);
 - the Slack Gateway container still has `HERMES_API_*` in its environment —
   it is on the pre-#43 direct path, so a run would validate the wrong
   thing;
@@ -745,8 +803,9 @@ Containers (container ID prefix, image ID, started):
   hermes-agent:
   ollama:
   otel-collector:
-Source matches recorded SHA (§3's per-file comparison):  YES / NO (detail)
-Upstream :latest image ids recorded (ollama, collector, phoenix, mlflow):  YES / NO
+Runtime Python inputs match recorded SHA (§3):       YES / NO (detail)
+Outside that boundary (§3's table):                 acknowledged
+Image ids recorded for all 8 §3 services:           YES / NO
 
 Preconditions:
   all required services healthy:                    YES / NO
@@ -878,7 +937,7 @@ Containers (container ID prefix, image ID, started):
   hermes-agent:          9d53cbf88567  sha256:470aa3b68074d9d752f  20:50:41
   ollama:                7e7efecf4bef  sha256:dacbdaa86a43fb9ed58  20:50:41
   otel-collector:        2f55fb34043e  sha256:e11c83206a71a0ac312  20:53:50
-Source matches recorded SHA:
+Runtime Python inputs match recorded SHA (§3):
                          NO, in one respect. Established afterwards by §3's
                          source comparison, not at the time: every
                          slack-gateway file and every orchestrator file
@@ -934,23 +993,36 @@ Content sentinels (message / response text):
                          not performed -- see §8's optional extension
 Credential read bound to the request's container:  YES (df6eb0bff364)
 
-Unexpected side effects: none observed -- no non-keepalive `tools/call`
-                         span in the inspected window (which cannot attribute
-                         tool calls to a request either way, see §14); the
+Unexpected side effects: none observed, but see the INCONCLUSIVE state
+                         above -- the window this was observed in may not
+                         have covered the request. No non-keepalive
+                         `tools/call` span in the inspected window (which
+                         cannot attribute tool calls to a request either
+                         way, see §14); the
                          only persistent writes were the expected
                          conversation store (`response_store.db-*`) plus
                          Hermes' own background state, logs and heartbeats;
                          repository clean.
 
-Overall result:          NOT A RUNBOOK PASS -- §9's first criterion was not
-                         exercised: no deterministic input/expected reply
-                         pair was used.
-Verified subset:         every other §9 criterion passed. Everything the
-                         rewiring is about -- routing through the
-                         Orchestrator, trace continuity, required-set
-                         sentinel absence, credential binding, absence of
-                         unexpected side effects -- is established by this
-                         run.
+Per-criterion state (§9):
+  §5 fixed input           NOT EXERCISED -- operator-chosen wording
+  trace / relationships    PASS
+  required-set sentinels   PASS
+  provenance (§3)          NOT EXERCISED at the time; checked retroactively
+                           and answered NO-in-one-respect (above)
+  side effects (§14)       INCONCLUSIVE -- performed with the superseded
+                           "last 10 minutes" window, whose start drifts
+                           forward while the Human works through §7 and §8.
+                           Nothing establishes that this run's window still
+                           covered the request, so the clean result cannot
+                           be relied on.
+Overall result:          NOT A RUNBOOK PASS (worst state present; see §9's
+                         aggregation rule)
+Verified subset:         routing through the Orchestrator, trace continuity
+                         across all five relationships, required-set
+                         sentinel absence, and credential binding to the
+                         serving container. Provenance and side-effect
+                         coverage are NOT part of this subset.
 ```
 
 **What this run additionally established.** (Current-run evidence; §4 and
@@ -983,6 +1055,10 @@ so Phoenix's storage is durable across one.
 - `otel-collector` had to be recreated first (§4). Had that gone unnoticed,
   the request would have succeeded in Slack while producing no trace at
   all.
+- The side-effect check used the superseded drifting window, so its clean
+  result is `INCONCLUSIVE` rather than a pass. Re-establishing it for this
+  run is not possible after the fact; §5's marker exists so later runs do
+  not inherit the problem.
 
 ### 2026-09-10 (17:27 UTC) — first live run of the Slack → Orchestrator path
 
@@ -1057,24 +1133,30 @@ Sensitive sentinel check — required set (§8):
 Content sentinels (message / response text):
                                           not performed
 
-Unexpected side effects:                  none observed — no non-keepalive
-                                          `tools/call` span in the inspected
-                                          window (not request attribution;
-                                          see §14)
+Unexpected side effects:                  none observed, but see the
+                                          INCONCLUSIVE state above — no
+                                          non-keepalive `tools/call` span in
+                                          the inspected window (not request
+                                          attribution; see §14)
 Post-validation checks performed:         span scan of the surrounding
                                           window; repository clean
 
 Overall result:                           NOT A RUNBOOK PASS -- §5's input
                                           was not used, so §9's first
                                           criterion was not exercised
-Verified subset:                          §9's trace, sentinel and
-                                          side-effect criteria passed. §3
-                                          did NOT pass: the credential read
-                                          was not bound to a recorded
-                                          container and no source comparison
-                                          was performed, so this run
-                                          establishes nothing about which
-                                          build served it.
+Per-criterion state (§9):
+  §5 fixed input                          NOT EXERCISED
+  trace / relationships                   PASS
+  required-set sentinels                  PASS
+  provenance (§3)                         NOT EXERCISED -- credential read
+                                          unbound, no source comparison
+  side effects (§14)                      INCONCLUSIVE -- superseded window
+                                          method, as for the 21:05 run
+Verified subset:                          routing, trace continuity and
+                                          required-set sentinel absence.
+                                          Nothing about which build served
+                                          it, and nothing reliable about
+                                          side effects.
 ```
 
 **What this run additionally settled.** MLflow reported the trace as
