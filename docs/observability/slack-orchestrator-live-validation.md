@@ -569,6 +569,24 @@ did not actually perform.** Adding a sentinel to §8's required set means
 committing to it being obtainable every time; likewise, calling a run a
 PASS means every criterion above was exercised as written.
 
+### Run result vocabulary
+
+Because PASS is conjunctive, a run that skipped a criterion is **not** a
+PASS with a footnote — it is a different result. Record one of:
+
+| Result | Meaning |
+|---|---|
+| `PASS` | every criterion above was exercised, and met |
+| `NOT A RUNBOOK PASS` | one or more criteria were not exercised. Name which, and record `Verified subset:` — what *was* established |
+| `FAIL` | a criterion was exercised and not met |
+
+Deliberately **not** `INCOMPLETE` at run level: this document already uses
+that word for the specific thing `scan` and `trace` print when the evidence
+they were given is unusable (exit `2`). A run can be `NOT A RUNBOOK PASS`
+while every tool invocation in it exited `0`, which is exactly the 21:05
+case below — reusing `INCOMPLETE` for both would blur a distinction the
+tooling works hard to keep.
+
 Do not require what this stack cannot provide: span kind via the Phoenix
 REST API, span attributes via MLflow, or a registry digest for a locally
 built image.
@@ -694,7 +712,8 @@ Credential read bound to the request's container:   YES / NO
 Unexpected side effects:                            YES / NO / UNKNOWN
 Post-validation checks performed:
 
-Overall result:                                     PASS / FAIL / UNKNOWN
+Overall result:          PASS / NOT A RUNBOOK PASS / FAIL   (§9's vocabulary)
+Verified subset (if not a PASS):
 Notes / limitations of this run:
 ```
 
@@ -833,12 +852,15 @@ Unexpected side effects: NO -- no `tools/call` span for this request (only
                          background state, logs and heartbeats; repository
                          clean.
 
-Overall result:          PASS on every criterion except §9's first, which
-                         was not exercised: no deterministic input/expected
-                         reply pair was used. Everything the rewiring is
-                         about -- routing, trace continuity, sentinel
-                         absence, container binding, side effects -- is
-                         established by this run.
+Overall result:          NOT A RUNBOOK PASS -- §9's first criterion was not
+                         exercised: no deterministic input/expected reply
+                         pair was used.
+Verified subset:         every other §9 criterion passed. Everything the
+                         rewiring is about -- routing through the
+                         Orchestrator, trace continuity, required-set
+                         sentinel absence, credential binding, absence of
+                         unexpected side effects -- is established by this
+                         run.
 ```
 
 **What this run additionally established.** The helper's container-backed
@@ -939,7 +961,12 @@ Unexpected side effects:                  NO — the only other trace in the
 Post-validation checks performed:         span scan of the surrounding
                                           window; repository clean
 
-Overall result:                           PASS
+Overall result:                           NOT A RUNBOOK PASS -- §5's input
+                                          was not used, so §9's first
+                                          criterion was not exercised
+Verified subset:                          every other §9 criterion passed
+                                          (noting §3's binding was inferred,
+                                          not pinned -- see below)
 ```
 
 **What this run additionally settled.** MLflow reported the trace as
