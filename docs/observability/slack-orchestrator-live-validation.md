@@ -84,9 +84,19 @@ python3 infra/observability/live_validation.py provenance
 ```
 
 It reports the repository SHA, whether the working tree is clean, and for
-`slack-gateway`, `orchestrator`, `hermes-agent`, `ollama` and
-`otel-collector`: a **12-character container ID prefix**, the local image
-ID, and the container's start time. The prefix is what `--expect-container`
+each of the eight services below: a **12-character container ID prefix**,
+the local image ID, and the container's start time.
+
+```text
+slack-gateway   orchestrator   hermes-agent   google-calendar-mcp
+ollama          otel-collector phoenix        mlflow
+```
+
+`google-calendar-mcp` is included because Hermes can reach it on this path;
+`phoenix` and `mlflow` because they are where the evidence is read from. A
+record that pins the trace producers but not those three cannot be
+correlated against them later. §13's template has a row for each — record
+all eight, not a summary `YES`. The prefix is what `--expect-container`
 compares against — twelve characters is what `docker ps` shows and what the
 tool requires as a minimum.
 
@@ -143,6 +153,14 @@ check() {                       # check <compose-service> <repo-dir>
     r=$(git show "$SHA:$f" | sha256sum | cut -c1-12)
     [ "$c" = "$r" ] || { echo "DIFFERS $f"; ok=0; }
   done
+  # agent-contracts' own build definition: it selects the build backend and
+  # the packages discovered, so it can change install semantics without any
+  # file under src/agent_contracts changing. The Dockerfiles COPY the whole
+  # directory, so it survives into the image and can be compared.
+  c=$(docker compose exec -T "$1" sha256sum \
+        /packages/agent-contracts/pyproject.toml 2>/dev/null | cut -c1-12)
+  r=$(git show "$SHA:packages/agent-contracts/pyproject.toml" | sha256sum | cut -c1-12)
+  [ "$c" = "$r" ] || { echo "DIFFERS packages/agent-contracts/pyproject.toml"; ok=0; }
   [ $ok -eq 1 ] && echo "$1: all inputs match $SHA"
 }
 
@@ -150,10 +168,15 @@ check orchestrator   services/orchestrator
 check slack-gateway  apps/slack-gateway
 ```
 
-It covers all three things those Dockerfiles copy in: the service's Python
-source, its `pyproject.toml`, and `packages/agent-contracts` as installed
-into the image. Checking only `src/*.py` would report a match while the
-image carried a different contract package or dependency set.
+It covers every repository-controlled Python install input those
+Dockerfiles copy in: the service's Python source, the service's
+`pyproject.toml`, `packages/agent-contracts`'s Python files as installed
+into site-packages, **and `packages/agent-contracts/pyproject.toml`**.
+
+The last one is easy to leave out and matters: it selects the build backend
+and which packages are discovered, so it can change what `pip install`
+produces without a single file under `src/agent_contracts` differing. A
+`YES` that skipped it would assert more than it checked.
 
 Any `DIFFERS` means the running image was not built from the recorded SHA.
 Diff that file and record whether the difference is executable code or only
@@ -797,15 +820,17 @@ Operator:
 
 Repository SHA:
 Working tree:            clean / DIRTY
-Containers (container ID prefix, image ID, started):
+Containers (container ID prefix, image ID, started) -- all eight:
   slack-gateway:
   orchestrator:            <- record the prefix; §8 requires it
   hermes-agent:
+  google-calendar-mcp:
   ollama:
   otel-collector:
+  phoenix:
+  mlflow:
 Runtime Python inputs match recorded SHA (§3):       YES / NO (detail)
 Outside that boundary (§3's table):                 acknowledged
-Image ids recorded for all 8 §3 services:           YES / NO
 
 Preconditions:
   all required services healthy:                    YES / NO
@@ -832,8 +857,15 @@ Unexpected side effects observed (§14 -- window, not attribution):
 Side-effect window anchored at §5's marker:         YES / NO
 Post-validation checks performed:
 
+Per-criterion state (§9) -- one line each, none omitted:
+  §5 fixed input           PASS / NOT EXERCISED / INCONCLUSIVE / FAIL
+  gateway dispatch/status  PASS / NOT EXERCISED / INCONCLUSIVE / FAIL
+  trace / relationships    PASS / NOT EXERCISED / INCONCLUSIVE / FAIL
+  required-set sentinels   PASS / NOT EXERCISED / INCONCLUSIVE / FAIL
+  provenance (§3)          PASS / NOT EXERCISED / INCONCLUSIVE / FAIL
+  side effects (§14)       PASS / NOT EXERCISED / INCONCLUSIVE / FAIL
 Overall result:          PASS / NOT A RUNBOOK PASS / INCONCLUSIVE / FAIL
-                         (§9's vocabulary)
+                         (§9's aggregation rule: the worst state present)
 Verified subset (if not a PASS):
 Notes / limitations of this run:
 ```
@@ -1006,6 +1038,7 @@ Unexpected side effects: none observed, but see the INCONCLUSIVE state
 
 Per-criterion state (§9):
   §5 fixed input           NOT EXERCISED -- operator-chosen wording
+  gateway dispatch/status  PASS -- POST /dispatch 200, status=completed
   trace / relationships    PASS
   required-set sentinels   PASS
   provenance (§3)          NOT EXERCISED at the time; checked retroactively
@@ -1146,6 +1179,7 @@ Overall result:                           NOT A RUNBOOK PASS -- §5's input
                                           criterion was not exercised
 Per-criterion state (§9):
   §5 fixed input                          NOT EXERCISED
+  gateway dispatch/status                 PASS
   trace / relationships                   PASS
   required-set sentinels                  PASS
   provenance (§3)                         NOT EXERCISED -- credential read

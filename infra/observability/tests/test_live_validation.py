@@ -259,6 +259,31 @@ def test_provenance_covers_every_service_an_evidence_record_depends_on():
         assert f"\n  {service}:" in compose, service
 
 
+RUNBOOK = REPO_ROOT / "docs/observability/slack-orchestrator-live-validation.md"
+
+
+def test_the_runbook_records_every_service_the_helper_reports():
+    """Binds the evidence schema to `PROVENANCE_SERVICES`.
+
+    This pairing has drifted twice: the helper gained services while §3's
+    prose and §13's template still enumerated the older, shorter set, so a
+    completed record would silently omit identities the expanded set was
+    added to preserve. A summary "all 8 recorded: YES" is not a
+    substitute -- a later investigator cannot correlate anything from it --
+    so the template must have a row per service, and this asserts it does.
+    """
+    runbook = RUNBOOK.read_text()
+
+    template_start = runbook.index("Containers (container ID prefix, image ID, started)")
+    template = runbook[template_start : template_start + 600]
+
+    for service in lv.PROVENANCE_SERVICES:
+        assert f"  {service}:" in template, (
+            f"§13's evidence template has no row for {service!r}"
+        )
+        assert service in runbook, service
+
+
 def test_phoenix_project_matches_the_collector_configuration():
     """A rename in otel-collector.yaml must fail here rather than make the
     helper silently query an empty project."""
