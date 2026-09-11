@@ -109,13 +109,15 @@ request actually used is the one that leaked. `scan` will not run a
 service-backed credential read unbound — the two options are a required
 pair.
 
-**What each kind of service can actually prove.** The three are not
-equivalent, and a record should not imply they are:
+**What each kind of service can actually prove.** The four kinds are not
+equivalent, and a record should not imply they are. Every service in the
+set above appears here, so nothing has to be inferred by elimination:
 
 | Service | Identity recorded | What it establishes |
 |---|---|---|
-| `slack-gateway`, `orchestrator` | local image ID | Nothing on its own — a local image has no registry digest and no mechanical link to a commit. Use the source check below. |
-| `hermes-agent` | local image ID | Derived from the pinned upstream image in `apps/hermes-agent/Dockerfile`; the pin is in the repository at the recorded SHA. |
+| `slack-gateway`, `orchestrator` | local image ID | Nothing on its own — a local image has no registry digest and no mechanical link to a commit. Use the source check below, which covers both. |
+| `google-calendar-mcp` | local image ID | Correlation identity only. It is locally built, but its source is **outside** the source check's boundary — nothing below compares it. |
+| `hermes-agent` | local image ID | Derived from the pinned upstream image in `apps/hermes-agent/Dockerfile`; the pin is in the repository at the recorded SHA. It copies no repository file, so there is nothing to hash-compare. |
 | `ollama`, `otel-collector`, `phoenix`, `mlflow` | local image ID | Upstream `:latest` — **not a reproducible identity**. The ID lets a later investigation correlate, nothing more. |
 
 `phoenix` and `mlflow` are included because they are where the evidence is

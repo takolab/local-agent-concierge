@@ -277,11 +277,18 @@ def test_the_runbook_records_every_service_the_helper_reports():
     template_start = runbook.index("Containers (container ID prefix, image ID, started)")
     template = runbook[template_start : template_start + 600]
 
+    taxonomy_start = runbook.index("What each kind of service can actually prove")
+    taxonomy = runbook[taxonomy_start : taxonomy_start + 1400]
+
     for service in lv.PROVENANCE_SERVICES:
         assert f"  {service}:" in template, (
             f"§13's evidence template has no row for {service!r}"
         )
-        assert service in runbook, service
+        # §3's taxonomy too: a service absent from it leaves the reader
+        # inferring by elimination what that identity is worth.
+        assert f"`{service}`" in taxonomy, (
+            f"§3's service-identity table has no row for {service!r}"
+        )
 
 
 def test_phoenix_project_matches_the_collector_configuration():
