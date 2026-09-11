@@ -809,9 +809,10 @@ Recorded as **partial**, not complete, because:
   or bearer credential reaching either backend. Repeated on 2026-09-10 at
   21:05 following the runbook itself, with the credential read bound to the
   Orchestrator container that handled the request. Neither run used the
-  runbook's fixed test input, so neither is yet its canonical PASS —
-  routing, trace continuity and sentinel absence are established; a
-  deterministic input/expected-reply pair is not. Success path only, and
+  runbook's fixed test input, so both are recorded there as
+  `NOT A RUNBOOK PASS` rather than as a PASS with a footnote — routing,
+  trace continuity and sentinel absence are established; a deterministic
+  input/expected-reply pair is not. Success path only, and
   scoped to the runbook's required sentinel set — neither run checked
   whether the message or model response *text* leaked, which is an optional
   extension the operator supplies by hand rather than something the Gateway
