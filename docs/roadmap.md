@@ -808,7 +808,10 @@ Recorded as **partial**, not complete, because:
   `state=OK`, with no Slack identifier, conversation id, message timestamp
   or bearer credential reaching either backend. Repeated on 2026-09-10 at
   21:05 following the runbook itself, with the credential read bound to the
-  Orchestrator container that handled the request. Success path only, and
+  Orchestrator container that handled the request. Neither run used the
+  runbook's fixed test input, so neither is yet its canonical PASS —
+  routing, trace continuity and sentinel absence are established; a
+  deterministic input/expected-reply pair is not. Success path only, and
   scoped to the runbook's required sentinel set — neither run checked
   whether the message or model response *text* leaked, which is an optional
   extension the operator supplies by hand rather than something the Gateway

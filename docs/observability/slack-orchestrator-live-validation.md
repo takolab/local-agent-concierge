@@ -537,7 +537,7 @@ a caveat on PASS, because PASS is defined against the required set above.
 
 ```text
 PASS =
-    the expected Slack reply is observed in-thread
+    §5's fixed input was sent, and its expected reply is observed in-thread
   + the Gateway log shows POST /dispatch → 200 and status=completed
   + one trace contains all six expected spans with one trace ID
   + every expected parent → child relationship is correct
@@ -556,9 +556,18 @@ worth. A run that performed the extension records so and is stronger
 evidence; a run that did not is still a PASS, and its record says
 `content sentinels: not performed` so no reader can mistake the scope.
 
+**The input is part of the criterion, not a suggestion.** §5 specifies a
+deterministic input *and* the reply it should produce, and the first line
+above depends on both: with an operator-chosen message there is no expected
+reply to compare against, so the check degrades to "some substantive reply
+came back" — weaker, and not what PASS claims. A run that deviates records
+`test input conforms to §5: NO` and says which criterion was therefore not
+exercised.
+
 The invariant being protected: **a PASS must never imply a check the run
 did not actually perform.** Adding a sentinel to §8's required set means
-committing to it being obtainable every time.
+committing to it being obtainable every time; likewise, calling a run a
+PASS means every criterion above was exercised as written.
 
 Do not require what this stack cannot provide: span kind via the Phoenix
 REST API, span attributes via MLflow, or a registry digest for a locally
@@ -668,7 +677,8 @@ Preconditions:
   gateway env free of HERMES_API_*:                 YES / NO
 
 Test input:
-Slack reply observed:
+Test input conforms to §5:                          YES / NO
+Slack reply observed (and matches §5's expected):
 Gateway log (dispatch → status):
 
 Trace ID:
@@ -754,11 +764,12 @@ Do not record "no side effects possible". The supportable statement is
 
 Each entry is **observed evidence** from one actual execution.
 
-### 2026-09-10 (21:05 UTC) — first run following this runbook
+### 2026-09-10 (21:05 UTC) — live run with a §5 test-input deviation
 
-The run the earlier entry's limitations called for: executed with the
-procedure above rather than ad hoc, so the container binding is pinned
-rather than inferred.
+Executed with the procedure above rather than ad hoc, so the container
+binding is pinned rather than inferred — but **not** with §5's fixed input,
+which means one PASS criterion was not exercised as written. See the result
+line and limitations below. This is not yet the canonical runbook PASS.
 
 ```text
 Validation date:         2026-09-10 21:05:14 UTC (container clock)
@@ -783,8 +794,15 @@ Preconditions:
   gateway → orchestrator GET /health:     200
   gateway env free of HERMES_API_*:       YES
 
-Test input:              one Slack direct message (operator-chosen wording)
-Slack reply observed:    YES -- 63-character reply, processing status deleted
+Test input:              one Slack direct message, operator-chosen wording
+Test input conforms to §5:  NO -- §5's fixed string was not used
+Slack reply observed:    a substantive 63-character reply was posted
+                         in-thread and the processing status was deleted.
+                         Because the input was not §5's, there was no
+                         expected reply to compare it against: this
+                         establishes that the path returned a real agent
+                         response rather than the error message, not that
+                         a deterministic expected output was produced.
 Gateway log:             POST http://orchestrator:8700/dispatch → 200 OK
                          agent=hermes  status=completed  response_chars=63
                          delivery=posted_and_processing_status_deleted
@@ -815,7 +833,12 @@ Unexpected side effects: NO -- no `tools/call` span for this request (only
                          background state, logs and heartbeats; repository
                          clean.
 
-Overall result:          PASS
+Overall result:          PASS on every criterion except §9's first, which
+                         was not exercised: no deterministic input/expected
+                         reply pair was used. Everything the rewiring is
+                         about -- routing, trace continuity, sentinel
+                         absence, container binding, side effects -- is
+                         established by this run.
 ```
 
 **What this run additionally established.** The helper's container-backed
@@ -834,9 +857,12 @@ so Phoenix's storage is durable across one.
   nothing about whether the message or response text leaked. That is a
   scope statement, not a caveat on the PASS: §9 defines PASS against §8's
   required set, all seven of which were checked.
-- The message wording was operator-chosen rather than §5's fixed string,
-  which also means the content extension would have been awkward here —
-  §5's single-line input and reply are what make it expressible.
+- **§5's fixed input was not used**, so §9's first criterion was not
+  exercised. A canonical runbook PASS still needs a run that sends
+  `Reply with exactly SLACK_GATEWAY_OK.` and observes that exact reply.
+  The same deviation is why the content extension was impractical here:
+  §5's single-line, deterministic input/reply pair is what makes those two
+  sentinels expressible verbatim, and an operator-chosen message is not.
 - Only the success path ran; the failure and unknown-outcome paths remain
   test-covered only.
 - No Calendar tool was invoked, so Hermes' outbound-MCP propagation gap was
@@ -873,6 +899,7 @@ Preconditions:
 
 Test input:              one Slack direct message (text request; the exact
                          wording was operator-chosen, not §5's string)
+Test input conforms to §5:  NO
 Slack reply observed:    YES — 452-character text reply posted in-thread,
                          processing status deleted
 Gateway log:             POST http://orchestrator:8700/dispatch → 200 OK
