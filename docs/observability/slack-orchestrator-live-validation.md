@@ -3,14 +3,25 @@
 A Human-executable procedure for validating the runtime path in an actual
 running stack, plus the evidence record for each run.
 
-> **Two kinds of statement appear in this document and are never mixed.**
+> **Three kinds of statement appear in this document, and the difference
+> between the last two is what keeps the evidence honest.**
 >
 > - **Expected** — derived from the repository at the SHA named in each
->   section. Checked against the code by
+>   section: span names, contracts, exit codes. Checked against the code by
 >   `infra/observability/tests/test_live_validation.py`.
-> - **Observed** — recorded from an actual run, in
->   "[Run records](#run-records)" only. Nothing outside that section is
->   evidence of anything having happened.
+> - **Referenced observation** — something seen on a past run, cited in a
+>   normative section to justify why a step exists or is shaped as it is
+>   (§4's Collector exit, §5's tool-capability evidence, §7's
+>   evidence-channel limits). Always attributed to a date or a document, and
+>   never evidence about *your* run.
+> - **Current-run evidence** — what a validation actually established, in
+>   "[Run records](#run-records)" **only**.
+>
+> The invariant is not that history cannot be cited outside Run records —
+> the procedure would be unjustifiable without it. It is that **no section
+> may read as evidence for the run in progress.** If a statement would
+> change a reader's conclusion about the current run, it belongs in a run
+> record, with its own provenance.
 
 ## 1. Purpose
 
@@ -88,23 +99,47 @@ request actually used is the one that leaked. `scan` will not run a
 service-backed credential read unbound — the two options are a required
 pair.
 
-**Known provenance limitation — do not overstate this.** `slack-gateway`
-and `orchestrator` are built locally from this repository, so they have
-*image IDs*, not registry digests, and there is **no mechanical link from
-an image back to a source commit**. What ties them to source is the
-combination of:
+**What each kind of service can actually prove.** The three are not
+equivalent, and a record should not imply they are:
 
-1. the repository SHA, with a clean working tree, and
-2. a container whose start time is *after* the last `docker compose build`
-   of that service at that SHA.
+| Service | Identity recorded | What it establishes |
+|---|---|---|
+| `slack-gateway`, `orchestrator` | local image ID | Nothing on its own — a local image has no registry digest and no mechanical link to a commit. Use the source check below. |
+| `hermes-agent` | local image ID | Derived from the pinned upstream image in `apps/hermes-agent/Dockerfile`; the pin is in the repository at the recorded SHA. |
+| `ollama`, `otel-collector`, `phoenix`, `mlflow` | local image ID | Upstream `:latest` — **not a reproducible identity**. The ID lets a later investigation correlate, nothing more. |
 
-If the working tree is dirty, or a container predates the build, the
-provenance is broken and the run cannot be pinned — see
-[Stop conditions](#12-stop-conditions). `hermes-agent` is derived from the
-pinned upstream image (`apps/hermes-agent/Dockerfile`); `ollama`,
-`otel-collector`, `phoenix` and `mlflow` are upstream `:latest` tags, which
-are **not** reproducible identities — record the image ID so the run can at
-least be correlated afterwards.
+`phoenix` and `mlflow` are included because they are where the evidence is
+*read from*: a record pinning the producers but not the backends cannot be
+correlated against what those backends held.
+
+**Do not use image timestamps.** `docker inspect <image> --format
+'{{.Created}}'` reports when the image *config* was created, and a rebuild
+whose layers all hit the cache keeps the original date. On this stack it
+reported `2026-09-08` for an orchestrator image that in fact contains
+2026-09-10 source. It is not evidence of when anything was built.
+
+**The check that does prove it: compare the running source against the
+repository.** For the two locally built services this is direct evidence,
+and it is mechanical:
+
+```bash
+for f in services/orchestrator/src/orchestrator/*.py; do
+  n=$(basename "$f")
+  c=$(docker compose exec -T orchestrator cat "/app/src/orchestrator/$n" | sha256sum | cut -c1-12)
+  r=$(sha256sum "$f" | cut -c1-12)
+  [ "$c" = "$r" ] && echo "MATCH   $n" || echo "DIFFERS $n"
+done
+```
+
+and the same shape for `slack-gateway` against `/app/src/slack_gateway/`.
+Any `DIFFERS` means the running image was not built from the recorded SHA.
+Diff that file and record whether the difference is executable code or only
+comments — the distinction changes what the run's evidence is worth, and
+only the diff can tell you.
+
+Record the outcome as `source matches recorded SHA: YES / NO (detail)`
+rather than a bare "provenance consistent", which asserts a conclusion
+without naming what was compared.
 
 The Collector's config identity is the repository file
 `infra/observability/otel-collector.yaml` at the recorded SHA; it is
@@ -221,7 +256,22 @@ without the Agent.
 
 ## 5. Test input
 
-Send **one** direct message to the Slack app, in a thread you control:
+**Immediately before sending**, drop a marker that anchors §14's
+side-effect window:
+
+```bash
+touch /tmp/live-validation-start
+```
+
+§14 searches for files newer than this marker rather than for files newer
+than "ten minutes ago". The difference matters: a model run can take
+minutes, and the Human then works through §7's trace check and §8's scan
+before reaching §14. A window measured backwards from inspection time
+therefore moves its own start forward while the validation proceeds, and a
+request-side write can fall out of it — another way to get a clean result
+from a check that did not look where it should have.
+
+Then send **one** direct message to the Slack app, in a thread you control:
 
 ```text
 Reply with exactly SLACK_GATEWAY_OK.
@@ -423,10 +473,16 @@ python3 infra/observability/live_validation.py scan <TRACE_ID> \
   --expect-container <the orchestrator container prefix from §3>
 ```
 
-**The tool never prints a value** — only `absent` / `LEAKED` per label — so
-a real credential and real Slack identifiers can be checked without being
-echoed into a terminal, a CI log, or a pasted evidence record. Keep the
-needles file outside the repository.
+**`scan` never re-echoes a sentinel value** — it prints only `absent` /
+`LEAKED` per label — so its output can go into a pasted evidence record as
+it stands.
+
+That is a property of `scan`, not of the whole procedure: **the
+`docker compose logs` command above prints the Slack identifiers to your
+terminal**, which is how you obtain them, and `--env-from-service` reads
+the credential into the process (without printing it). The narrow claim is
+the true one: nothing you paste from `scan` contains a sentinel. Keep the
+needles file outside the repository, and delete it when the run is over.
 
 `--env-from-service orchestrator` is how the credential is supplied, and
 it matters *which* source is used. **Docker Compose reads `.env` itself,
@@ -578,6 +634,7 @@ PASS with a footnote — it is a different result. Record one of:
 |---|---|
 | `PASS` | every criterion above was exercised, and met |
 | `NOT A RUNBOOK PASS` | one or more criteria were not exercised. Name which, and record `Verified subset:` — what *was* established |
+| `INCONCLUSIVE` | a criterion was exercised, but its evidence is unusable or ambiguous — the trace never arrived, the backends disagree, a sentinel could not be resolved. Distinct from `NOT A RUNBOOK PASS` (not attempted) and from `FAIL` (attempted, answered, wrong) |
 | `FAIL` | a criterion was exercised and not met |
 
 Deliberately **not** `INCOMPLETE` at run level: this document already uses
@@ -585,7 +642,8 @@ that word for the specific thing `scan` and `trace` print when the evidence
 they were given is unusable (exit `2`). A run can be `NOT A RUNBOOK PASS`
 while every tool invocation in it exited `0`, which is exactly the 21:05
 case below — reusing `INCOMPLETE` for both would blur a distinction the
-tooling works hard to keep.
+tooling works hard to keep. `INCONCLUSIVE` is the run-level term for the
+case where a tool *did* report exit `2`, or where two backends disagree.
 
 Do not require what this stack cannot provide: span kind via the Phoenix
 REST API, span attributes via MLflow, or a registry digest for a locally
@@ -687,7 +745,8 @@ Containers (container ID prefix, image ID, started):
   hermes-agent:
   ollama:
   otel-collector:
-Provenance consistent (containers started after build at this SHA):  YES / NO
+Source matches recorded SHA (§3's per-file comparison):  YES / NO (detail)
+Upstream :latest image ids recorded (ollama, collector, phoenix, mlflow):  YES / NO
 
 Preconditions:
   all required services healthy:                    YES / NO
@@ -709,10 +768,13 @@ Sensitive sentinel check -- required set (§8):      PASS / FAIL / UNKNOWN
 Content sentinels (message / response text):        checked / not performed
 Credential read bound to the request's container:   YES / NO
 
-Unexpected side effects:                            YES / NO / UNKNOWN
+Unexpected side effects observed (§14 -- window, not attribution):
+                                                    YES / NO / UNKNOWN
+Side-effect window anchored at §5's marker:         YES / NO
 Post-validation checks performed:
 
-Overall result:          PASS / NOT A RUNBOOK PASS / FAIL   (§9's vocabulary)
+Overall result:          PASS / NOT A RUNBOOK PASS / INCONCLUSIVE / FAIL
+                         (§9's vocabulary)
 Verified subset (if not a PASS):
 Notes / limitations of this run:
 ```
@@ -729,25 +791,38 @@ turn (§5). After the run, check what actually happened rather than assuming:
 #    NOT be inside the request's trace.
 curl -s "http://127.0.0.1:6006/v1/projects/local-agent-concierge-infra-smoke-test/spans?limit=50"
 
-# 2. Did anything change under Hermes' persistent state?
-#    The timestamp is computed explicitly rather than written as
-#    `-newermt '-10 minutes'`: GNU findutils accepts that relative form,
-#    but `bfs` -- which some systems install as `find` -- rejects it as an
-#    invalid timestamp, prints an error to stderr, and matches nothing.
-#    A side-effect check that reports "no changes" because it failed to
-#    run is the worst possible outcome for this step, so use the form that
-#    works on both.
-find data/hermes -type f \
-  -newermt "$(date -d '10 minutes ago' '+%Y-%m-%dT%H:%M:%S')" \
+# 2. Did anything change under Hermes' persistent state since §5's
+#    marker? `-newer <file>` is used rather than `-newermt <time>` for two
+#    reasons: it anchors the window at validation start instead of at
+#    inspection time, and it avoids the relative-timestamp form
+#    (`-newermt '-10 minutes'`) that GNU findutils accepts but `bfs` --
+#    which some systems install as `find` -- rejects as invalid, printing
+#    to stderr and matching nothing. A side-effect check that reports "no
+#    changes" because it failed to run, or because its window drifted past
+#    the write, is the worst possible outcome for this step.
+find data/hermes -type f -newer /tmp/live-validation-start \
   -not -path '*/cache/*' | sort
 
 # 3. Is the repository still clean?
 git status --porcelain
+
+# 4. Done -- remove the marker so a later run cannot inherit this one's
+#    window.
+rm -f /tmp/live-validation-start
 ```
 
-Expected for a text-only turn: no `tools/call …` span in the window other
-than the routine `MCP send ping` keepalive (Hermes pings the Calendar MCP
-every ~3 minutes, unrelated to any request), and no repository change.
+Expected for a text-only turn: no `tools/call …` span in the inspected
+window other than the routine `MCP send ping` keepalive (Hermes pings the
+Calendar MCP every ~3 minutes, unrelated to any request), and no repository
+change.
+
+**This is a time-window observation, not request attribution.** Hermes does
+not propagate the request's trace context into its outbound MCP calls
+(`docs/observability/hermes-trace-context.md`), so a tool call it made
+*would* appear as an unrelated trace with no link back. Nothing here can
+tie an outbound tool trace to this request, or rule one out. Record it as
+"no non-keepalive `tools/call` span observed in the inspected window" —
+never as "no tool call for this request".
 
 **Reading step 2's output.** A successful turn touches roughly a dozen
 files, and almost none of them are about your request:
@@ -803,10 +878,24 @@ Containers (container ID prefix, image ID, started):
   hermes-agent:          9d53cbf88567  sha256:470aa3b68074d9d752f  20:50:41
   ollama:                7e7efecf4bef  sha256:dacbdaa86a43fb9ed58  20:50:41
   otel-collector:        2f55fb34043e  sha256:e11c83206a71a0ac312  20:53:50
-Provenance consistent:   YES -- images unchanged from the 17:27 run; the
-                         containers restarted with the Docker engine at
-                         20:50, before the 21:05 request. otel-collector
-                         was recreated at 20:53 (see below).
+Source matches recorded SHA:
+                         NO, in one respect. Established afterwards by §3's
+                         source comparison, not at the time: every
+                         slack-gateway file and every orchestrator file
+                         except one matches 548fed6 byte-for-byte.
+                         `orchestrator/hermes_agent.py` differs in two
+                         docstrings (the module docstring and
+                         `_extract_output_text`'s) -- the running image
+                         predates 094b984 and 6aa80ce, which changed only
+                         those comments. ASTs differ only in those string
+                         constants; no executable code differs.
+                         The original record said "Provenance consistent:
+                         YES" on the basis that the containers started
+                         after the images were built. That was not
+                         evidence: a restart is not a rebuild, and image
+                         `Created` timestamps are unreliable (§3).
+                         phoenix / mlflow image ids were not recorded at
+                         the time; `provenance` did not yet report them.
 
 Preconditions:
   all required services healthy:          YES (after recreating otel-collector)
@@ -845,12 +934,13 @@ Content sentinels (message / response text):
                          not performed -- see §8's optional extension
 Credential read bound to the request's container:  YES (df6eb0bff364)
 
-Unexpected side effects: NO -- no `tools/call` span for this request (only
-                         the routine MCP keepalive); the only persistent
-                         writes were the expected conversation store
-                         (`response_store.db-*`) plus Hermes' own
-                         background state, logs and heartbeats; repository
-                         clean.
+Unexpected side effects: none observed -- no non-keepalive `tools/call`
+                         span in the inspected window (which cannot attribute
+                         tool calls to a request either way, see §14); the
+                         only persistent writes were the expected
+                         conversation store (`response_store.db-*`) plus
+                         Hermes' own background state, logs and heartbeats;
+                         repository clean.
 
 Overall result:          NOT A RUNBOOK PASS -- §9's first criterion was not
                          exercised: no deterministic input/expected reply
@@ -863,8 +953,9 @@ Verified subset:         every other §9 criterion passed. Everything the
                          run.
 ```
 
-**What this run additionally established.** The helper's container-backed
-paths ran against a real Docker daemon for the first time — they had been
+**What this run additionally established.** (Current-run evidence; §4 and
+§7 cite the same observations as *referenced* history.) The helper's
+container-backed paths ran against a real Docker daemon for the first time — they had been
 exercised only against a stubbed `_run` when PR #44 was written, which that
 PR flagged as an open gap. All four failure paths were confirmed to fail
 closed with distinguishable reasons: a mismatched `--expect-container`
@@ -908,9 +999,21 @@ Containers (image ID, started):
   hermes-agent:          sha256:470aa3b68074d9d752f…  2026-09-10T11:25:30
   ollama:                sha256:dacbdaa86a43fb9ed58…  2026-09-10T11:14:52
   otel-collector:        sha256:e11c83206a71a0ac312…  2026-09-10T11:14:52
-Provenance consistent:   YES — slack-gateway was rebuilt and recreated at
-                         this SHA (17:21) before the run (17:27); the other
-                         services were unchanged by PR #43.
+Source matches recorded SHA:
+                         NOT CHECKED at the time. Inferred afterwards: the
+                         image ids above are the ones §3's source comparison
+                         was later run against, and against 0bcceb95 the
+                         only difference is `orchestrator/hermes_agent.py`'s
+                         module docstring (094b984, part of this very PR's
+                         merge, which the running image predates). No
+                         executable code differs. This is retroactive
+                         inference from unchanged image ids, not evidence
+                         gathered by the run.
+                         The original record said "Provenance consistent:
+                         YES — slack-gateway was rebuilt and recreated at
+                         this SHA before the run". A rebuild before a run
+                         is not a comparison; see §3.
+                         phoenix / mlflow image ids were not recorded.
 
 Preconditions:
   all required services healthy:          YES
@@ -954,19 +1057,24 @@ Sensitive sentinel check — required set (§8):
 Content sentinels (message / response text):
                                           not performed
 
-Unexpected side effects:                  NO — the only other trace in the
-                                          window was the routine
-                                          `MCP send ping` keepalive; no
-                                          `tools/call` span for this request
+Unexpected side effects:                  none observed — no non-keepalive
+                                          `tools/call` span in the inspected
+                                          window (not request attribution;
+                                          see §14)
 Post-validation checks performed:         span scan of the surrounding
                                           window; repository clean
 
 Overall result:                           NOT A RUNBOOK PASS -- §5's input
                                           was not used, so §9's first
                                           criterion was not exercised
-Verified subset:                          every other §9 criterion passed
-                                          (noting §3's binding was inferred,
-                                          not pinned -- see below)
+Verified subset:                          §9's trace, sentinel and
+                                          side-effect criteria passed. §3
+                                          did NOT pass: the credential read
+                                          was not bound to a recorded
+                                          container and no source comparison
+                                          was performed, so this run
+                                          establishes nothing about which
+                                          build served it.
 ```
 
 **What this run additionally settled.** MLflow reported the trace as

@@ -53,12 +53,18 @@ PHOENIX_PROJECT = "local-agent-concierge-infra-smoke-test"
 
 # The Compose services whose identity is worth pinning to an evidence
 # record. Ordered from the Slack entry point down.
+# Every service whose identity an evidence record depends on -- including
+# `phoenix` and `mlflow`, which are where the evidence is *read from*: a
+# record that pins the producers but not the backends cannot later be
+# correlated against what those backends held at the time.
 PROVENANCE_SERVICES = (
     "slack-gateway",
     "orchestrator",
     "hermes-agent",
     "ollama",
     "otel-collector",
+    "phoenix",
+    "mlflow",
 )
 
 # Every parent -> child relationship one successful Slack request is

@@ -236,6 +236,25 @@ def test_expected_span_names_match_what_the_code_emits():
     assert 'HERMES_SPAN_NAME = "hermes.request"' in orchestrator
 
 
+def test_provenance_covers_every_service_an_evidence_record_depends_on():
+    """Regression: `phoenix` and `mlflow` were absent, so a record pinned
+    the trace producers but not the backends it was read from -- which is
+    what a later correlation would need."""
+    assert set(lv.PROVENANCE_SERVICES) == {
+        "slack-gateway",
+        "orchestrator",
+        "hermes-agent",
+        "ollama",
+        "otel-collector",
+        "phoenix",
+        "mlflow",
+    }
+
+    compose = (REPO_ROOT / "docker-compose.yml").read_text()
+    for service in lv.PROVENANCE_SERVICES:
+        assert f"\n  {service}:" in compose, service
+
+
 def test_phoenix_project_matches_the_collector_configuration():
     """A rename in otel-collector.yaml must fail here rather than make the
     helper silently query an empty project."""

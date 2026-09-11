@@ -807,8 +807,9 @@ Recorded as **partial**, not complete, because:
   `hermes.request` → `/v1/responses` in Phoenix, present in MLflow with
   `state=OK`, with no Slack identifier, conversation id, message timestamp
   or bearer credential reaching either backend. Repeated on 2026-09-10 at
-  21:05 following the runbook itself, with the credential read bound to the
-  Orchestrator container that handled the request. Neither run used the
+  21:05 using the runbook's procedure but not its fixed input, with the
+  credential read bound to the Orchestrator container that handled the
+  request. Neither run used the
   runbook's fixed test input, so both are recorded there as
   `NOT A RUNBOOK PASS` rather than as a PASS with a footnote — routing,
   trace continuity and sentinel absence are established; a deterministic
