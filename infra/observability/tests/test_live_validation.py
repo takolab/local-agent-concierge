@@ -291,7 +291,7 @@ def test_the_runbook_records_every_service_the_helper_reports():
         )
 
 
-def test_the_helper_does_not_restate_retired_provenance_rules():
+def test_the_helper_does_not_restate_retired_provenance_rules(monkeypatch, capsys):
     """The helper points at §3; it does not carry its own copy of the rules.
 
     Its provenance note once claimed the repository SHA plus a clean tree
@@ -302,15 +302,22 @@ def test_the_helper_does_not_restate_retired_provenance_rules():
     fourth time a rule duplicated between code and docs has drifted, so
     reintroducing it fails here.
     """
-    source = HELPER_SOURCE.lower()
+    # Asserted against what `provenance` actually prints, not against the
+    # module source: the source also contains a comment *explaining* that
+    # the rule was retired, and a raw-source scan cannot tell the two
+    # apart. What matters is what the operator reads.
+    monkeypatch.setattr(lv, "_run", lambda command: "")
+
+    lv.main(["provenance"])
+    printed = capsys.readouterr().out.lower()
 
     for retired in ("clean tree is what ties", "plus a clean tree"):
-        assert retired not in source, (
-            f"the helper restates a retired provenance rule: {retired!r}"
+        assert retired not in printed, (
+            f"the helper prints a retired provenance rule: {retired!r}"
         )
 
     # It must still send the reader somewhere authoritative.
-    assert "exact runtime provenance" in source
+    assert "exact runtime provenance" in printed
 
 
 def test_phoenix_project_matches_the_collector_configuration():
