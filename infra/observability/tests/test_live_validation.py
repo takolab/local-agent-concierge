@@ -291,6 +291,28 @@ def test_the_runbook_records_every_service_the_helper_reports():
         )
 
 
+def test_the_helper_does_not_restate_retired_provenance_rules():
+    """The helper points at §3; it does not carry its own copy of the rules.
+
+    Its provenance note once claimed the repository SHA plus a clean tree
+    ties a local image to its source. §3 retired that -- a clean checkout
+    says nothing about what the running image was built from, and this
+    stack actually exhibited a case where the two disagreed. The claim
+    survived in the helper after the runbook dropped it, which is the
+    fourth time a rule duplicated between code and docs has drifted, so
+    reintroducing it fails here.
+    """
+    source = HELPER_SOURCE.lower()
+
+    for retired in ("clean tree is what ties", "plus a clean tree"):
+        assert retired not in source, (
+            f"the helper restates a retired provenance rule: {retired!r}"
+        )
+
+    # It must still send the reader somewhere authoritative.
+    assert "exact runtime provenance" in source
+
+
 def test_phoenix_project_matches_the_collector_configuration():
     """A rename in otel-collector.yaml must fail here rather than make the
     helper silently query an empty project."""

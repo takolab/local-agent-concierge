@@ -378,11 +378,17 @@ def command_provenance(_: argparse.Namespace) -> int:
 
     print()
     print(
-        "note: `image` is a local image ID, not a registry digest. Locally "
-        "built images\n      (slack-gateway, orchestrator) have no digest "
-        "and no mechanical link to a\n      source commit -- the repository "
-        "SHA above plus a clean tree is what ties\n      them to source. See "
-        "the runbook's 'Exact Runtime Provenance' section.\n\n"
+        # Deliberately does not restate §3's rules. An earlier version of
+        # this note claimed the repository SHA plus a clean tree ties a
+        # local image to its source; §3 retired that, because a clean
+        # checkout says nothing about what the running image was built
+        # from -- a case this stack actually exhibited. Restating rules
+        # here just creates a second copy to drift.
+        "note: a local image ID does not establish source provenance. For "
+        "slack-gateway\n      and orchestrator, run the recorded-SHA source "
+        "comparison in the runbook's\n      'Exact Runtime Provenance' "
+        "section before claiming a source match. The other\n      services "
+        "have different identity semantics -- see the same section.\n\n"
         f"      `container[:{MIN_CONTAINER_PREFIX}]` is an ID *prefix*, "
         "which is what `--expect-container`\n      compares against. "
         "Record the orchestrator one and pass it to `scan`: without it\n"
