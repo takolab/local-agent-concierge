@@ -348,42 +348,72 @@ verification — reused rather than invented so both procedures produce
 comparable evidence. It is deterministic enough to identify, carries no
 personal data, and asks for a pure text response.
 
-**The expected reply is exactly one of these two strings:**
+**The expected reply is the bare token:**
 
 ```text
 SLACK_GATEWAY_OK
-SLACK_GATEWAY_OK.
 ```
 
-Both, because the input's own trailing period is both the sentence's
-terminator and — on one defensible reading of "exactly" — part of the
-token being requested. The 2026-09-14 run had to resolve that ambiguity
-mid-validation, which is the wrong time to be deciding what a PASS
-criterion means. It is settled here instead.
+**Judge it by meaning, not by byte equality.** A model asked for a bare
+token will not reproduce one reliably: it may terminate it with a period,
+wrap it in backticks, change the case, or add a trailing newline. None of
+those change what the reply *is*, and a run that failed on one would be
+reporting a formatting artefact as a broken runtime path. The 2026-09-14
+run hit exactly this — its input's trailing period made both
+`SLACK_GATEWAY_OK` and `SLACK_GATEWAY_OK.` defensible readings, and the
+criterion said nothing about which counted.
 
-**The set is closed.** This is not latitude for the operator to judge a
-near-miss at run time: different case, surrounding text, an added prefix
-or suffix, or any whitespace beyond a trailing newline is **not** the
-expected reply. A run that observes something else records
-`test input conforms to §5: YES` — the input *was* §5's — and §9's first
-criterion as `FAIL`, because the criterion is the input **and** its
-expected reply. Widening the set beyond these two strings would degrade
-the check toward "some substantive reply came back", which is exactly
-what §9 explains a fixed input exists to avoid.
-
-**The Gateway log corroborates it without logging content.** `scan`
-cannot help here (it reports only `absent` / `LEAKED`), but
-`response_chars` in the Gateway's "Agent response received" line is a
-length, and the two accepted strings have distinct lengths:
+So the criterion has two halves, and they are not equally at risk:
 
 ```text
-response_chars=16   ->  consistent with  SLACK_GATEWAY_OK
-response_chars=17   ->  consistent with  SLACK_GATEWAY_OK.
+the reply conveys SLACK_GATEWAY_OK   and   carries nothing else substantive
 ```
 
-A length is not the text, so this corroborates the operator's in-thread
-observation rather than replacing it — but a mismatch between the two is
-a signal worth stopping on, and it costs no additional logging to check.
+The first half is nearly always obvious. **The second half is the one to
+actually check**, because it is what separates this from the weaker
+"some substantive reply came back" that §9 explains a fixed input exists
+to avoid. A reply that explains itself, asks a question, hedges, refuses,
+or answers something else is **not** the expected reply, even when the
+token appears somewhere inside it.
+
+Concretely, the criterion fails when:
+
+```text
+the token is absent, misspelled, or altered
+the reply adds explanation, commentary, a question, or a refusal
+the reply is §10's "Please try again" / "The result is unknown..."
+```
+
+A run that observes any of those records `test input conforms to §5: YES`
+— the input *was* §5's — and §9's first criterion as `FAIL`, because that
+criterion is the input **and** its expected reply.
+
+**Why this is not enumerated instead.** An earlier revision of this
+section listed the two exact strings the 2026-09-14 run had made
+plausible. That was overfitted to one observation: the period was simply
+the variation that came up, and nothing made it more principled than any
+other formatting difference — a closed set of the variants already seen
+is not a rule. It also implied a mechanical check where none exists: the
+evidence here is an operator reading a thread, and `scan` cannot help
+(it reports only `absent` / `LEAKED`). Naming the judgement honestly and
+bounding what it may not excuse is the stronger form.
+
+**`response_chars` guards the half judgement is weakest on.** The Gateway
+logs a response *length*, never content (§8's data minimisation), and the
+bare token is 16 characters:
+
+```text
+response_chars = 16        the bare token, nothing added
+response_chars slightly >   the token plus punctuation or formatting --
+                           still the expected reply
+response_chars much larger  the model added content -- read the thread
+                           before recording this criterion as met
+```
+
+This is a signal, not a threshold, and it does not replace reading the
+thread. What it does is catch, at no logging cost, the case a generous
+reading of "conveys the token" would wave through: a reply that was never
+the token alone.
 
 **It does not guarantee that no tool runs, and this runbook does not claim
 it does.** What the repository actually supports:
@@ -1056,12 +1086,12 @@ Preconditions:
 Test input:              §5's fixed string, sent once as a direct message
 Test input conforms to §5:                          YES
 Slack reply observed (and matches §5's expected):
-                         `SLACK_GATEWAY_OK` -- one of §5's two accepted
-                         strings, reported verbatim by the operator from
-                         the thread. Independently corroborated by the
-                         Gateway's `response_chars=16`, which is the
-                         length of that string and not of the
-                         period-terminated variant. §5 did not yet name
+                         `SLACK_GATEWAY_OK` -- the bare token, with no
+                         punctuation, formatting or added content,
+                         reported verbatim by the operator from the
+                         thread. Corroborated by the Gateway's
+                         `response_chars=16`: exactly the token's length,
+                         so the model added nothing. §5 did not yet name
                          an expected reply when this run started; the
                          ambiguity was resolved during the run and §5 was
                          amended in the same change as this record, so no
