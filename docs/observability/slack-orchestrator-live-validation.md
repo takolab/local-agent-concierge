@@ -348,6 +348,43 @@ verification — reused rather than invented so both procedures produce
 comparable evidence. It is deterministic enough to identify, carries no
 personal data, and asks for a pure text response.
 
+**The expected reply is exactly one of these two strings:**
+
+```text
+SLACK_GATEWAY_OK
+SLACK_GATEWAY_OK.
+```
+
+Both, because the input's own trailing period is both the sentence's
+terminator and — on one defensible reading of "exactly" — part of the
+token being requested. The 2026-09-14 run had to resolve that ambiguity
+mid-validation, which is the wrong time to be deciding what a PASS
+criterion means. It is settled here instead.
+
+**The set is closed.** This is not latitude for the operator to judge a
+near-miss at run time: different case, surrounding text, an added prefix
+or suffix, or any whitespace beyond a trailing newline is **not** the
+expected reply. A run that observes something else records
+`test input conforms to §5: YES` — the input *was* §5's — and §9's first
+criterion as `FAIL`, because the criterion is the input **and** its
+expected reply. Widening the set beyond these two strings would degrade
+the check toward "some substantive reply came back", which is exactly
+what §9 explains a fixed input exists to avoid.
+
+**The Gateway log corroborates it without logging content.** `scan`
+cannot help here (it reports only `absent` / `LEAKED`), but
+`response_chars` in the Gateway's "Agent response received" line is a
+length, and the two accepted strings have distinct lengths:
+
+```text
+response_chars=16   ->  consistent with  SLACK_GATEWAY_OK
+response_chars=17   ->  consistent with  SLACK_GATEWAY_OK.
+```
+
+A length is not the text, so this corroborates the operator's in-thread
+observation rather than replacing it — but a mismatch between the two is
+a signal worth stopping on, and it costs no additional logging to check.
+
 **It does not guarantee that no tool runs, and this runbook does not claim
 it does.** What the repository actually supports:
 
