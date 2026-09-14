@@ -458,15 +458,38 @@ NOT `OUTCOME_UNKNOWN`   we know what result the request produced, so
 
 NOT automatically safe to repeat
                         complete §14's side-effect checks for the failed
-                        run first; start a fresh validation only once
-                        they show no unexpected consequential action
+                        run, then decide explicitly whether repeating is
+                        safe -- given §14's bounded visibility and the
+                        absence of an idempotency guarantee -- and record
+                        that decision and its basis, as §11 requires.
+
+                        If a consequential action cannot be ruled out
+                        well enough to justify a repeat, do not re-run.
+                        Reconcile or reset the environment instead.
 ```
+
+**§14 is evidence toward that decision, and not the decision.** The only
+claim it supports is "no unexpected side effect *observed*, by the checks
+above". It is a time-window observation rather than request attribution:
+Hermes does not propagate trace context into its outbound MCP calls, so a
+tool call it made would appear as an unrelated trace with nothing linking
+it back, and §14 can neither tie one to this request nor rule one out.
+
+```text
+§14 clean   !=   no consequential action occurred
+            !=   safe to repeat
+```
+
+Making a clean §14 the gate would have it carry a conclusion it
+explicitly disclaims — the same shape of error as reading §12's carve-out
+generously to admit the answer already in hand.
 
 The distinction is worth keeping sharp, because the two properties come
 apart here and the convenient reading merges them. §11's retry
-prohibition is not triggered — but the reasoning behind §11 is about
-side effects and idempotency, and none of that is resolved by knowing the
-outcome.
+*prohibition* is not triggered — but the *reasoning* behind §11 is about
+side effects and idempotency, and knowing the outcome resolves none of
+it. So §5 follows §11's decision model rather than inventing a second
+one: inspect, decide, and record the decision with its basis.
 
 **`response_chars` corroborates without logging content.** The Gateway
 logs a response *length*, never content (§8's data minimisation), and the
@@ -918,6 +941,15 @@ Before deciding whether a retry is safe, inspect, in order:
 4. §14's side-effect checks.
 
 Record the decision and its basis in the run record.
+
+**A known outcome is not an exemption from this.** The rule above names
+`OUTCOME_UNKNOWN` because that is the case where even *delivery* is in
+doubt, but nothing here turns on the outcome being unknown: the tool
+capability and the missing idempotency guarantee are properties of the
+boundary, not of the classification. A run that completed and failed §5
+on formatting is the concrete case — the result is known, and whether the
+turn acted before returning it is not. The same decision is required, and
+`status=completed` answers none of it.
 
 ## 12. Stop conditions
 
