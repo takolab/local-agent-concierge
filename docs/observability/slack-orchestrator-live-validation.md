@@ -190,9 +190,43 @@ Record it in the categories §12 uses, which are narrower than they look:
 constants that survive into the compiled module** and are therefore *not*
 comments. §12's carve-out covers the first and not the second, so
 "docstring-only" is a stop condition rather than a difference to explain
-past. Establish which it is mechanically — parse both copies, strip every
-docstring, compare the ASTs — rather than by reading the diff, and record
-the method along with the answer.
+past.
+
+**Classify it with this procedure, in order.** It matters that these are
+separate steps: an AST comparison alone cannot distinguish the two
+categories §12 now treats differently, because both a `#` comment
+difference and a docstring difference leave the docstring-stripped ASTs
+identical. A single "ASTs match after stripping" check collapses a
+continue and a stop into one answer.
+
+```text
+1. Token signature.  Tokenize both copies; drop COMMENT and NL tokens;
+   compare the remaining (type, string) sequences.
+     identical  ->  the difference is comments and layout only
+                    -> §12's carve-out applies, the run may continue
+     differs    ->  go to 2
+
+2. Unmodified ASTs.  Parse both copies and compare `ast.dump`.
+     identical  ->  a non-comment, non-executable source difference
+                    (numeric literal spelling, redundant parentheses,
+                    and the like).  NOT covered by §12's carve-out: STOP
+     differs    ->  go to 3
+
+3. Docstring-stripped ASTs.  Strip every module/class/function docstring
+   from both parses, compare again.
+     identical  ->  docstring-only.  STOP (§12)
+     differs    ->  executable code differs.  STOP (§12)
+```
+
+Step 1 is what licenses the `comment-only` claim, and nothing weaker
+does: identical ASTs are *not* sufficient, since `x = 0x1` and `x = 1`
+produce the same tree while differing in source and in neither comments
+nor whitespace. Steps 2 and 3 do not change the outcome — everything past
+step 1 stops — but they name *which* difference was found, which is what
+the record has to carry and what any later decision to broaden §12 would
+be reasoned about.
+
+Record the step that decided it, not just the verdict.
 
 **What this does not cover, and must not be implied by a `YES`:**
 
@@ -402,11 +436,37 @@ a fixed string, and the criterion can be an exact comparison again.
 
 **A strict rule means a run can fail on a formatting variant, and that is
 the intended trade.** If the model answers `SLACK_GATEWAY_OK.` the
-criterion is `FAIL`, not a near-miss to be waved through. Dispatch
-completed and the outcome is not `OUTCOME_UNKNOWN`, so §11's retry
-prohibition does not apply and the validation may simply be run again.
-Re-running costs one message; a criterion that stretches to fit whatever
-came back costs the meaning of every PASS recorded against it.
+criterion is `FAIL`, not a near-miss to be waved through. A criterion that
+stretches to fit whatever came back costs the meaning of every PASS
+recorded against it, and re-running costs one message.
+
+**But "re-run it" is not automatic, and two different questions are being
+answered.** `status=completed` says the request produced a known result;
+it says nothing about whether the turn was side-effect-free. Everything
+this section already concedes still applies — Hermes decides tool use
+itself, the path reaches tool-capable components, terminal-toolset
+availability on `/v1/responses` is not determinable from this repository —
+and there is no idempotency guarantee at this boundary (§11). A completed
+turn that returned the wrong formatting may have acted before returning
+it, and re-sending could repeat that action.
+
+```text
+formatting mismatch  ->  §5 FAIL
+
+NOT `OUTCOME_UNKNOWN`   we know what result the request produced, so
+                        §10's classification is unaffected
+
+NOT automatically safe to repeat
+                        complete §14's side-effect checks for the failed
+                        run first; start a fresh validation only once
+                        they show no unexpected consequential action
+```
+
+The distinction is worth keeping sharp, because the two properties come
+apart here and the convenient reading merges them. §11's retry
+prohibition is not triggered — but the reasoning behind §11 is about
+side effects and idempotency, and none of that is resolved by knowing the
+outcome.
 
 **`response_chars` corroborates without logging content.** The Gateway
 logs a response *length*, never content (§8's data minimisation), and the
@@ -1110,9 +1170,17 @@ Runtime Python inputs match recorded SHA (§3):
                          docstring yields **identical** ASTs, while
                          keeping them yields differing ones -- so the
                          whole difference is string constants and no
-                         executable code differs. §12's stop condition is
-                         a `DIFFERS` you *cannot show* to be comment-only;
-                         this one was shown, so the run continued. Also
+                         executable code differs. That is §3's step 3,
+                         and it classifies the difference as
+                         docstring-only.
+                         **At the time, the operator read §12's
+                         `comment-only` carve-out as covering that and
+                         continued the run.** Review later found the
+                         interpretation incorrect: docstrings are string
+                         constants bound to `__doc__`, not comments, so
+                         the carve-out never applied and this was a stop
+                         condition. §12 and §3 were both rewritten in the
+                         change that carries this record. Also
                          compared and matching:
                          `packages/agent-contracts`'s Python files as
                          installed into site-packages, and
@@ -1250,10 +1318,15 @@ Per-criterion state (§9) -- one line each, none omitted:
                            difference is docstring-only, which §12 does
                            not excuse: docstrings are string constants,
                            not comments. The criterion was exercised and
-                           not met. The original record argued the
-                           contrary reading -- that §12's carve-out would
-                           otherwise permit a run that could never pass --
-                           and that argument is what §12 now forecloses.
+                           not met. What happened at the time: the
+                           operator treated the docstring-only difference
+                           as satisfying §12's carve-out and continued,
+                           arguing that a strict reading would otherwise
+                           permit a run that could never pass. Review
+                           later found that interpretation incorrect,
+                           because docstrings are not comments. §12 now
+                           forecloses the argument rather than leaving it
+                           available.
   side effects (§14)       PASS -- window correctly anchored, and no
                            unexpected side effect observed by any of the
                            three checks
