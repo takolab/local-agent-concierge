@@ -181,9 +181,18 @@ produces without a single file under `src/agent_contracts` differing. A
 `YES` that skipped it would assert more than it checked.
 
 Any `DIFFERS` means the running image was not built from the recorded SHA.
-Diff that file and record whether the difference is executable code or only
-comments — the distinction changes what the run's evidence is worth, and
-only the diff can tell you.
+Diff that file and record what the difference actually is — the
+distinction changes what the run's evidence is worth, and only the diff
+can tell you.
+
+Record it in the categories §12 uses, which are narrower than they look:
+`#` comments are discarded by the tokenizer, while **docstrings are string
+constants that survive into the compiled module** and are therefore *not*
+comments. §12's carve-out covers the first and not the second, so
+"docstring-only" is a stop condition rather than a difference to explain
+past. Establish which it is mechanically — parse both copies, strip every
+docstring, compare the ASTs — rather than by reading the diff, and record
+the method along with the answer.
 
 **What this does not cover, and must not be implied by a `YES`:**
 
@@ -340,80 +349,76 @@ from a check that did not look where it should have.
 Then send **one** direct message to the Slack app, in a thread you control:
 
 ```text
-Reply with exactly SLACK_GATEWAY_OK.
+Reply with this token only and nothing else: SLACK_GATEWAY_OK
 ```
 
-This is the input `docs/setup/slack.md` already uses for Slack Gateway
-verification — reused rather than invented so both procedures produce
-comparable evidence. It is deterministic enough to identify, carries no
-personal data, and asks for a pure text response.
-
-**The expected reply is the bare token:**
+**The expected reply, after stripping leading and trailing whitespace:**
 
 ```text
 SLACK_GATEWAY_OK
 ```
 
-**Judge it by meaning, not by byte equality.** A model asked for a bare
-token will not reproduce one reliably: it may terminate it with a period,
-wrap it in backticks, change the case, or add a trailing newline. None of
-those change what the reply *is*, and a run that failed on one would be
-reporting a formatting artefact as a broken runtime path. The 2026-09-14
-run hit exactly this — its input's trailing period made both
-`SLACK_GATEWAY_OK` and `SLACK_GATEWAY_OK.` defensible readings, and the
-criterion said nothing about which counted.
+Exact, and case-sensitive. Nothing else is the expected reply — not a
+different case, not a trailing period, not the token inside a sentence,
+not the token in backticks, not the token plus an explanation. A run that
+observes any of those records `test input conforms to §5: YES` — the
+input *was* §5's — and §9's first criterion as `FAIL`.
 
-So the criterion has two halves, and they are not equally at risk:
+Stripping surrounding whitespace is the only normalisation, because it is
+the one the transport performs rather than a judgement about what the
+model meant.
 
-```text
-the reply conveys SLACK_GATEWAY_OK   and   carries nothing else substantive
-```
+**Why the input reads the way it does.** It carries the whole burden of
+making the reply unambiguous, so the acceptance rule does not have to.
+Two properties are deliberate and should survive any rewording:
 
-The first half is nearly always obvious. **The second half is the one to
-actually check**, because it is what separates this from the weaker
-"some substantive reply came back" that §9 explains a fixed input exists
-to avoid. A reply that explains itself, asks a question, hedges, refuses,
-or answers something else is **not** the expected reply, even when the
-token appears somewhere inside it.
+- **It ends with the token.** Its predecessor, `Reply with exactly
+  SLACK_GATEWAY_OK.`, ended with a period that was simultaneously the
+  sentence's terminator and — on one defensible reading of "exactly" —
+  part of the token. The 2026-09-14 run discovered that while it was
+  running, and no amount of care in the acceptance rule can repair an
+  input that asks for two different things.
+- **It says "and nothing else".** The failure this criterion most needs
+  to catch is not a formatting variant; it is a reply that carries the
+  token *plus* commentary, which would satisfy a loose reading while
+  proving much less than PASS claims.
 
-Concretely, the criterion fails when:
+**It is a single line, and must stay one.** §8's optional content
+extension appends the message and the reply to a line-based needles file,
+so a multi-line input cannot be expressed there at all.
 
-```text
-the token is absent, misspelled, or altered
-the reply adds explanation, commentary, a question, or a refusal
-the reply is §10's "Please try again" / "The result is unknown..."
-```
+**Two earlier attempts at this section are recorded because both were
+wrong in instructive ways.** The first enumerated the exact strings the
+2026-09-14 run had made plausible (`SLACK_GATEWAY_OK` and
+`SLACK_GATEWAY_OK.`) and called the set closed — overfitted to one
+observation, since nothing made a trailing period more principled than
+backticks or a case change. The second replaced it with a semantic
+"conveys the token and carries nothing else substantive" judgement, which
+removed the overfitting but grew a judgement surface in the part of the
+runbook that is meant to be deterministic, and contradicted itself on
+whether a case change was acceptable formatting or an altered token.
+Neither problem exists once the *input* is unambiguous: the reply is then
+a fixed string, and the criterion can be an exact comparison again.
 
-A run that observes any of those records `test input conforms to §5: YES`
-— the input *was* §5's — and §9's first criterion as `FAIL`, because that
-criterion is the input **and** its expected reply.
+**A strict rule means a run can fail on a formatting variant, and that is
+the intended trade.** If the model answers `SLACK_GATEWAY_OK.` the
+criterion is `FAIL`, not a near-miss to be waved through. Dispatch
+completed and the outcome is not `OUTCOME_UNKNOWN`, so §11's retry
+prohibition does not apply and the validation may simply be run again.
+Re-running costs one message; a criterion that stretches to fit whatever
+came back costs the meaning of every PASS recorded against it.
 
-**Why this is not enumerated instead.** An earlier revision of this
-section listed the two exact strings the 2026-09-14 run had made
-plausible. That was overfitted to one observation: the period was simply
-the variation that came up, and nothing made it more principled than any
-other formatting difference — a closed set of the variants already seen
-is not a rule. It also implied a mechanical check where none exists: the
-evidence here is an operator reading a thread, and `scan` cannot help
-(it reports only `absent` / `LEAKED`). Naming the judgement honestly and
-bounding what it may not excuse is the stronger form.
-
-**`response_chars` guards the half judgement is weakest on.** The Gateway
+**`response_chars` corroborates without logging content.** The Gateway
 logs a response *length*, never content (§8's data minimisation), and the
-bare token is 16 characters:
+expected reply is 16 characters. `response_chars=16` is consistent with
+the expected reply and nothing was added; anything else means the reply
+was not the bare token, and the thread is what settles it. A length is
+not the text, so this corroborates the operator's in-thread observation
+rather than replacing it.
 
-```text
-response_chars = 16        the bare token, nothing added
-response_chars slightly >   the token plus punctuation or formatting --
-                           still the expected reply
-response_chars much larger  the model added content -- read the thread
-                           before recording this criterion as met
-```
-
-This is a signal, not a threshold, and it does not replace reading the
-thread. What it does is catch, at no logging cost, the case a generous
-reading of "conveys the token" would wave through: a reply that was never
-the token alone.
+`docs/setup/slack.md` uses the same input, so both procedures continue to
+produce comparable evidence. It carries no personal data and asks for a
+pure text response.
 
 **It does not guarantee that no tool runs, and this runbook does not claim
 it does.** What the repository actually supports:
@@ -862,7 +867,29 @@ Stop and do not proceed (or do not continue) if any of these hold:
   for anything you cannot show to be comment-only — the run would be
   evidence about a build you cannot name. (The retired form of this
   condition was "a container predates the build at the recorded SHA";
-  §3 explains why image and start timestamps are not evidence.);
+  §3 explains why image and start timestamps are not evidence.)
+
+  **"Comment-only" means `#` comments, and nothing else.** Those are
+  discarded by the tokenizer and cannot reach the running program.
+  **Docstrings are not comments**: they are string constants bound to
+  `__doc__`, they survive into the compiled module, and code can read
+  them. A difference confined to docstrings is therefore **not** covered
+  by this carve-out and **is** a stop condition, however convincingly it
+  is shown to leave behaviour unchanged.
+
+  This is deliberately the strict reading. Broadening the carve-out to
+  "any mechanically proven non-behavioural difference" is a defensible
+  rule, but it is a different rule, and adopting it silently — by reading
+  "comment-only" generously in the middle of a run — is how a gate stops
+  meaning what it says. The 2026-09-14 run did exactly that and its
+  result was reclassified; see its record. If the broader rule is wanted,
+  it should be written here deliberately, before the run that relies on
+  it.
+
+  **Recovering from a docstring-only difference** means making the
+  runtime inputs match: rebuild the affected service from the recorded
+  SHA and recreate it. That replaces the container, so the run is no
+  longer bound to the provenance already recorded — restart from §3;
 - the Slack Gateway container still has `HERMES_API_*` in its environment —
   it is on the pre-#43 direct path, so a run would validate the wrong
   thing;
@@ -1018,11 +1045,33 @@ Do not record "no side effects possible". The supportable statement is
 
 Each entry is **observed evidence** from one actual execution.
 
-### 2026-09-14 (15:09 UTC) — canonical §5 runbook PASS
+### 2026-09-14 (15:09 UTC) — the run that exposed §5's and §12's gaps
 
-The first run that exercised every §9 criterion as written, and the first
-to use §5's fixed input and compare the reply against an expected one.
-This closes the gate the two 2026-09-10 runs left open.
+**Not a canonical PASS — and originally recorded as one.** This run was
+written up here as `PASS`. Review found two defects in that
+classification and it was reclassified before the record merged. The
+correction is recorded rather than quietly applied, because the two
+runbook defects it surfaced are what this run is actually useful for.
+
+```text
+1. §12's carve-out does not cover docstrings.  Its text excuses a
+   `DIFFERS` shown to be *comment-only*. Python docstrings are string
+   constants bound to `__doc__`, not comments -- so the §3 difference
+   below was a stop condition, and continuing past it read the gate more
+   generously than it is written. §12 now says so explicitly.
+
+2. The criterion was finalised after the result was observed.  §5 named
+   a fixed input but not an expected reply, the ambiguity was discovered
+   mid-run, and the acceptance semantics were written afterwards -- in
+   the same change that classified this run against them. The observed
+   reply satisfies the finalised rule cleanly, so the result is not in
+   doubt; the *lifecycle* is. A canonical gate has to be fixed before
+   the run that closes it, or the run helps define the criterion that
+   judges it.
+```
+
+Both defects are fixed in this same change, so the next run meets a
+runbook settled in advance. The gate stays **open** until that run.
 
 ```text
 Validation date:         2026-09-14 15:09:02 UTC (container clock; host
@@ -1083,19 +1132,27 @@ Preconditions:
   thread under operator control:          YES -- a direct message; the Gateway
                                           log's channel id is D-prefixed
 
-Test input:              §5's fixed string, sent once as a direct message
-Test input conforms to §5:                          YES
+Test input:              `Reply with exactly SLACK_GATEWAY_OK.` -- §5's
+                         fixed string *as §5 read at the time*, sent once
+                         as a direct message
+Test input conforms to §5:                          YES as §5 read then;
+                         NO against the finalised §5, whose input this
+                         same change replaces with
+                         `Reply with this token only and nothing else:
+                         SLACK_GATEWAY_OK` precisely because the old
+                         one's trailing period was ambiguous
 Slack reply observed (and matches §5's expected):
                          `SLACK_GATEWAY_OK` -- the bare token, with no
                          punctuation, formatting or added content,
                          reported verbatim by the operator from the
                          thread. Corroborated by the Gateway's
                          `response_chars=16`: exactly the token's length,
-                         so the model added nothing. §5 did not yet name
-                         an expected reply when this run started; the
-                         ambiguity was resolved during the run and §5 was
-                         amended in the same change as this record, so no
-                         later run has to resolve it again.
+                         so the model added nothing. It would satisfy the
+                         finalised §5 as well -- but §5 did not name an
+                         expected reply when this run started, so what
+                         this run compared against was decided after the
+                         reply was in hand. That is the defect, not the
+                         reply.
 Gateway log (dispatch → status):
                          POST http://orchestrator:8700/dispatch → 200 OK
                          agent=hermes  status=completed  response_chars=16
@@ -1174,52 +1231,83 @@ Post-validation checks performed:
                             outside the repository and deleted.
 
 Per-criterion state (§9) -- one line each, none omitted:
-  §5 fixed input           PASS -- §5's string sent, `SLACK_GATEWAY_OK`
-                           observed in-thread
+  §5 fixed input           NOT EXERCISED -- §5's then-current input was
+                           sent and a reply was observed, but §9's
+                           criterion is the input *and its expected
+                           reply*, and no expected reply existed to
+                           exercise it against. One was written after
+                           this reply was observed, which is not the same
+                           as meeting a pre-existing criterion.
   gateway dispatch/status  PASS -- POST /dispatch 200, status=completed
   trace / relationships    PASS -- 6 spans, one trace id, all five
                            relationships, `trace` exit 0
   required-set sentinels   PASS -- 7/7 absent, `scan` exit 0
-  provenance (§3)          PASS -- recorded for all eight before the
-                           request and re-verified unchanged after it;
-                           source comparison run against the recorded SHA
-                           and its single `DIFFERS` shown to be
-                           docstring-only. Recorded as a PASS because §12
-                           makes only an *unexplained* or executable
-                           difference a stop condition: if a proven
-                           comment-only difference also failed this
-                           criterion, §12's carve-out would permit a run
-                           that could never pass, which is not a coherent
-                           reading of the two sections together.
+  provenance (§3)          FAIL -- recorded thoroughly (all eight before
+                           the request, re-verified unchanged after it)
+                           and compared against the recorded SHA, which
+                           is more than either earlier run did. But the
+                           comparison reported `DIFFERS`, and the
+                           difference is docstring-only, which §12 does
+                           not excuse: docstrings are string constants,
+                           not comments. The criterion was exercised and
+                           not met. The original record argued the
+                           contrary reading -- that §12's carve-out would
+                           otherwise permit a run that could never pass --
+                           and that argument is what §12 now forecloses.
   side effects (§14)       PASS -- window correctly anchored, and no
                            unexpected side effect observed by any of the
                            three checks
-Overall result:          PASS
-                         (§9's aggregation rule: the worst state present --
-                         here there is no non-PASS state)
-Verified subset (if not a PASS):                     n/a
+Overall result:          FAIL
+                         (§9's aggregation rule: the worst state present.
+                         `FAIL` outranks the `NOT EXERCISED` on §5's
+                         criterion, so the run label is `FAIL` even
+                         though four criteria passed -- rule 1 is why
+                         every state above is recorded individually
+                         rather than collapsed into the headline.)
+Verified subset:         dispatch through the Orchestrator, trace
+                         continuity across all five relationships,
+                         required-set *and* content sentinel absence, and
+                         credential binding to the serving container.
+                         Provenance and §5's criterion are NOT part of
+                         this subset.
 Notes / limitations of this run:                     see below
 ```
 
-**What this run establishes that neither 2026-09-10 run did.** §5's fixed
-input was sent and its reply compared against an expected one, so §9's
-first criterion is exercised rather than skipped — that single gap is why
-both earlier runs are `NOT A RUNBOOK PASS`. Provenance was recorded
-*before* the request from §3's helper and re-verified unchanged *after*
-the scan, rather than inferred retroactively. The side-effect window was
-anchored at §5's marker, so its clean result is usable evidence instead of
-the `INCONCLUSIVE` the superseded drifting window produced twice. And the
-optional content extension ran, so this run additionally says the message
-and response text did not reach telemetry.
+**What this run established anyway.** Its label is `FAIL`, and four of
+its six criteria still passed on evidence neither 2026-09-10 run
+produced. Provenance was recorded *before* the request from §3's helper
+and re-verified unchanged *after* the scan, rather than inferred
+retroactively from image ids — which is precisely why the `DIFFERS` was
+caught at all. The side-effect window was anchored at §5's marker, so its
+clean result is usable evidence instead of the `INCONCLUSIVE` the
+superseded drifting window produced twice. The optional content extension
+ran, so the message and response text are additionally known absent from
+telemetry. And the procedure did what a gate is for: it surfaced two
+defects in itself rather than producing a comfortable answer.
+
+**What has to be true for the next run to close the gate.** Both items
+are prerequisites, not preferences:
+
+1. **The Orchestrator is rebuilt from the recorded SHA and recreated**, so
+   §3's comparison reports no `DIFFERS` and §12's carve-out is never
+   consulted. Recreation replaces the container, so provenance must be
+   captured fresh afterwards — the run starts at §3, not around it.
+   Broadening §12 instead would also resolve it, but that is a different
+   rule and §12 now says it must be adopted deliberately and in advance,
+   not read into the existing text mid-run.
+2. **The runbook it is judged against is the one merged before it ran.**
+   This change finalises §5's input and expected reply; the next run
+   simply follows them.
 
 **Limitations of this run.**
 
-- The running Orchestrator was **not** built from the recorded SHA. Its
-  executable code is identical to it — proven by AST comparison, not
-  inspection — but "the image was built from 83ed28ad" is not something
-  this run establishes, and the record above says so rather than rounding
-  it to a `YES`. Rebuilding was deliberately out of scope: it would have
-  replaced the container and required restarting the validation from §3.
+- The running Orchestrator was **not** built from the recorded SHA, and
+  under §12 as now written that is a stop condition rather than an
+  explained difference. Its executable code is identical to 83ed28ad —
+  established by AST comparison, not by reading the diff — so nothing
+  here suggests the *behaviour* observed was wrong. What it means is that
+  this run is evidence about a build the record cannot name, which is
+  exactly what §3's comparison exists to prevent.
 - Success path only. The failure and `OUTCOME_UNKNOWN` paths (§10) remain
   test-covered and still unobserved live.
 - Span *kind* was not verified: Phoenix's REST API reports `UNKNOWN` (§7).
@@ -1366,8 +1454,11 @@ so Phoenix's storage is durable across one.
   scope statement, not a caveat on the PASS: §9 defines PASS against §8's
   required set, all seven of which were checked.
 - **§5's fixed input was not used**, so §9's first criterion was not
-  exercised. A canonical runbook PASS still needs a run that sends
-  `Reply with exactly SLACK_GATEWAY_OK.` and observes that exact reply.
+  exercised. A canonical runbook PASS still needs a run that sends §5's
+  input and observes its expected reply. (This record originally quoted
+  that input as `Reply with exactly SLACK_GATEWAY_OK.`; §5 has since
+  replaced it, because that period was ambiguous — see §5 and the
+  2026-09-14 record. The point stands, only the string has moved.)
   The same deviation is why the content extension was impractical here:
   §5's single-line, deterministic input/reply pair is what makes those two
   sentinels expressible verbatim, and an operator-chosen message is not.

@@ -600,8 +600,14 @@ The Messages tab should allow a direct message to be entered.
 Send a short test request:
 
 ```text
-Reply with exactly SLACK_GATEWAY_OK.
+Reply with this token only and nothing else: SLACK_GATEWAY_OK
 ```
+
+`docs/observability/slack-orchestrator-live-validation.md` §5 uses the
+same input and treats the reply as a pass/fail criterion, so the wording
+is shared deliberately. Its predecessor ended with a period that was both
+the sentence's terminator and, arguably, part of the requested token —
+harmless for this smoke test, but ambiguous for a gate.
 
 Expected flow:
 
