@@ -809,15 +809,21 @@ Recorded as **partial**, not complete, because:
   or bearer credential reaching either backend. Repeated on 2026-09-10 at
   21:05 using the runbook's procedure but not its fixed input, with the
   credential read bound to the Orchestrator container that handled the
-  request. Neither run used the
+  request. Neither of those runs used the
   runbook's fixed test input, so both are recorded there as
   `NOT A RUNBOOK PASS` rather than as a PASS with a footnote — routing,
   trace continuity and sentinel absence are established; a deterministic
-  input/expected-reply pair is not. Success path only, and
-  scoped to the runbook's required sentinel set — neither run checked
-  whether the message or model response *text* leaked, which is an optional
-  extension the operator supplies by hand rather than something the Gateway
-  logs.
+  input/expected-reply pair is not.
+  **That gap is now closed.** On 2026-09-14 a third run at 83ed28ad sent
+  the runbook's fixed input and observed its expected reply, with
+  provenance recorded before the request and re-verified unchanged after
+  it, and with the side-effect window anchored at §5's marker rather than
+  the superseded drifting one. Every §9 criterion was exercised and met,
+  so it is recorded as `PASS` — the canonical §5 runbook PASS. That run
+  also performed the optional content extension, so the message and model
+  response *text* are additionally known not to have reached telemetry;
+  the two earlier runs checked only the required sentinel set, which is
+  what PASS is defined against. Still success path only.
   The procedure and the evidence record are in
   `docs/observability/slack-orchestrator-live-validation.md`.
 
@@ -980,14 +986,16 @@ only the two HTTP boundaries:
   repository SHA and the four image digests that produced it. See
   `docs/observability/orchestrator-trace-context.md`, "End-to-end
   verification (manual)".
-* The Slack Gateway as the caller is now **verified live** as well, on
-  2026-09-10: one real Slack message produced the joined
+* The Slack Gateway as the caller is now **verified live** as well, first
+  on 2026-09-10: one real Slack message produced the joined
   `concierge.request` → `orchestrator.dispatch` → `POST /dispatch` →
   `hermes.request` → `/v1/responses` trace in Phoenix, present in MLflow
-  with `state=OK`. See
+  with `state=OK`. Three runs are recorded; the 2026-09-14 one is the
+  canonical `PASS`, having exercised every success criterion including the
+  fixed input and its expected reply. See
   `docs/observability/slack-orchestrator-live-validation.md` for the
-  repeatable procedure and that run's evidence. **Success path only, one
-  run** — the error paths (Hermes non-success, unreachable Hermes,
+  repeatable procedure and each run's evidence. **Success path only** —
+  the error paths (Hermes non-success, unreachable Hermes,
   unreachable Orchestrator, timeout) are covered by tests but have still
   not been observed live, and span *kind* is not verifiable through
   Phoenix's REST API.

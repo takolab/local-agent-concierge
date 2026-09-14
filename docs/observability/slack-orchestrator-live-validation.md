@@ -988,6 +988,227 @@ Do not record "no side effects possible". The supportable statement is
 
 Each entry is **observed evidence** from one actual execution.
 
+### 2026-09-14 (15:09 UTC) — canonical §5 runbook PASS
+
+The first run that exercised every §9 criterion as written, and the first
+to use §5's fixed input and compare the reply against an expected one.
+This closes the gate the two 2026-09-10 runs left open.
+
+```text
+Validation date:         2026-09-14 15:09:02 UTC (container clock; host
+                         UTC differed by ~1s, so log and mtime comparisons
+                         need no offset correction)
+Operator:                repository owner, interactive session
+
+Repository SHA:          83ed28ad9b9224e651d19115df7a9abc6f7f3551
+                         (= merge commit of PR #45; == origin/master)
+Working tree:            clean (before the request and after it)
+Containers (container ID prefix, image ID, started) -- all eight:
+  slack-gateway:         dbab5033ac33  sha256:9c9be6031de05d6473d  2026-09-10T20:50:41
+  orchestrator:          df6eb0bff364  sha256:f021e28af4b6c2eda0a  2026-09-10T20:50:41
+  hermes-agent:          9d53cbf88567  sha256:470aa3b68074d9d752f  2026-09-10T20:50:41
+  google-calendar-mcp:   8b868cfc3258  sha256:72854aab401dc96750a  2026-09-10T20:50:41
+  ollama:                7e7efecf4bef  sha256:dacbdaa86a43fb9ed58  2026-09-10T20:50:41
+  otel-collector:        eee977aa44f6  sha256:e11c83206a71a0ac312  2026-09-11T07:18:43
+  phoenix:               5db3fd4d83bd  sha256:e90c06c2bf2f22ef7d9  2026-09-10T20:50:41
+  mlflow:                bac1f771b2de  sha256:ec446a27c197e760a63  2026-09-10T20:50:41
+                         `provenance` was re-run after the scan: all eight
+                         prefixes were unchanged, so nothing was recreated
+                         between the record and the evidence.
+Runtime Python inputs match recorded SHA (§3):
+                         NO, in one respect -- and the same one the
+                         2026-09-10 runs hit, still unrepaired because a
+                         rebuild was deliberately not part of this run.
+                         `slack-gateway`: all inputs match 83ed28ad.
+                         `orchestrator`: every input matches except
+                         `orchestrator/hermes_agent.py`, which is
+                         byte-identical to that file at 0a03c56. The two
+                         commits that have touched it since (094b984,
+                         6aa80ce) changed only its module docstring and
+                         `_extract_output_text`'s.
+                         Established mechanically, not by reading the
+                         diff: parsing both files and stripping every
+                         docstring yields **identical** ASTs, while
+                         keeping them yields differing ones -- so the
+                         whole difference is string constants and no
+                         executable code differs. §12's stop condition is
+                         a `DIFFERS` you *cannot show* to be comment-only;
+                         this one was shown, so the run continued. Also
+                         compared and matching:
+                         `packages/agent-contracts`'s Python files as
+                         installed into site-packages, and
+                         `packages/agent-contracts/pyproject.toml`.
+Outside that boundary (§3's table):                 acknowledged
+
+Preconditions:
+  all required services healthy:          YES -- all eight up; otel-collector
+                                          checked with `ps -a` and its health
+                                          endpoint returned 200 (no Exited 127
+                                          this time, so no recreation was needed)
+  gateway → orchestrator GET /health:     200
+  gateway env free of HERMES_API_*:       YES -- exactly ORCHESTRATOR_BASE_URL,
+                                          OTEL_EXPORTER_OTLP_ENDPOINT,
+                                          SLACK_APP_TOKEN, SLACK_BOT_TOKEN
+                                          (names only; values never printed)
+  thread under operator control:          YES -- a direct message; the Gateway
+                                          log's channel id is D-prefixed
+
+Test input:              §5's fixed string, sent once as a direct message
+Test input conforms to §5:                          YES
+Slack reply observed (and matches §5's expected):
+                         `SLACK_GATEWAY_OK` -- one of §5's two accepted
+                         strings, reported verbatim by the operator from
+                         the thread. Independently corroborated by the
+                         Gateway's `response_chars=16`, which is the
+                         length of that string and not of the
+                         period-terminated variant. §5 did not yet name
+                         an expected reply when this run started; the
+                         ambiguity was resolved during the run and §5 was
+                         amended in the same change as this record, so no
+                         later run has to resolve it again.
+Gateway log (dispatch → status):
+                         POST http://orchestrator:8700/dispatch → 200 OK
+                         agent=hermes  status=completed  response_chars=16
+                         delivery=posted_and_processing_status_deleted
+
+Trace ID:                9056c40f4df2d6181ecc81e80f2bb83d
+Observed spans:          6, one trace id:
+                           concierge.request        c381cfb838bf  (root)
+                             orchestrator.dispatch  dc55d9c47053
+                               POST /dispatch       8d370940a7da
+                                 hermes.request     74cc707b6402
+                                   /v1/responses    1f0bc35efff2
+                             slack.response         5bd1bd4a411a
+Expected parent-child relationships:                PASS -- all five,
+                                                    `trace` exit 0
+Gateway → Orchestrator confirmed:                   YES
+Orchestrator → Hermes confirmed:                    YES
+Present in MLflow (trace id, state):
+                         tr-9056c40f4df2d6181ecc81e80f2bb83d  state=OK
+                         Every span also carried `redaction.ignored.count`,
+                         so the Collector's redaction processor ran on all
+                         six.
+Sensitive sentinel check -- required set (§8):      PASS -- all 7 labels
+                                                    `absent`, 0 leaked,
+                                                    `scan` exit 0, none
+                                                    skipped
+Content sentinels (message / response text):        checked -- both
+                                                    `absent`, giving 9
+                                                    sentinels in one scan.
+                                                    Practical because §5's
+                                                    input and its expected
+                                                    reply are both single
+                                                    lines, expressible
+                                                    verbatim in the
+                                                    line-based needles file.
+                                                    Not part of PASS (§9).
+Credential read bound to the request's container:   YES -- `--expect-container
+                                                    df6eb0bff364`, the prefix
+                                                    recorded before the request
+
+Unexpected side effects observed (§14 -- window, not attribution):
+                                                    NO
+Side-effect window anchored at §5's marker:         YES -- marker at
+                                                    15:08:24 UTC, dispatch at
+                                                    15:09:02 UTC, so the
+                                                    window opened 38s before
+                                                    the request and could not
+                                                    have drifted past it
+Post-validation checks performed:
+                         1. Phoenix span scan over 14:09:57–15:12:57 UTC,
+                            which contains the request: **zero** `tools/call`
+                            spans. The only other traffic was 22 paired
+                            `MCP send ping` / `ping` keepalives at ~3-minute
+                            intervals -- the routine Calendar-MCP keepalive
+                            §14 names. This is a time-window observation and
+                            not request attribution (§14).
+                         2. `find data/hermes -newer` the marker: 11 files,
+                            all within §14's expected table --
+                            `response_store.db-{shm,wal}` (the conversation
+                            store, expected because the Gateway sends
+                            `"store": true`), `state.db-*`, `kanban.db-*`,
+                            `cron/ticker_heartbeat`,
+                            `cron/ticker_last_success`,
+                            `state/gateway.heartbeat`, `logs/agent.log`.
+                            One file is recorded separately rather than
+                            folded in: `cron/.tick.lock`, which §14's table
+                            does not name by filename. It is the lock of the
+                            `cron/ticker_*` mechanism the table does name, it
+                            is under `data/hermes`, and it is neither a new
+                            file outside that tree, nor under a project
+                            directory, nor a repository change -- so it is
+                            not one of the three things §14 defines as
+                            unexpected.
+                         3. `git status --porcelain` empty.
+                         4. Marker removed; the needles file was written
+                            outside the repository and deleted.
+
+Per-criterion state (§9) -- one line each, none omitted:
+  §5 fixed input           PASS -- §5's string sent, `SLACK_GATEWAY_OK`
+                           observed in-thread
+  gateway dispatch/status  PASS -- POST /dispatch 200, status=completed
+  trace / relationships    PASS -- 6 spans, one trace id, all five
+                           relationships, `trace` exit 0
+  required-set sentinels   PASS -- 7/7 absent, `scan` exit 0
+  provenance (§3)          PASS -- recorded for all eight before the
+                           request and re-verified unchanged after it;
+                           source comparison run against the recorded SHA
+                           and its single `DIFFERS` shown to be
+                           docstring-only. Recorded as a PASS because §12
+                           makes only an *unexplained* or executable
+                           difference a stop condition: if a proven
+                           comment-only difference also failed this
+                           criterion, §12's carve-out would permit a run
+                           that could never pass, which is not a coherent
+                           reading of the two sections together.
+  side effects (§14)       PASS -- window correctly anchored, and no
+                           unexpected side effect observed by any of the
+                           three checks
+Overall result:          PASS
+                         (§9's aggregation rule: the worst state present --
+                         here there is no non-PASS state)
+Verified subset (if not a PASS):                     n/a
+Notes / limitations of this run:                     see below
+```
+
+**What this run establishes that neither 2026-09-10 run did.** §5's fixed
+input was sent and its reply compared against an expected one, so §9's
+first criterion is exercised rather than skipped — that single gap is why
+both earlier runs are `NOT A RUNBOOK PASS`. Provenance was recorded
+*before* the request from §3's helper and re-verified unchanged *after*
+the scan, rather than inferred retroactively. The side-effect window was
+anchored at §5's marker, so its clean result is usable evidence instead of
+the `INCONCLUSIVE` the superseded drifting window produced twice. And the
+optional content extension ran, so this run additionally says the message
+and response text did not reach telemetry.
+
+**Limitations of this run.**
+
+- The running Orchestrator was **not** built from the recorded SHA. Its
+  executable code is identical to it — proven by AST comparison, not
+  inspection — but "the image was built from 83ed28ad" is not something
+  this run establishes, and the record above says so rather than rounding
+  it to a `YES`. Rebuilding was deliberately out of scope: it would have
+  replaced the container and required restarting the validation from §3.
+- Success path only. The failure and `OUTCOME_UNKNOWN` paths (§10) remain
+  test-covered and still unobserved live.
+- Span *kind* was not verified: Phoenix's REST API reports `UNKNOWN` (§7).
+- **No tool call is attributed, and none is ruled out.** §14's span check
+  is a time-window observation; Hermes does not propagate trace context to
+  its outbound MCP calls, so a tool call would appear as an unrelated
+  trace with no link back to this request. The supportable claim is the
+  one recorded: no non-keepalive `tools/call` span in the inspected
+  window.
+- No Calendar tool was invoked, so Hermes' outbound-MCP propagation gap
+  was neither confirmed nor contradicted — as in both earlier runs.
+- §5's residual risk stands: whether Hermes' terminal toolset is available
+  on the `/v1/responses` path remains undeterminable from this repository,
+  which is why this record says "no unexpected side effect *observed*".
+- Everything in §3's "outside the boundary" table is untouched by this
+  run: the Dockerfiles, build args, install-time resolution,
+  `hermes-agent`'s instrumentation layer, `google-calendar-mcp`'s source,
+  and the upstream `:latest` images' non-reproducible identities.
+
 ### 2026-09-10 (21:05 UTC) — live run with a §5 test-input deviation
 
 Executed with the procedure above rather than ad hoc, so the container
