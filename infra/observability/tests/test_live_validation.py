@@ -1082,3 +1082,89 @@ def test_helper_exposes_exactly_the_three_read_only_subcommands():
     ]
 
     assert sorted(names) == ["provenance", "scan", "trace"]
+
+
+# --- §3's source-difference classification procedure ---------------------
+#
+# §3 prescribes an ordered three-step check, and §12 makes the first step
+# decisive: `#` comments are inside its carve-out and a run may continue,
+# while docstrings are not and the run stops. An earlier revision of §3
+# prescribed only "strip docstrings, compare ASTs", which cannot tell the
+# two apart -- both leave the stripped ASTs identical -- so it collapsed a
+# continue and a stop into one answer. These assert the properties the
+# procedure depends on, so a future simplification of it fails here.
+
+
+def _token_signature(source):
+    """§3 step 1: tokens with COMMENT and NL removed."""
+    import io
+    import tokenize
+
+    return [
+        (t.type, t.string)
+        for t in tokenize.generate_tokens(io.StringIO(source).readline)
+        if t.type not in (tokenize.COMMENT, tokenize.NL)
+    ]
+
+
+def _strip_docstrings(tree):
+    """§3 step 3: drop every module/class/function docstring."""
+    for node in ast.walk(tree):
+        if isinstance(
+            node, (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
+        ):
+            body = node.body
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                node.body = body[1:] or [ast.Pass()]
+    return tree
+
+
+COMMENT_ONLY = ("# one\nx = 1\n", "# two\nx = 1\n")
+DOCSTRING_ONLY = ('"""one"""\nx = 1\n', '"""two"""\nx = 1\n')
+SAME_AST_DIFFERENT_SOURCE = ("x = 0x1\n", "x = 1\n")
+
+
+def test_stripped_asts_alone_cannot_separate_comments_from_docstrings():
+    """Why §3 has a step 1 at all -- the reason the earlier check was wrong."""
+    for a, b in (COMMENT_ONLY, DOCSTRING_ONLY):
+        stripped_match = ast.dump(_strip_docstrings(ast.parse(a))) == ast.dump(
+            _strip_docstrings(ast.parse(b))
+        )
+        assert stripped_match, (a, b)
+
+    # Same answer for a case §12 continues on and a case §12 stops on, so
+    # that answer cannot be what decides between them.
+
+
+def test_token_signature_separates_them():
+    """§3 step 1 is what licenses the `comment-only` claim."""
+    a, b = COMMENT_ONLY
+    assert _token_signature(a) == _token_signature(b)
+
+    a, b = DOCSTRING_ONLY
+    assert _token_signature(a) != _token_signature(b)
+
+
+def test_identical_asts_do_not_imply_a_comment_only_difference():
+    """§3 says so explicitly, and names this shape as the counterexample."""
+    a, b = SAME_AST_DIFFERENT_SOURCE
+    assert ast.dump(ast.parse(a)) == ast.dump(ast.parse(b))
+    assert _token_signature(a) != _token_signature(b)
+
+
+def test_the_runbook_still_prescribes_the_ordered_procedure():
+    """Binds the prose to the steps above so a rewrite cannot quietly drop one."""
+    runbook = RUNBOOK.read_text()
+    start = runbook.index("Classify it with this procedure, in order")
+    procedure = runbook[start : start + 1600]
+
+    for marker in ("1. Token signature", "2. Unmodified ASTs", "3. Docstring-stripped ASTs"):
+        assert marker in procedure, marker
+    # Step 1 is the only one that permits continuing; the rest stop.
+    assert "the run may continue" in procedure
+    assert procedure.count("STOP") >= 3

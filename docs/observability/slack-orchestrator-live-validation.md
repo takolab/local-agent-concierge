@@ -181,9 +181,52 @@ produces without a single file under `src/agent_contracts` differing. A
 `YES` that skipped it would assert more than it checked.
 
 Any `DIFFERS` means the running image was not built from the recorded SHA.
-Diff that file and record whether the difference is executable code or only
-comments — the distinction changes what the run's evidence is worth, and
-only the diff can tell you.
+Diff that file and record what the difference actually is — the
+distinction changes what the run's evidence is worth, and only the diff
+can tell you.
+
+Record it in the categories §12 uses, which are narrower than they look:
+`#` comments are discarded by the tokenizer, while **docstrings are string
+constants that survive into the compiled module** and are therefore *not*
+comments. §12's carve-out covers the first and not the second, so
+"docstring-only" is a stop condition rather than a difference to explain
+past.
+
+**Classify it with this procedure, in order.** It matters that these are
+separate steps: an AST comparison alone cannot distinguish the two
+categories §12 now treats differently, because both a `#` comment
+difference and a docstring difference leave the docstring-stripped ASTs
+identical. A single "ASTs match after stripping" check collapses a
+continue and a stop into one answer.
+
+```text
+1. Token signature.  Tokenize both copies; drop COMMENT and NL tokens;
+   compare the remaining (type, string) sequences.
+     identical  ->  the difference is comments and layout only
+                    -> §12's carve-out applies, the run may continue
+     differs    ->  go to 2
+
+2. Unmodified ASTs.  Parse both copies and compare `ast.dump`.
+     identical  ->  a non-comment, non-executable source difference
+                    (numeric literal spelling, redundant parentheses,
+                    and the like).  NOT covered by §12's carve-out: STOP
+     differs    ->  go to 3
+
+3. Docstring-stripped ASTs.  Strip every module/class/function docstring
+   from both parses, compare again.
+     identical  ->  docstring-only.  STOP (§12)
+     differs    ->  executable code differs.  STOP (§12)
+```
+
+Step 1 is what licenses the `comment-only` claim, and nothing weaker
+does: identical ASTs are *not* sufficient, since `x = 0x1` and `x = 1`
+produce the same tree while differing in source and in neither comments
+nor whitespace. Steps 2 and 3 do not change the outcome — everything past
+step 1 stops — but they name *which* difference was found, which is what
+the record has to carry and what any later decision to broaden §12 would
+be reasoned about.
+
+Record the step that decided it, not just the verdict.
 
 **What this does not cover, and must not be implied by a `YES`:**
 
@@ -340,13 +383,125 @@ from a check that did not look where it should have.
 Then send **one** direct message to the Slack app, in a thread you control:
 
 ```text
-Reply with exactly SLACK_GATEWAY_OK.
+Reply with this token only and nothing else: SLACK_GATEWAY_OK
 ```
 
-This is the input `docs/setup/slack.md` already uses for Slack Gateway
-verification — reused rather than invented so both procedures produce
-comparable evidence. It is deterministic enough to identify, carries no
-personal data, and asks for a pure text response.
+**The expected reply, after stripping leading and trailing whitespace:**
+
+```text
+SLACK_GATEWAY_OK
+```
+
+Exact, and case-sensitive. Nothing else is the expected reply — not a
+different case, not a trailing period, not the token inside a sentence,
+not the token in backticks, not the token plus an explanation. A run that
+observes any of those records `test input conforms to §5: YES` — the
+input *was* §5's — and §9's first criterion as `FAIL`.
+
+Stripping surrounding whitespace is the only normalisation, because it is
+the one the transport performs rather than a judgement about what the
+model meant.
+
+**Why the input reads the way it does.** It carries the whole burden of
+making the reply unambiguous, so the acceptance rule does not have to.
+Two properties are deliberate and should survive any rewording:
+
+- **It ends with the token.** Its predecessor, `Reply with exactly
+  SLACK_GATEWAY_OK.`, ended with a period that was simultaneously the
+  sentence's terminator and — on one defensible reading of "exactly" —
+  part of the token. The 2026-09-14 run discovered that while it was
+  running, and no amount of care in the acceptance rule can repair an
+  input that asks for two different things.
+- **It says "and nothing else".** The failure this criterion most needs
+  to catch is not a formatting variant; it is a reply that carries the
+  token *plus* commentary, which would satisfy a loose reading while
+  proving much less than PASS claims.
+
+**It is a single line, and must stay one.** §8's optional content
+extension appends the message and the reply to a line-based needles file,
+so a multi-line input cannot be expressed there at all.
+
+**Two earlier attempts at this section are recorded because both were
+wrong in instructive ways.** The first enumerated the exact strings the
+2026-09-14 run had made plausible (`SLACK_GATEWAY_OK` and
+`SLACK_GATEWAY_OK.`) and called the set closed — overfitted to one
+observation, since nothing made a trailing period more principled than
+backticks or a case change. The second replaced it with a semantic
+"conveys the token and carries nothing else substantive" judgement, which
+removed the overfitting but grew a judgement surface in the part of the
+runbook that is meant to be deterministic, and contradicted itself on
+whether a case change was acceptable formatting or an altered token.
+Neither problem exists once the *input* is unambiguous: the reply is then
+a fixed string, and the criterion can be an exact comparison again.
+
+**A strict rule means a run can fail on a formatting variant, and that is
+the intended trade.** If the model answers `SLACK_GATEWAY_OK.` the
+criterion is `FAIL`, not a near-miss to be waved through. A criterion that
+stretches to fit whatever came back costs the meaning of every PASS
+recorded against it, and re-running costs one message.
+
+**But "re-run it" is not automatic, and two different questions are being
+answered.** `status=completed` says the request produced a known result;
+it says nothing about whether the turn was side-effect-free. Everything
+this section already concedes still applies — Hermes decides tool use
+itself, the path reaches tool-capable components, terminal-toolset
+availability on `/v1/responses` is not determinable from this repository —
+and there is no idempotency guarantee at this boundary (§11). A completed
+turn that returned the wrong formatting may have acted before returning
+it, and re-sending could repeat that action.
+
+```text
+formatting mismatch  ->  §5 FAIL
+
+NOT `OUTCOME_UNKNOWN`   we know what result the request produced, so
+                        §10's classification is unaffected
+
+NOT automatically safe to repeat
+                        complete §14's side-effect checks for the failed
+                        run, then decide explicitly whether repeating is
+                        safe -- given §14's bounded visibility and the
+                        absence of an idempotency guarantee -- and record
+                        that decision and its basis, as §11 requires.
+
+                        If a consequential action cannot be ruled out
+                        well enough to justify a repeat, do not re-run.
+                        Reconcile or reset the environment instead.
+```
+
+**§14 is evidence toward that decision, and not the decision.** The only
+claim it supports is "no unexpected side effect *observed*, by the checks
+above". It is a time-window observation rather than request attribution:
+Hermes does not propagate trace context into its outbound MCP calls, so a
+tool call it made would appear as an unrelated trace with nothing linking
+it back, and §14 can neither tie one to this request nor rule one out.
+
+```text
+§14 clean   !=   no consequential action occurred
+            !=   safe to repeat
+```
+
+Making a clean §14 the gate would have it carry a conclusion it
+explicitly disclaims — the same shape of error as reading §12's carve-out
+generously to admit the answer already in hand.
+
+The distinction is worth keeping sharp, because the two properties come
+apart here and the convenient reading merges them. §11's retry
+*prohibition* is not triggered — but the *reasoning* behind §11 is about
+side effects and idempotency, and knowing the outcome resolves none of
+it. So §5 follows §11's decision model rather than inventing a second
+one: inspect, decide, and record the decision with its basis.
+
+**`response_chars` corroborates without logging content.** The Gateway
+logs a response *length*, never content (§8's data minimisation), and the
+expected reply is 16 characters. `response_chars=16` is consistent with
+the expected reply and nothing was added; anything else means the reply
+was not the bare token, and the thread is what settles it. A length is
+not the text, so this corroborates the operator's in-thread observation
+rather than replacing it.
+
+`docs/setup/slack.md` uses the same input, so both procedures continue to
+produce comparable evidence. It carries no personal data and asks for a
+pure text response.
 
 **It does not guarantee that no tool runs, and this runbook does not claim
 it does.** What the repository actually supports:
@@ -787,6 +942,15 @@ Before deciding whether a retry is safe, inspect, in order:
 
 Record the decision and its basis in the run record.
 
+**A known outcome is not an exemption from this.** The rule above names
+`OUTCOME_UNKNOWN` because that is the case where even *delivery* is in
+doubt, but nothing here turns on the outcome being unknown: the tool
+capability and the missing idempotency guarantee are properties of the
+boundary, not of the classification. A run that completed and failed §5
+on formatting is the concrete case — the result is known, and whether the
+turn acted before returning it is not. The same decision is required, and
+`status=completed` answers none of it.
+
 ## 12. Stop conditions
 
 Stop and do not proceed (or do not continue) if any of these hold:
@@ -795,7 +959,29 @@ Stop and do not proceed (or do not continue) if any of these hold:
   for anything you cannot show to be comment-only — the run would be
   evidence about a build you cannot name. (The retired form of this
   condition was "a container predates the build at the recorded SHA";
-  §3 explains why image and start timestamps are not evidence.);
+  §3 explains why image and start timestamps are not evidence.)
+
+  **"Comment-only" means `#` comments, and nothing else.** Those are
+  discarded by the tokenizer and cannot reach the running program.
+  **Docstrings are not comments**: they are string constants bound to
+  `__doc__`, they survive into the compiled module, and code can read
+  them. A difference confined to docstrings is therefore **not** covered
+  by this carve-out and **is** a stop condition, however convincingly it
+  is shown to leave behaviour unchanged.
+
+  This is deliberately the strict reading. Broadening the carve-out to
+  "any mechanically proven non-behavioural difference" is a defensible
+  rule, but it is a different rule, and adopting it silently — by reading
+  "comment-only" generously in the middle of a run — is how a gate stops
+  meaning what it says. The 2026-09-14 run did exactly that and its
+  result was reclassified; see its record. If the broader rule is wanted,
+  it should be written here deliberately, before the run that relies on
+  it.
+
+  **Recovering from a docstring-only difference** means making the
+  runtime inputs match: rebuild the affected service from the recorded
+  SHA and recreate it. That replaces the container, so the run is no
+  longer bound to the provenance already recorded — restart from §3;
 - the Slack Gateway container still has `HERMES_API_*` in its environment —
   it is on the pre-#43 direct path, so a run would validate the wrong
   thing;
@@ -951,6 +1137,301 @@ Do not record "no side effects possible". The supportable statement is
 
 Each entry is **observed evidence** from one actual execution.
 
+### 2026-09-14 (15:09 UTC) — the run that exposed §5's and §12's gaps
+
+**Not a canonical PASS — and originally recorded as one.** This run was
+written up here as `PASS`. Review found two defects in that
+classification and it was reclassified before the record merged. The
+correction is recorded rather than quietly applied, because the two
+runbook defects it surfaced are what this run is actually useful for.
+
+```text
+1. §12's carve-out does not cover docstrings.  Its text excuses a
+   `DIFFERS` shown to be *comment-only*. Python docstrings are string
+   constants bound to `__doc__`, not comments -- so the §3 difference
+   below was a stop condition, and continuing past it read the gate more
+   generously than it is written. §12 now says so explicitly.
+
+2. The criterion was finalised after the result was observed.  §5 named
+   a fixed input but not an expected reply, the ambiguity was discovered
+   mid-run, and the acceptance semantics were written afterwards -- in
+   the same change that classified this run against them. The observed
+   reply satisfies the finalised rule cleanly, so the result is not in
+   doubt; the *lifecycle* is. A canonical gate has to be fixed before
+   the run that closes it, or the run helps define the criterion that
+   judges it.
+```
+
+Both defects are fixed in this same change, so the next run meets a
+runbook settled in advance. The gate stays **open** until that run.
+
+```text
+Validation date:         2026-09-14 15:09:02 UTC (container clock; host
+                         UTC differed by ~1s, so log and mtime comparisons
+                         need no offset correction)
+Operator:                repository owner, interactive session
+
+Repository SHA:          83ed28ad9b9224e651d19115df7a9abc6f7f3551
+                         (= merge commit of PR #45; == origin/master)
+Working tree:            clean (before the request and after it)
+Containers (container ID prefix, image ID, started) -- all eight:
+  slack-gateway:         dbab5033ac33  sha256:9c9be6031de05d6473d  2026-09-10T20:50:41
+  orchestrator:          df6eb0bff364  sha256:f021e28af4b6c2eda0a  2026-09-10T20:50:41
+  hermes-agent:          9d53cbf88567  sha256:470aa3b68074d9d752f  2026-09-10T20:50:41
+  google-calendar-mcp:   8b868cfc3258  sha256:72854aab401dc96750a  2026-09-10T20:50:41
+  ollama:                7e7efecf4bef  sha256:dacbdaa86a43fb9ed58  2026-09-10T20:50:41
+  otel-collector:        eee977aa44f6  sha256:e11c83206a71a0ac312  2026-09-11T07:18:43
+  phoenix:               5db3fd4d83bd  sha256:e90c06c2bf2f22ef7d9  2026-09-10T20:50:41
+  mlflow:                bac1f771b2de  sha256:ec446a27c197e760a63  2026-09-10T20:50:41
+                         `provenance` was re-run after the scan: all eight
+                         prefixes were unchanged, so nothing was recreated
+                         between the record and the evidence.
+Runtime Python inputs match recorded SHA (§3):
+                         NO, in one respect -- and the same one the
+                         2026-09-10 runs hit, still unrepaired because a
+                         rebuild was deliberately not part of this run.
+                         `slack-gateway`: all inputs match 83ed28ad.
+                         `orchestrator`: every input matches except
+                         `orchestrator/hermes_agent.py`, which is
+                         byte-identical to that file at 0a03c56. The two
+                         commits that have touched it since (094b984,
+                         6aa80ce) changed only its module docstring and
+                         `_extract_output_text`'s.
+                         Established mechanically, not by reading the
+                         diff: parsing both files and stripping every
+                         docstring yields **identical** ASTs, while
+                         keeping them yields differing ones -- so the
+                         whole difference is string constants and no
+                         executable code differs. That is §3's step 3,
+                         and it classifies the difference as
+                         docstring-only.
+                         **At the time, the operator read §12's
+                         `comment-only` carve-out as covering that and
+                         continued the run.** Review later found the
+                         interpretation incorrect: docstrings are string
+                         constants bound to `__doc__`, not comments, so
+                         the carve-out never applied and this was a stop
+                         condition. §12 and §3 were both rewritten in the
+                         change that carries this record. Also
+                         compared and matching:
+                         `packages/agent-contracts`'s Python files as
+                         installed into site-packages, and
+                         `packages/agent-contracts/pyproject.toml`.
+Outside that boundary (§3's table):                 acknowledged
+
+Preconditions:
+  all required services healthy:          YES -- all eight up; otel-collector
+                                          checked with `ps -a` and its health
+                                          endpoint returned 200 (no Exited 127
+                                          this time, so no recreation was needed)
+  gateway → orchestrator GET /health:     200
+  gateway env free of HERMES_API_*:       YES -- exactly ORCHESTRATOR_BASE_URL,
+                                          OTEL_EXPORTER_OTLP_ENDPOINT,
+                                          SLACK_APP_TOKEN, SLACK_BOT_TOKEN
+                                          (names only; values never printed)
+  thread under operator control:          YES -- a direct message; the Gateway
+                                          log's channel id is D-prefixed
+
+Test input:              `Reply with exactly SLACK_GATEWAY_OK.` -- §5's
+                         fixed string *as §5 read at the time*, sent once
+                         as a direct message
+Test input conforms to §5:                          YES as §5 read then;
+                         NO against the finalised §5, whose input this
+                         same change replaces with
+                         `Reply with this token only and nothing else:
+                         SLACK_GATEWAY_OK` precisely because the old
+                         one's trailing period was ambiguous
+Slack reply observed (and matches §5's expected):
+                         `SLACK_GATEWAY_OK` -- the bare token, with no
+                         punctuation, formatting or added content,
+                         reported verbatim by the operator from the
+                         thread. Corroborated by the Gateway's
+                         `response_chars=16`: exactly the token's length,
+                         so the model added nothing. It would satisfy the
+                         finalised §5 as well -- but §5 did not name an
+                         expected reply when this run started, so what
+                         this run compared against was decided after the
+                         reply was in hand. That is the defect, not the
+                         reply.
+Gateway log (dispatch → status):
+                         POST http://orchestrator:8700/dispatch → 200 OK
+                         agent=hermes  status=completed  response_chars=16
+                         delivery=posted_and_processing_status_deleted
+
+Trace ID:                9056c40f4df2d6181ecc81e80f2bb83d
+Observed spans:          6, one trace id:
+                           concierge.request        c381cfb838bf  (root)
+                             orchestrator.dispatch  dc55d9c47053
+                               POST /dispatch       8d370940a7da
+                                 hermes.request     74cc707b6402
+                                   /v1/responses    1f0bc35efff2
+                             slack.response         5bd1bd4a411a
+Expected parent-child relationships:                PASS -- all five,
+                                                    `trace` exit 0
+Gateway → Orchestrator confirmed:                   YES
+Orchestrator → Hermes confirmed:                    YES
+Present in MLflow (trace id, state):
+                         tr-9056c40f4df2d6181ecc81e80f2bb83d  state=OK
+                         Every span also carried `redaction.ignored.count`,
+                         so the Collector's redaction processor ran on all
+                         six.
+Sensitive sentinel check -- required set (§8):      PASS -- all 7 labels
+                                                    `absent`, 0 leaked,
+                                                    `scan` exit 0, none
+                                                    skipped
+Content sentinels (message / response text):        checked -- both
+                                                    `absent`, giving 9
+                                                    sentinels in one scan.
+                                                    Practical because §5's
+                                                    input and its expected
+                                                    reply are both single
+                                                    lines, expressible
+                                                    verbatim in the
+                                                    line-based needles file.
+                                                    Not part of PASS (§9).
+Credential read bound to the request's container:   YES -- `--expect-container
+                                                    df6eb0bff364`, the prefix
+                                                    recorded before the request
+
+Unexpected side effects observed (§14 -- window, not attribution):
+                                                    NO
+Side-effect window anchored at §5's marker:         YES -- marker at
+                                                    15:08:24 UTC, dispatch at
+                                                    15:09:02 UTC, so the
+                                                    window opened 38s before
+                                                    the request and could not
+                                                    have drifted past it
+Post-validation checks performed:
+                         1. Phoenix span scan over 14:09:57–15:12:57 UTC,
+                            which contains the request: **zero** `tools/call`
+                            spans. The only other traffic was 22 paired
+                            `MCP send ping` / `ping` keepalives at ~3-minute
+                            intervals -- the routine Calendar-MCP keepalive
+                            §14 names. This is a time-window observation and
+                            not request attribution (§14).
+                         2. `find data/hermes -newer` the marker: 11 files,
+                            all within §14's expected table --
+                            `response_store.db-{shm,wal}` (the conversation
+                            store, expected because the Gateway sends
+                            `"store": true`), `state.db-*`, `kanban.db-*`,
+                            `cron/ticker_heartbeat`,
+                            `cron/ticker_last_success`,
+                            `state/gateway.heartbeat`, `logs/agent.log`.
+                            One file is recorded separately rather than
+                            folded in: `cron/.tick.lock`, which §14's table
+                            does not name by filename. It is the lock of the
+                            `cron/ticker_*` mechanism the table does name, it
+                            is under `data/hermes`, and it is neither a new
+                            file outside that tree, nor under a project
+                            directory, nor a repository change -- so it is
+                            not one of the three things §14 defines as
+                            unexpected.
+                         3. `git status --porcelain` empty.
+                         4. Marker removed; the needles file was written
+                            outside the repository and deleted.
+
+Per-criterion state (§9) -- one line each, none omitted:
+  §5 fixed input           NOT EXERCISED -- §5's then-current input was
+                           sent and a reply was observed, but §9's
+                           criterion is the input *and its expected
+                           reply*, and no expected reply existed to
+                           exercise it against. One was written after
+                           this reply was observed, which is not the same
+                           as meeting a pre-existing criterion.
+  gateway dispatch/status  PASS -- POST /dispatch 200, status=completed
+  trace / relationships    PASS -- 6 spans, one trace id, all five
+                           relationships, `trace` exit 0
+  required-set sentinels   PASS -- 7/7 absent, `scan` exit 0
+  provenance (§3)          FAIL -- recorded thoroughly (all eight before
+                           the request, re-verified unchanged after it)
+                           and compared against the recorded SHA, which
+                           is more than either earlier run did. But the
+                           comparison reported `DIFFERS`, and the
+                           difference is docstring-only, which §12 does
+                           not excuse: docstrings are string constants,
+                           not comments. The criterion was exercised and
+                           not met. What happened at the time: the
+                           operator treated the docstring-only difference
+                           as satisfying §12's carve-out and continued,
+                           arguing that a strict reading would otherwise
+                           permit a run that could never pass. Review
+                           later found that interpretation incorrect,
+                           because docstrings are not comments. §12 now
+                           forecloses the argument rather than leaving it
+                           available.
+  side effects (§14)       PASS -- window correctly anchored, and no
+                           unexpected side effect observed by any of the
+                           three checks
+Overall result:          FAIL
+                         (§9's aggregation rule: the worst state present.
+                         `FAIL` outranks the `NOT EXERCISED` on §5's
+                         criterion, so the run label is `FAIL` even
+                         though four criteria passed -- rule 1 is why
+                         every state above is recorded individually
+                         rather than collapsed into the headline.)
+Verified subset:         dispatch through the Orchestrator, trace
+                         continuity across all five relationships,
+                         required-set *and* content sentinel absence, and
+                         credential binding to the serving container.
+                         Provenance and §5's criterion are NOT part of
+                         this subset.
+Notes / limitations of this run:                     see below
+```
+
+**What this run established anyway.** Its label is `FAIL`, and four of
+its six criteria still passed on evidence neither 2026-09-10 run
+produced. Provenance was recorded *before* the request from §3's helper
+and re-verified unchanged *after* the scan, rather than inferred
+retroactively from image ids — which is precisely why the `DIFFERS` was
+caught at all. The side-effect window was anchored at §5's marker, so its
+clean result is usable evidence instead of the `INCONCLUSIVE` the
+superseded drifting window produced twice. The optional content extension
+ran, so the message and response text are additionally known absent from
+telemetry. And the procedure did what a gate is for: it surfaced two
+defects in itself rather than producing a comfortable answer.
+
+**What has to be true for the next run to close the gate.** Both items
+are prerequisites, not preferences:
+
+1. **The Orchestrator is rebuilt from the recorded SHA and recreated**, so
+   §3's comparison reports no `DIFFERS` and §12's carve-out is never
+   consulted. Recreation replaces the container, so provenance must be
+   captured fresh afterwards — the run starts at §3, not around it.
+   Broadening §12 instead would also resolve it, but that is a different
+   rule and §12 now says it must be adopted deliberately and in advance,
+   not read into the existing text mid-run.
+2. **The runbook it is judged against is the one merged before it ran.**
+   This change finalises §5's input and expected reply; the next run
+   simply follows them.
+
+**Limitations of this run.**
+
+- The running Orchestrator was **not** built from the recorded SHA, and
+  under §12 as now written that is a stop condition rather than an
+  explained difference. Its executable code is identical to 83ed28ad —
+  established by AST comparison, not by reading the diff — so nothing
+  here suggests the *behaviour* observed was wrong. What it means is that
+  this run is evidence about a build the record cannot name, which is
+  exactly what §3's comparison exists to prevent.
+- Success path only. The failure and `OUTCOME_UNKNOWN` paths (§10) remain
+  test-covered and still unobserved live.
+- Span *kind* was not verified: Phoenix's REST API reports `UNKNOWN` (§7).
+- **No tool call is attributed, and none is ruled out.** §14's span check
+  is a time-window observation; Hermes does not propagate trace context to
+  its outbound MCP calls, so a tool call would appear as an unrelated
+  trace with no link back to this request. The supportable claim is the
+  one recorded: no non-keepalive `tools/call` span in the inspected
+  window.
+- No Calendar tool was invoked, so Hermes' outbound-MCP propagation gap
+  was neither confirmed nor contradicted — as in both earlier runs.
+- §5's residual risk stands: whether Hermes' terminal toolset is available
+  on the `/v1/responses` path remains undeterminable from this repository,
+  which is why this record says "no unexpected side effect *observed*".
+- Everything in §3's "outside the boundary" table is untouched by this
+  run: the Dockerfiles, build args, install-time resolution,
+  `hermes-agent`'s instrumentation layer, `google-calendar-mcp`'s source,
+  and the upstream `:latest` images' non-reproducible identities.
+
 ### 2026-09-10 (21:05 UTC) — live run with a §5 test-input deviation
 
 Executed with the procedure above rather than ad hoc, so the container
@@ -1078,8 +1559,11 @@ so Phoenix's storage is durable across one.
   scope statement, not a caveat on the PASS: §9 defines PASS against §8's
   required set, all seven of which were checked.
 - **§5's fixed input was not used**, so §9's first criterion was not
-  exercised. A canonical runbook PASS still needs a run that sends
-  `Reply with exactly SLACK_GATEWAY_OK.` and observes that exact reply.
+  exercised. A canonical runbook PASS still needs a run that sends §5's
+  input and observes its expected reply. (This record originally quoted
+  that input as `Reply with exactly SLACK_GATEWAY_OK.`; §5 has since
+  replaced it, because that period was ambiguous — see §5 and the
+  2026-09-14 record. The point stands, only the string has moved.)
   The same deviation is why the content extension was impractical here:
   §5's single-line, deterministic input/reply pair is what makes those two
   sentinels expressible verbatim, and an operator-chosen message is not.
