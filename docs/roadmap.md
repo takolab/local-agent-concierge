@@ -814,7 +814,27 @@ Recorded as **partial**, not complete, because:
   `NOT A RUNBOOK PASS` rather than as a PASS with a footnote — routing,
   trace continuity and sentinel absence are established; a deterministic
   input/expected-reply pair is not.
-  **The gate is still open, and a third run narrowed what remains.** On
+  **The gate is now closed.** On 2026-09-15 at 11:34 UTC a run at
+  9a24abf — the merge commit of PR #46, with the Orchestrator rebuilt from
+  that SHA and recreated — met every §9 criterion against the finalised
+  procedure: §5's fixed input returned exactly `SLACK_GATEWAY_OK`,
+  `POST /dispatch` → 200 with `status=completed`, all six spans in one
+  trace with correct parenting (`trace` exit 0) and present in MLflow with
+  `state=OK`, all seven required sentinels plus both content sentinels
+  absent (`scan` exit 0, bound to the request's own Orchestrator
+  container), §3's source comparison matching the recorded SHA with zero
+  `DIFFERS`, and §14 clean against a window anchored at §5's marker. The
+  criteria were merged at 07:38 UTC, before the run, and no runbook text
+  was changed during it. That run is recorded as the canonical `PASS`.
+
+  A first attempt that day (11:09 UTC) is recorded as `FAIL`: the
+  `hermes-agent` bind mount had gone stale after a Docker Desktop engine
+  restart, so the container read a detached filesystem with no usable
+  provider credential. The wiring itself was correct throughout — the
+  failure was downstream of it, in Hermes' model backend. That run is why
+  the runbook's bind-mount integrity check now exists.
+
+  **The earlier history, for context.** On
   2026-09-14 a run at 83ed28ad used the runbook's fixed input, captured
   provenance before the request and re-verified it unchanged afterwards,
   anchored the side-effect window at §5's marker, and additionally scanned
@@ -994,9 +1014,10 @@ only the two HTTP boundaries:
   on 2026-09-10: one real Slack message produced the joined
   `concierge.request` → `orchestrator.dispatch` → `POST /dispatch` →
   `hermes.request` → `/v1/responses` trace in Phoenix, present in MLflow
-  with `state=OK`. Three runs are recorded and **none is yet the canonical
-  `PASS`**; the 2026-09-14 one came closest and is what finalised the
-  runbook's remaining ambiguities. See
+  with `state=OK`. Five runs are recorded, and the 2026-09-15 11:34 UTC run
+  **is the canonical `PASS`** — it closed the gate against criteria fixed
+  before it ran. The 2026-09-14 run is what finalised the runbook's
+  remaining ambiguities. See
   `docs/observability/slack-orchestrator-live-validation.md` for the
   repeatable procedure and each run's evidence. **Success path only** —
   the error paths (Hermes non-success, unreachable Hermes,
