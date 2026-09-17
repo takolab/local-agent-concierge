@@ -1435,9 +1435,9 @@ Post-validation checks performed:
                            Nothing outside that table, nothing under a
                            project directory.
                            (This file activity also confirms the mount
-                           repair: the 11:09 FAIL showed zero changes
-                           because the container was writing to a detached
-                           filesystem.)
+                           repair: the 11:09 FAIL showed zero host-side
+                           changes because the container was not using the
+                           host directory at all.)
                          - §14.3: `git status --porcelain` clean
                          - `find` here is bfs 4.1.1; the `-newer` form was
                            verified by positive control at preflight.
@@ -1612,8 +1612,9 @@ Credential read bound to the request's container:   N/A (scan not run)
 
 Unexpected side effects observed (§14 -- window, not attribution):
                                                     UNKNOWN -- §14.1 was
-                                                    not performed; §14.2 and
-                                                    §14.3 found nothing
+                                                    not performed, and
+                                                    §14.2's result is not
+                                                    usable (stale mount)
 Side-effect window anchored at §5's marker:         YES -- marker at
                          11:09:24 UTC, dispatch at 11:09:45 UTC, so the
                          window opened 21s before the request.
@@ -1623,16 +1624,28 @@ Post-validation checks performed:
                            queried only to find this request's trace id,
                            which does not establish whether a `tools/call`
                            span appeared in the window.
-                         - `find data/hermes -newer <marker>`: ZERO files
-                           changed. Note a successful turn normally touches
-                           ~a dozen files including response_store.db-wal;
-                           zero is consistent with the turn failing before
-                           any inference or persistence occurred.
-                         - `git status --porcelain`: clean
-                         - `find` here is bfs 4.1.1; the `-newer` form was
-                           verified working by positive control at preflight,
-                           so "no changes" means no changes rather than a
-                           check that failed to run.
+                         - §14.2 (`find data/hermes -newer <marker>`): run,
+                           and reported zero changed files -- but **the
+                           result is not usable as evidence about the Hermes
+                           runtime.** The stale bind mount established
+                           below means the host `data/hermes` directory was
+                           not the filesystem the container was actually
+                           using during this turn. Zero host-side changes
+                           therefore cannot establish the absence of runtime
+                           persistence or any other filesystem effect.
+                           (The command itself worked: `find` here is bfs
+                           4.1.1 and its `-newer` form was verified by
+                           positive control at preflight. What failed is
+                           the premise that the host directory is where
+                           Hermes writes.)
+                           The detached filesystem the container did use was
+                           discarded when hermes-agent was recreated, so
+                           what, if anything, was written there during this
+                           turn cannot now be determined.
+                         - §14.3 (`git status --porcelain`): clean. The
+                           repository is not mounted into hermes-agent, so
+                           this check is unaffected by the stale mount; it
+                           shows only that this repository did not change.
                          - Marker removed after the run.
 
 SUPPLEMENTARY, AFTER THE FACT -- does not change any state above:
@@ -1697,7 +1710,8 @@ Per-criterion state (§9) -- one line each, none omitted:
   required-set sentinels   NOT EXERCISED
   provenance (§3)          PASS
   side effects (§14)       NOT EXERCISED  (§14.1 not performed; §14.2
-                                           and §14.3 found nothing)
+                                           unusable because of the stale
+                                           mount; §14.3 clean)
 Overall result:          FAIL
                          (§9 aggregation: the worst state present)
 Verified subset:         The Slack → Orchestrator → Hermes wiring itself
@@ -1715,18 +1729,21 @@ Notes / limitations of this run:
                            not observed. The run is FAIL, not a near-miss,
                            and was NOT re-sent automatically (§11).
                          - Retry safety, decided and recorded per §11:
-                           repeating is judged SAFE. The basis, and only
-                           this basis: Hermes' own log shows the turn
+                           repeating is judged SAFE. This is a judgement
+                           based on the Hermes log, not on an observed §14
+                           side-effect check: the log shows the turn
                            failing at provider authentication with no
                            fallback, so no model call succeeded and no
-                           model-selected tool call is expected; §14.2
-                           found zero file changes under data/hermes; §14.3
-                           found a clean repository. §14.1 was NOT part of
-                           the basis, because it was not performed, so a
-                           tool call is ruled out by inference from the log
-                           rather than by observation. This is a decision
-                           recorded with its basis, not an assumption that
-                           a known outcome is repeatable.
+                           model-selected tool call or persistence step is
+                           expected. §14.3 adds only that this repository
+                           did not change.
+                           Neither §14.1 nor §14.2 is part of the basis:
+                           §14.1 was not performed, and §14.2 looked at a
+                           host directory the container was not using.
+                           So the absence of a tool call or filesystem
+                           effect is inferred from the log, not observed.
+                           It is recorded with that basis, not as an
+                           assumption that a known outcome is repeatable.
                          - Because the remediation recreated hermes-agent,
                            the next attempt is a FRESH run starting from §3.
 ```
