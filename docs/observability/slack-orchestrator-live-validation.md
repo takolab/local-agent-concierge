@@ -1179,8 +1179,11 @@ Bind-mount integrity:    hermes-agent and google-calendar-mcp mounts were
                          repaired earlier this session and verified by
                          positive control; otel-collector's config mount
                          verified behaviourally (health_check answers 200,
-                         spans carry redaction.ignored.count). See the
-                         11:09 FAIL record for why this check now exists.
+                         spans carry redaction.ignored.count). This is NOT a
+                         runbook step: §4 documents only the otel-collector
+                         recovery. The check was performed as extra preflight
+                         because of the 11:09 FAIL; adding it to §4 is a
+                         separate, not-yet-made procedural change.
 
 Preconditions:
   all required services healthy:                    YES -- all eight
@@ -1275,7 +1278,8 @@ Post-validation checks performed:
                          this request nor rule one out.
 
 Criterion lifecycle:     The criteria were fixed BEFORE this run. The
-                         contract merged at 2026-09-15 07:38 UTC; this run
+                         contract merged at 2026-09-15 06:38 UTC (GitHub's
+                         merged_at for PR #46); this run
                          executed at 11:34 UTC. No runbook text was modified
                          at any point during the preparation or the run, and
                          `infra/observability/tests/test_live_validation.py`
@@ -1304,6 +1308,204 @@ Notes / limitations of this run:
                            /v1/responses path remains undetermined from this
                            repository -- a residual risk §5 accepts rather
                            than closes.
+```
+
+### 2026-09-15 (11:26 UTC) — NOT A RUNBOOK PASS: §14's window was never anchored
+
+**Overall: NOT A RUNBOOK PASS.** Five of the six §9 criteria were
+exercised and met, including §5's reply on the finalised contract. The
+sixth — §14 — was not exercised as specified: §5's marker was never
+dropped, so the side-effect window had no pre-committed anchor. The
+canonical gate stayed **open** after this run; the 11:34 run closed it.
+
+```text
+Validation date:         2026-09-15 11:26:15 UTC (container clock; host
+                         UTC offset 0s, verified immediately before the run)
+Operator:                repository owner, interactive session
+
+Repository SHA:          9a24abf7bb933c2ee645001cf422d6fd24cf3a96
+                         (= merge commit of PR #46; == origin/master)
+Working tree:            clean (before and after)
+Containers (container ID prefix, image ID, started) -- all eight:
+  slack-gateway:         dbab5033ac33  sha256:9c9be6031de05d6473d  2026-09-15T08:10:58
+  orchestrator:          0690b9d00b39  sha256:17272b02c47d075db1d  2026-09-15T08:13:55
+  hermes-agent:          9a669773e3ce  sha256:470aa3b68074d9d752f  2026-09-15T11:16:33
+  google-calendar-mcp:   b4c605fd9fb4  sha256:72854aab401dc96750a  2026-09-15T11:22:41
+  ollama:                7e7efecf4bef  sha256:dacbdaa86a43fb9ed58  2026-09-15T08:10:58
+  otel-collector:        cea0f4340a25  sha256:e11c83206a71a0ac312  2026-09-15T08:13:37
+  phoenix:               5db3fd4d83bd  sha256:e90c06c2bf2f22ef7d9  2026-09-15T08:10:58
+  mlflow:                bac1f771b2de  sha256:ec446a27c197e760a63  2026-09-15T08:10:58
+                         `provenance` run before the request and again
+                         after evidence collection: all eight prefixes
+                         identical, so nothing was recreated in between.
+
+Runtime Python inputs match recorded SHA (§3):       YES
+                         orchestrator: all inputs match (14 comparisons)
+                         slack-gateway: all inputs match (12 comparisons)
+                         Zero DIFFERS -- §3's ordered classification was not
+                         reached and §12's carve-out was not relied on.
+                         The orchestrator was rebuilt from 9a24abf and
+                         recreated at preflight, clearing the 2026-09-14
+                         docstring-only stop condition by rebuild rather
+                         than by reinterpretation.
+Outside that boundary (§3's table):                 acknowledged
+Bind-mount integrity (extra preflight after the 11:09 FAIL; not a runbook step):
+                         hermes-agent and google-calendar-mcp mounts were
+                         repaired and re-verified by positive control;
+                         otel-collector's config mount verified
+                         behaviourally (health_check answers 200; spans
+                         carry redaction.ignored.count).
+
+Preconditions:
+  all required services healthy:                    YES -- all eight
+  gateway -> orchestrator GET /health:              200
+  gateway env free of HERMES_API_*:                 YES -- exactly
+                         ORCHESTRATOR_BASE_URL, OTEL_EXPORTER_OTLP_ENDPOINT,
+                         SLACK_APP_TOKEN, SLACK_BOT_TOKEN (names only)
+  thread under operator control:                    YES -- direct message;
+                         the Gateway log's channel id is D-prefixed
+
+Test input:              `Reply with this token only and nothing else:
+                         SLACK_GATEWAY_OK` -- §5's canonical input, sent
+                         once as a DM
+Test input conforms to §5:                          YES
+Slack reply observed (and matches §5's expected):   YES
+                         `SLACK_GATEWAY_OK` -- the bare token, reported
+                         verbatim by the operator from the thread.
+                         Corroborated by response_chars=16, exactly the
+                         expected reply's length, so nothing was added.
+                         A length is not the text; the operator's in-thread
+                         observation is what settles it.
+Gateway log (dispatch -> status):
+                         POST http://orchestrator:8700/dispatch → 200 OK
+                         agent=hermes  status=completed  response_chars=16
+                         event_id=Ev0C225BQRLL
+                         delivery=posted_and_processing_status_deleted
+
+Trace ID:                2baf2687afeb06c9b868e0e6e4776600
+Observed spans:          6, one trace id:
+                           concierge.request        51297949cf39  (root)
+                             orchestrator.dispatch  8d9dec6c14ca
+                               POST /dispatch       7c8cfc6b0a08
+                                 hermes.request     8cf85e0ea110
+                                   /v1/responses    3b0b34fedef7
+                             slack.response         b3fce9a4285c
+Expected parent-child relationships:                PASS -- all five,
+                                                    `trace` exit 0
+Gateway → Orchestrator confirmed:                   YES
+Orchestrator → Hermes confirmed:                    YES
+Present in MLflow (trace id, state):
+                         tr-2baf2687afeb06c9b868e0e6e4776600  state=OK
+                         execution_duration 7.817s. Every span carried
+                         `redaction.ignored.count`, so the Collector's
+                         redaction processor ran on all six.
+Sensitive sentinel check -- required set (§8):      PASS -- all 7 required
+                         labels `absent`, 0 leaked, `scan` exit 0, none
+                         skipped
+Content sentinels (message / response text):        checked -- both
+                         `absent`, giving 9 sentinels in one scan. Not part
+                         of PASS (§9). Needles file was kept outside the
+                         repository and deleted after the run.
+Credential read bound to the request's container:   YES -- --expect-container
+                         0690b9d00b39, the prefix recorded before the request
+
+Unexpected side effects observed (§14 -- window, not attribution):
+                                                    NO -- but see the
+                                                    anchoring defect below
+Side-effect window anchored at §5's marker:         **NO**
+                         `/tmp/live-validation-start` was never created.
+                         §5 requires it to be dropped immediately before
+                         sending; that step was skipped.
+Post-validation checks performed:
+                         - §14.1: 6 spans in the window, all of them the
+                           expected request spans. No `tools/call` span at
+                           all, keepalive or otherwise.
+                         - §14.2: run against a RECONSTRUCTED anchor -- a
+                           reference file stamped 11:26:00 UTC, 15s before
+                           the 11:26:15 dispatch -- NOT §5's marker. 14
+                           files changed, every one of them inside §14's
+                           documented expected table:
+                             response_store.db-{wal,shm}  (conversation
+                               store; the Gateway sends "store": true)
+                             state.db-*, kanban.db-*      (Hermes' own state)
+                             cron/ticker_*, cron/.tick.lock,
+                               state/gateway.heartbeat    (background tickers)
+                             logs/agent.log, logs/errors.log
+                             models_dev_cache.*           (metadata refresh)
+                           Nothing outside that table, nothing under a
+                           project directory.
+                           (This file activity also confirms the mount
+                           repair: the 11:09 FAIL showed zero changes
+                           because the container was writing to a detached
+                           filesystem.)
+                         - §14.3: `git status --porcelain` clean
+                         - `find` here is bfs 4.1.1; the `-newer` form was
+                           verified by positive control at preflight.
+                         Recorded as "no non-keepalive `tools/call` span
+                         observed in the inspected window" -- never as "no
+                         tool call for this request".
+
+WHY THIS IS NOT A PASS:
+  The substantive answer §14 seeks is almost certainly the same either
+  way: the reconstructed anchor sits 15s before the dispatch, so it is
+  strictly at-or-wider than the marker would have been, and it cannot
+  drift. But the anchor was **chosen after the result was known**, from
+  the Gateway log. §5's marker is evidence created *before* the outcome
+  exists; a reconstructed anchor is a judgement inserted after it.
+
+  That difference is the exact lifecycle property this runbook was
+  rewritten to protect -- "a canonical gate has to be fixed before the
+  run that closes it". The 2026-09-14 run was reclassified for the same
+  shape of error: reading a gate generously, mid-run, in the direction
+  of the answer already in hand. Accepting a post-hoc anchor because the
+  file list looks clean would repeat it.
+
+  Broadening §14 to accept a reconstructed anchor whose timestamp
+  provably precedes the dispatch is a **defensible rule** -- but it is a
+  *different* rule, and per §12's own reasoning it should be written
+  into the runbook deliberately, before the run that relies on it, not
+  adopted in the middle of one.
+
+Per-criterion state (§9) -- one line each, none omitted:
+  §5 fixed input           PASS
+  gateway dispatch/status  PASS
+  trace / relationships    PASS
+  required-set sentinels   PASS
+  provenance (§3)          PASS
+  side effects (§14)       NOT EXERCISED  (no §5 marker; window reconstructed)
+Overall result:          NOT A RUNBOOK PASS
+                         (§9 aggregation: the worst state present.
+                          NOT A RUNBOOK PASS outranks INCONCLUSIVE because
+                          the fix is simply to run the criterion.)
+Verified subset:         Everything except §14's anchoring. On the
+                         finalised PR #46 contract, against a runtime
+                         rebuilt from the recorded SHA: §5's canonical
+                         input produced exactly `SLACK_GATEWAY_OK`; the
+                         Gateway dispatched through the Orchestrator to
+                         the registered "hermes" Agent and replied
+                         in-thread; W3C trace context was continuous
+                         across all six spans with correct parenting,
+                         present in both Phoenix and MLflow (state=OK);
+                         all 7 required sentinels plus both content
+                         sentinels were absent, read from the request's
+                         own container; and §3's source comparison
+                         matched the recorded SHA exactly.
+Notes / limitations of this run:
+                         - Remedy is cheap and needs no rebuild: drop the
+                           marker, send one message. Provenance is stable
+                           and nothing has been recreated since it was
+                           recorded, so the next attempt does NOT need to
+                           restart from §3 -- only to re-record the run.
+                         - Retry safety, decided and recorded per §11:
+                           repeating is judged SAFE. The turn completed
+                           with a known result, and the reconstructed-
+                           anchor checks above found no `tools/call` span
+                           and only files inside §14's documented routine
+                           set. A post-hoc anchor is not enough for a PASS,
+                           but it is adequate evidence for a retry decision,
+                           which is a judgement §11 asks for explicitly. This is a
+                           decision with its basis, not an inference that
+                           a known outcome is automatically repeatable.
 ```
 
 ### 2026-09-15 (11:09 UTC) — FAIL: Hermes had no inference provider
@@ -1409,11 +1611,18 @@ Content sentinels (message / response text):        not performed
 Credential read bound to the request's container:   N/A (scan not run)
 
 Unexpected side effects observed (§14 -- window, not attribution):
-                                                    NO
+                                                    UNKNOWN -- §14.1 was
+                                                    not performed; §14.2 and
+                                                    §14.3 found nothing
 Side-effect window anchored at §5's marker:         YES -- marker at
                          11:09:24 UTC, dispatch at 11:09:45 UTC, so the
                          window opened 21s before the request.
 Post-validation checks performed:
+                         - §14.1 (span window, non-keepalive `tools/call`):
+                           **NOT performed at the time.** Phoenix was
+                           queried only to find this request's trace id,
+                           which does not establish whether a `tools/call`
+                           span appeared in the window.
                          - `find data/hermes -newer <marker>`: ZERO files
                            changed. Note a successful turn normally touches
                            ~a dozen files including response_store.db-wal;
@@ -1425,6 +1634,22 @@ Post-validation checks performed:
                            so "no changes" means no changes rather than a
                            check that failed to run.
                          - Marker removed after the run.
+
+SUPPLEMENTARY, AFTER THE FACT -- does not change any state above:
+  §14.1's span query was run on 2026-09-17, two days later, against the
+  window this run's marker had already fixed (11:09:24 UTC) up to the next
+  attempt's start (11:26:00 UTC). Zero `tools/call` spans. In time order:
+      11:09:44-46  the six spans of this request, and nothing else until
+      11:16:42     MCP initialize / tools/list  <- hermes-agent recreated
+                                                   at 11:16:33 (remediation)
+      11:19:42     MCP ping                     <- routine keepalive
+      11:22:42-45  MCP initialize / tools/list  <- google-calendar-mcp
+                                                   recreated at 11:22:41
+      11:25:45     MCP ping                     <- routine keepalive
+  This is recorded because it exists, not to upgrade §14: it was performed
+  after the retry decision below had already been made, so it was not part
+  of that decision's basis, and a check performed two days later is not
+  the post-validation check §14 describes. §14 stays NOT EXERCISED.
 
 ROOT CAUSE (established, not inferred):
   The `hermes-agent` bind mount `./data/hermes -> /opt/data` was STALE.
@@ -1461,7 +1686,9 @@ STILL OUTSTANDING:
   `google-calendar-mcp` has the SAME stale bind mount
   (`./data/google-calendar -> /data/google-calendar`): host 2 entries,
   container 0, probe invisible. It was still "running (healthy)", since
-  its health check does not touch the mount. Not recreated yet.
+  its health check does not touch the mount. Not recreated at the time
+  this record was written; it was recreated at 11:22 UTC, before the next
+  attempt (see the 11:26 and 11:34 records).
 
 Per-criterion state (§9) -- one line each, none omitted:
   §5 fixed input           FAIL   (exercised; expected reply not observed)
@@ -1469,7 +1696,8 @@ Per-criterion state (§9) -- one line each, none omitted:
   trace / relationships    PASS   (6 spans, one trace id, `trace` exit 0)
   required-set sentinels   NOT EXERCISED
   provenance (§3)          PASS
-  side effects (§14)       PASS   (none observed in the window)
+  side effects (§14)       NOT EXERCISED  (§14.1 not performed; §14.2
+                                           and §14.3 found nothing)
 Overall result:          FAIL
                          (§9 aggregation: the worst state present)
 Verified subset:         The Slack → Orchestrator → Hermes wiring itself
@@ -1487,13 +1715,18 @@ Notes / limitations of this run:
                            not observed. The run is FAIL, not a near-miss,
                            and was NOT re-sent automatically (§11).
                          - Retry safety, decided and recorded per §11:
-                           repeating is judged SAFE. The turn failed at
-                           provider authentication, strictly before any
-                           inference, so no tool could have been selected
-                           or called; §14 observed zero file changes under
-                           data/hermes and a clean repository. This is a
-                           decision recorded with its basis, not an
-                           assumption that a known outcome is repeatable.
+                           repeating is judged SAFE. The basis, and only
+                           this basis: Hermes' own log shows the turn
+                           failing at provider authentication with no
+                           fallback, so no model call succeeded and no
+                           model-selected tool call is expected; §14.2
+                           found zero file changes under data/hermes; §14.3
+                           found a clean repository. §14.1 was NOT part of
+                           the basis, because it was not performed, so a
+                           tool call is ruled out by inference from the log
+                           rather than by observation. This is a decision
+                           recorded with its basis, not an assumption that
+                           a known outcome is repeatable.
                          - Because the remediation recreated hermes-agent,
                            the next attempt is a FRESH run starting from §3.
 ```

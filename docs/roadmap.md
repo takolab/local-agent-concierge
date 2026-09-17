@@ -824,15 +824,24 @@ Recorded as **partial**, not complete, because:
   absent (`scan` exit 0, bound to the request's own Orchestrator
   container), §3's source comparison matching the recorded SHA with zero
   `DIFFERS`, and §14 clean against a window anchored at §5's marker. The
-  criteria were merged at 07:38 UTC, before the run, and no runbook text
+  criteria were merged at 06:38 UTC, before the run, and no runbook text
   was changed during it. That run is recorded as the canonical `PASS`.
 
   A first attempt that day (11:09 UTC) is recorded as `FAIL`: the
   `hermes-agent` bind mount had gone stale after a Docker Desktop engine
   restart, so the container read a detached filesystem with no usable
   provider credential. The wiring itself was correct throughout — the
-  failure was downstream of it, in Hermes' model backend. That run is why
-  the runbook's bind-mount integrity check now exists.
+  failure was downstream of it, in Hermes' model backend. That failure is
+  why a positive-control bind-mount check was run as extra preflight before
+  the later attempts. It is **not** yet a runbook step — §4 still documents
+  only the otel-collector recovery — and adding it there is a separate
+  procedural change.
+
+  A second attempt (11:26 UTC) is recorded as `NOT A RUNBOOK PASS`. It met
+  five of six criteria, but §5's marker was never dropped, so §14's window
+  could only be reconstructed after the result was known. A post-hoc
+  anchor puts a judgement into the one step designed to be pre-committed,
+  so the run was not counted; the 11:34 run repeated it with the marker.
 
   **The earlier history, for context.** On
   2026-09-14 a run at 83ed28ad used the runbook's fixed input, captured
@@ -845,9 +854,10 @@ Recorded as **partial**, not complete, because:
   Orchestrator, which §12 does not excuse (docstrings are string
   constants, not comments), and §5 had no expected reply until one was
   written *after* this run's reply was observed. Both defects are fixed in
-  the runbook. Closing the gate now needs one further run against the
-  finalised procedure, with the Orchestrator rebuilt from the recorded
-  SHA. Still success path only.
+  the runbook. At that point, closing the gate needed one further run
+  against the finalised procedure, with the Orchestrator rebuilt from the
+  recorded SHA; the 2026-09-15 11:34 UTC run described above satisfied that
+  requirement. Still success path only.
   The procedure and the evidence record are in
   `docs/observability/slack-orchestrator-live-validation.md`.
 
@@ -1014,7 +1024,7 @@ only the two HTTP boundaries:
   on 2026-09-10: one real Slack message produced the joined
   `concierge.request` → `orchestrator.dispatch` → `POST /dispatch` →
   `hermes.request` → `/v1/responses` trace in Phoenix, present in MLflow
-  with `state=OK`. Five runs are recorded, and the 2026-09-15 11:34 UTC run
+  with `state=OK`. Six runs are recorded, and the 2026-09-15 11:34 UTC run
   **is the canonical `PASS`** — it closed the gate against criteria fixed
   before it ran. The 2026-09-14 run is what finalised the runbook's
   remaining ambiguities. See
