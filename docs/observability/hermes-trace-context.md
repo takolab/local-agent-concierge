@@ -195,41 +195,89 @@ one, even though Hermes' MCP client *is* independently instrumented and
 correctly parents whichever server it calls.
 
 This is a confirmed, tracked upstream issue, not something specific to this
-deployment:
+deployment. Upstream status below is **as of 2026-09-18**, checked via the
+GitHub REST API (`gh api repos/NousResearch/hermes-agent/...`); it will go
+stale, so re-check before relying on it:
 
 - [NousResearch/hermes-agent#60177](https://github.com/NousResearch/hermes-agent/issues/60177)
-  — Hermes has no OpenTelemetry SDK in its own source, and its outbound MCP
-  HTTP client sends no `traceparent`. Root cause per upstream triage: MCP
-  tool calls run on a separate event-loop ("daemon") thread, and Python
-  `contextvars` — which OpenTelemetry's active-span context relies on — do
-  not cross a `run_coroutine_threadsafe` thread boundary. This matches
-  exactly what was observed here: the trace visible on Hermes' MCP client
-  span has no parent, even while Hermes' HTTP server span (for the same
-  request) does correctly inherit the Slack Gateway's trace.
+  (issue, open) — Hermes has no OpenTelemetry SDK in its own source, and its
+  outbound MCP HTTP client sends no `traceparent`. Root cause per upstream
+  triage: MCP tool calls run on a separate event-loop ("daemon") thread, and
+  Python `contextvars` — which OpenTelemetry's active-span context relies
+  on — do not cross a `run_coroutine_threadsafe` thread boundary. This
+  matches exactly what was observed here: the trace visible on Hermes' MCP
+  client span has no parent, even while Hermes' HTTP server span (for the
+  same request) does correctly inherit the Slack Gateway's trace.
 - [NousResearch/hermes-agent#78965](https://github.com/NousResearch/hermes-agent/pull/78965)
-  (open, unmerged) — an opt-in fix (`mcp.trace_propagation: true`) built
-  around that root cause: it captures the caller's active span on the agent
-  thread *before* the thread boundary, then injects a fresh `traceparent`
-  per RPC (rather than once at connection time, which an earlier stalled
-  attempt, [#60466](https://github.com/NousResearch/hermes-agent/pull/60466),
-  got wrong). Tested (25 unit tests) and reportedly running in production
-  elsewhere since July.
-- [briancaffey/hermes-otel](https://github.com/briancaffey/hermes-otel) — a
-  separate, actively maintained third-party plugin providing a
-  `get_current_traceparent` provider hook for the same problem, which
-  NousResearch/hermes-agent#78965 is designed to also accept as a pluggable
-  override.
+  (PR, **closed without merging** on 2026-09-06 — withdrawn by its author) —
+  proposed an opt-in `mcp.trace_propagation: true` setting that injected a
+  W3C `traceparent` HTTP header per MCP RPC. The author's withdrawal comment
+  explains, in upstream's words and **not verified in this repository**:
+  - it targeted the wrong layer: the MCP Python SDK Hermes pins
+    (`mcp==2.0.0`) already propagates trace context in-protocol via the
+    JSON-RPC `_meta` field (SEP-414), so the header was redundant;
+  - what is actually missing is only the *parent* of the SDK's
+    `MCP send tools/call` span — `_run_on_mcp_loop` hands the RPC to the
+    loop thread via `run_coroutine_threadsafe`, where the agent thread's
+    active span is not visible, so that span is always a root;
+  - a plugin alone cannot fix it, because hook callbacks run on worker
+    threads under `contextvars.copy_context()`;
+  - the author said they would separately propose an opt-in
+    `mcp_call_context` hook instead. As of 2026-09-18 no such proposal has
+    been filed (a GitHub issue/PR search of NousResearch/hermes-agent for
+    `mcp_call_context` returns zero results).
 
-**Planned approach for this repository:** wait for #78965 (or a successor to
-#60466) to merge upstream, then bump the pinned tag in
-`apps/hermes-agent/Dockerfile` (currently `nousresearch/hermes-agent:v2026.8.19`)
-and set `mcp.trace_propagation: true` in Hermes' own config. No patch to
-Hermes source or additional auto-instrumentation layer would be needed —
-this keeps the same "unmodified vendor image" approach used everywhere else
-in this file. This is deliberately not implemented yet: merge timing is not
-in this repository's control, and forking/vendoring the upstream patch
-directly (rather than waiting) would depart from that convention for an
-otherwise-untested integration against this project's pinned version.
+  The in-protocol part is consistent with what this repository has itself
+  observed: Google Calendar MCP's extraction of a `traceparent` from `_meta`
+  is covered by an in-repo test, and a live run showed Hermes Agent's
+  `MCP send tools/call` spans and Google Calendar MCP's server spans sharing
+  a trace ID with correct parenting (see "Incoming trace context" in
+  `docs/observability/google-calendar-mcp-telemetry.md`). Which code path in
+  Hermes or the SDK injects that context was not inspected here. The
+  `mcp.trace_propagation` setting existed only on that closed PR and is not
+  something this repository plans around.
+- [NousResearch/hermes-agent#60466](https://github.com/NousResearch/hermes-agent/pull/60466)
+  (PR, open, unmerged; no activity since 2026-07-15) — an earlier attempt
+  that also adds a `traceparent` HTTP header, i.e. the same layer the #78965
+  withdrawal comment calls wrong. Upstream's own review of it (an automated
+  `hermes-sweeper` review, 2026-07-15, verdict "keep open") says it does not
+  yet propagate an agent call's active trace context: it injects the header
+  once at connection time rather than per tool call, and it does so on the
+  MCP event-loop thread, where the caller's span is not visible. A merge of
+  #60466 in its current shape would therefore not by itself resolve #60177.
+- [briancaffey/hermes-otel](https://github.com/briancaffey/hermes-otel) — a
+  separate third-party plugin providing a `get_current_traceparent` provider
+  hook for the same problem. #78965 had been designed to accept it as a
+  pluggable override; with that PR closed, there is no upstream mechanism for
+  it to plug into. Per the #78965 withdrawal comment (not verified here),
+  observer plugins such as this one cannot make the SDK's MCP span a child of
+  their own tool span, for the thread-boundary reason above.
+
+The release notes of the five most recent Hermes releases as of 2026-09-18
+(v2026.8.27, v2026.8.31, v2026.9.7, v2026.9.11, v2026.9.14) do not mention
+MCP trace propagation.
+
+**Planned approach for this repository:** wait for an upstream change that
+resolves #60177 by preserving the caller's active trace context across the
+MCP event-loop thread boundary, and ships in a Hermes release. That change
+could be a revised #60466, the announced (not yet filed) `mcp_call_context`
+hook proposal, or something else. The acceptance condition is that behavior,
+not a particular PR number merging. Once such a release exists, bump the
+pinned tag in `apps/hermes-agent/Dockerfile` (currently
+`nousresearch/hermes-agent:v2026.8.19`) and apply whatever configuration that
+fix requires. What that configuration will be is not known yet. No Hermes
+source patch or fork, and no auto-instrumentation beyond the existing
+derived-image layer described above, is planned. This keeps the invariant the
+rest of this file follows: Hermes' own source is never modified, even though
+the image itself is a derived one. This is deliberately not implemented
+yet: the timing and shape of an upstream fix are not in this repository's
+control, and forking/vendoring an upstream patch directly (rather than
+waiting) would break that invariant for an otherwise-untested integration
+against this project's pinned version.
+
+Joining these traces would be an observability improvement only: it would
+show Hermes' MCP calls under the request's trace. It would not by itself
+prove that a given tool call did or did not have side effects.
 
 ## Ownership boundary
 
