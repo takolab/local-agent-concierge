@@ -532,14 +532,19 @@ unmodified vendor image), out of scope here; see
 evidence and what a follow-up would require.
 
 This matches a confirmed, tracked upstream issue
-([NousResearch/hermes-agent#60177](https://github.com/NousResearch/hermes-agent/issues/60177))
-with an open, unmerged fix
-([NousResearch/hermes-agent#78965](https://github.com/NousResearch/hermes-agent/pull/78965)).
-The planned approach for this repository — recorded in
-`docs/observability/hermes-trace-context.md` — is to wait for that (or a
-successor) to merge upstream, then bump the pinned tag in
-`apps/hermes-agent/Dockerfile` and enable its `mcp.trace_propagation: true`
-config, rather than patching Hermes Agent source directly.
+([NousResearch/hermes-agent#60177](https://github.com/NousResearch/hermes-agent/issues/60177),
+open). As of 2026-09-18 there is no upstream fix: the opt-in fix PR
+([NousResearch/hermes-agent#78965](https://github.com/NousResearch/hermes-agent/pull/78965))
+was withdrawn by its author and closed unmerged on 2026-09-06, an earlier
+attempt ([#60466](https://github.com/NousResearch/hermes-agent/pull/60466))
+is open but inactive since July, and the author's announced replacement
+proposal has not been filed. The planned approach for this repository —
+recorded, with upstream's stated reasons and what is and isn't verified
+here, in the "Known gap" section of
+`docs/observability/hermes-trace-context.md` — is still to wait for an
+upstream fix to ship in a Hermes release, then bump the pinned tag in
+`apps/hermes-agent/Dockerfile` and apply whatever configuration that fix
+requires, rather than patching Hermes Agent source directly.
 
 ### Verified Collector-Side Redaction
 
