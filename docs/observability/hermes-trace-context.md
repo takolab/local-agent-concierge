@@ -239,9 +239,12 @@ stale, so re-check before relying on it:
 - [NousResearch/hermes-agent#60466](https://github.com/NousResearch/hermes-agent/pull/60466)
   (PR, open, unmerged; no activity since 2026-07-15) — an earlier attempt
   that also adds a `traceparent` HTTP header, i.e. the same layer the #78965
-  withdrawal comment calls wrong. #78965's description says it stalled in
-  review because it injected context once at connection time rather than
-  per RPC.
+  withdrawal comment calls wrong. Upstream's own review of it (an automated
+  `hermes-sweeper` review, 2026-07-15, verdict "keep open") says it does not
+  yet propagate an agent call's active trace context: it injects the header
+  once at connection time rather than per tool call, and it does so on the
+  MCP event-loop thread, where the caller's span is not visible. A merge of
+  #60466 in its current shape would therefore not by itself resolve #60177.
 - [briancaffey/hermes-otel](https://github.com/briancaffey/hermes-otel) — a
   separate third-party plugin providing a `get_current_traceparent` provider
   hook for the same problem. #78965 had been designed to accept it as a
@@ -254,19 +257,23 @@ The release notes of the five most recent Hermes releases as of 2026-09-18
 (v2026.8.27, v2026.8.31, v2026.9.7, v2026.9.11, v2026.9.14) do not mention
 MCP trace propagation.
 
-**Planned approach for this repository:** wait for an upstream fix — #60466,
-the announced (not yet filed) `mcp_call_context` hook proposal, or another
-change resolving #60177 — to land in a Hermes release, then bump the pinned
-tag in `apps/hermes-agent/Dockerfile` (currently
+**Planned approach for this repository:** wait for an upstream change that
+resolves #60177 by preserving the caller's active trace context across the
+MCP event-loop thread boundary, and ships in a Hermes release. That change
+could be a revised #60466, the announced (not yet filed) `mcp_call_context`
+hook proposal, or something else. The acceptance condition is that behavior,
+not a particular PR number merging. Once such a release exists, bump the
+pinned tag in `apps/hermes-agent/Dockerfile` (currently
 `nousresearch/hermes-agent:v2026.8.19`) and apply whatever configuration that
-fix requires. What that configuration will be is not known yet. No patch to
-Hermes source or additional auto-instrumentation layer is planned — this
-keeps the same "unmodified vendor image" approach used everywhere else in
-this file. This is deliberately not implemented yet: the timing and shape of
-an upstream fix are not in this repository's control, and forking/vendoring
-an upstream patch directly (rather than waiting) would depart from that
-convention for an otherwise-untested integration against this project's
-pinned version.
+fix requires. What that configuration will be is not known yet. No Hermes
+source patch or fork, and no auto-instrumentation beyond the existing
+derived-image layer described above, is planned. This keeps the invariant the
+rest of this file follows: Hermes' own source is never modified, even though
+the image itself is a derived one. This is deliberately not implemented
+yet: the timing and shape of an upstream fix are not in this repository's
+control, and forking/vendoring an upstream patch directly (rather than
+waiting) would break that invariant for an otherwise-untested integration
+against this project's pinned version.
 
 Joining these traces would be an observability improvement only: it would
 show Hermes' MCP calls under the request's trace. It would not by itself
